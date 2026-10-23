@@ -581,13 +581,12 @@ def _reload(old: "GLRenderer", loader, ctx, fps):
     """Build the edited patch; on success swap renderers, carrying each output's last frame over."""
     import traceback
     from .live import ResourceStage
-    from .controls import apply_controls
+    from .controls import carry_controls
     new = None
     try:
         with ResourceStage() as stage:
             patch = loader()
-            apply_controls(patch, {k: v.snapshot() for k, v in old.patch.controls.items()})
-            patch.render(patch.outputs[old.patch.display.index])
+            carry_controls(old.patch, patch)
             new = GLRenderer(patch, size=old.size, ctx=ctx, fps=fps)
             for name, o in old.outs.items():
                 if name in new.outs:

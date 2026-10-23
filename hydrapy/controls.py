@@ -26,6 +26,7 @@ class Param(Signal):
             raise ValueError('log sliders require positive bounds')
         self.base, self.modulation, self.depth = self.default, None, 0.
         self.mod_kind, self.mod_rate = 'none', .1
+        self._bound = None                # (signal, depth) from bind(): what "Declared in patch" restores
         p = patch or default_patch()
         if self.name in p.controls:
             raise ValueError(f'duplicate control name: {self.name}')
@@ -48,7 +49,13 @@ class Param(Signal):
             raise ValueError('modulation depth must be finite')
         self.modulation, self.depth = as_signal(signal), depth
         self.mod_kind = 'patch'
+        self._bound = (self.modulation, depth)
         return self
+
+    def declaration(self):
+        """What the patch source says about this control (not what the performer has done to it)."""
+        bound = None if self._bound is None else (type(self._bound[0]).__name__, self._bound[1])
+        return dict(default=self.default, bound=bound)
 
     def set_modulation(self, kind='none', depth=0., rate=.1):
         depth, rate = float(depth), float(rate)
@@ -70,7 +77,7 @@ class Param(Signal):
     def describe(self):
         return dict(name=self.name, default=self.default, min=self.min, max=self.max, step=self.step,
                     unit=self.unit, scale=self.scale, group=self.group, description=self.description,
-                    **self.snapshot())
+                    declared=self._bound is not None, **self.snapshot())
 
 
 def apply_controls(patch, values):
@@ -86,7 +93,7 @@ def apply_controls(patch, values):
         rate, depth = float(entry.get('rate', p.mod_rate)), float(entry.get('depth', p.depth))
         if not all(math.isfinite(x) for x in (value, rate, depth)) or rate <= 0 or kind not in ('none', 'lfo', 'beat', 'patch'):
             raise ValueError(f'invalid control setting: {name}')
-        if kind == 'patch' and p.mod_kind != 'patch':
+        if kind == 'patch' and p._bound is None:
             raise ValueError(f'{name}: preset requires modulation declared in the patch')
         prepared.append((p, value, kind, depth, rate))
     for p, value, kind, depth, rate in prepared:
@@ -94,4 +101,28 @@ def apply_controls(patch, values):
         if kind != 'patch':
             p.set_modulation(kind, depth, rate)
         else:
-            p.depth = depth
+            p.modulation, p.mod_kind, p.depth = p._bound[0], 'patch', depth
+
+
+def carry_controls(old, new):
+    """Carry the performance across a reload without overriding the edit.
+
+    A control keeps its live value only if the edit left its default alone, and its modulation
+    (the performer's choice of none/LFO/beat, or depth on a declared bind) only if the edit left its
+    ``bind()`` alone; otherwise the new code wins.  The output on screen stays the one chosen in the
+    session unless the edit changed the patch's ``render()``.
+    """
+    for name, p in new.controls.items():
+        q = old.controls.get(name)
+        if q is None:
+            continue
+        was, now = q.declaration(), p.declaration()
+        if was['default'] == now['default']:
+            p.set(q.base)
+        if was['bound'] == now['bound']:
+            if q.mod_kind == 'patch':
+                p.depth = q.depth
+            else:
+                p.set_modulation(q.mod_kind, q.depth, q.mod_rate)
+    if getattr(old, 'declared_display', None) == getattr(new, 'declared_display', None):
+        new.render(new.outputs[old.display.index])
