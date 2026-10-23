@@ -86,6 +86,7 @@ class Signal:
     def __truediv__(self, o): return Expr("/", self, o)
     def __rtruediv__(self, o): return Expr("/", o, self)
     def __pow__(self, o): return Expr("**", self, o)
+    def __rpow__(self, o): return Expr("**", o, self)       # 2 ** volts: 1 V/oct
     def __mod__(self, o): return Expr("%", self, o)
     def __neg__(self): return Expr("*", self, -1.0)
 

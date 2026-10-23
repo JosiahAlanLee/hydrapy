@@ -614,3 +614,49 @@ def test_studie_and_cutout_recipes_render():
     assert np.isfinite(b).all() and 0.1 < b[..., :3].mean() < 0.95
     assert len(compile_patch()) == 2
     reset_patch()
+
+
+def test_soundtrack_keeps_its_own_clock_and_follows_a_frame_hold():
+    import math
+    p = Patch(size=(64, 36))
+    osc(10 * 2 * math.pi, 0, 0).rotate(1.5708).out(p.o0, patch=p)
+    tr = Soundtrack(p.o0, fps=24, patch=p)
+    r = Renderer(p, size=(64, 36), fps=48)                     # rendered twice as fast as the track reads
+    for i in range(96):
+        r.step(i / 48)
+    assert len(tr.chunks) == 48 and abs(tr.duration - 2.0) < 0.01
+    p2 = Patch(size=(64, 36)); p2.frame_rate = 18                # Super 8 sound ran at 18 frames a second
+    osc(10 * 2 * math.pi, 0, 0).rotate(1.5708).out(p2.o0, patch=p2)
+    tr2 = Soundtrack(p2.o0, fps=24, patch=p2)
+    r2 = Renderer(p2, size=(64, 36), fps=24)
+    for i in range(48):
+        r2.step(i / 24)
+    assert tr2.rate == 18 and len(tr2.chunks) == 36 and abs(tr2.duration - 2.0) < 0.01
+
+
+def test_cvout_carries_a_soundtrack_at_audio_rate(tmp_path):
+    import math
+    import wave as wavemod
+    from hydrapy.live import AudioQueue, CvOut, clear_hooks
+    p = Patch(size=(64, 36))
+    osc(10 * 2 * math.pi, 0, 0).rotate(1.5708).out(p.o0, patch=p)
+    tr = Soundtrack(p.o0, fps=24, gain=0.5, patch=p)             # ±0.5 FS: ±5 V out of an ES-3
+    out = CvOut(file=str(tmp_path / "cv.wav"), channels=(0, 1), fps=24, samplerate=48000)
+    out.send(0, tr).send(1, Lfo(0.5, lo=0, hi=5))
+    r = Renderer(p, size=(64, 36), fps=24)
+    for i in range(48):
+        r.step(i / 24)
+    out.close(); out.close()                                     # idempotent
+    clear_hooks()
+    with wavemod.open(str(tmp_path / "cv.wav")) as w:
+        sr, data = w.getframerate(), np.frombuffer(w.readframes(w.getnframes()), "<i2").reshape(-1, w.getnchannels()) / 32767.0
+    assert sr == 48000 and data.shape[1] == 2 and abs(data.shape[0] - 96000) < 100       # rounding per frame: 0.03% long
+    spec = np.abs(np.fft.rfft(data[:, 0] * np.hanning(len(data)))); fr = np.fft.rfftfreq(len(data), 1 / sr); spec[fr < 30] = 0
+    assert abs(fr[spec.argmax()] - 240) < 2 and 0.45 < np.abs(data[:, 0]).max() < 0.56      # the drawn tone, resampled, at ±5 V
+    assert data[:, 1].min() > -0.01 and abs(data[:, 1].max() - 0.5) < 0.02                  # the CV beside it, 0..5 V
+    # the live queue: resamples, pulls across chunk boundaries, holds the last chunk when it runs dry
+    tr.listeners.clear()
+    q = AudioQueue(tr, 48000)
+    q.push(np.linspace(-1, 1, 1837, dtype=np.float32)); q.push(np.full(1837, 0.5, np.float32))
+    a, b = q.pull(3000), q.pull(3000)
+    assert a[0] == -1 and a[1998] > 0.99 and a[1999] == 0.5 and (b == 0.5).all()           # 1837 @ 44.1k -> 1999 @ 48k

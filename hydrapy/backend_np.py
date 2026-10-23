@@ -221,7 +221,7 @@ class Renderer:
         self.frame += 1
         for pr in self.patch.probes:
             x0, y0, w, h = pr.region(self.env.w, self.env.h)
-            pr.update(self.env.texture(pr.output)[y0:y0 + h, x0:x0 + w])
+            pr.update(self.env.texture(pr.output)[y0:y0 + h, x0:x0 + w], ctx.time)
         from .live import run_hooks
         run_hooks(ctx, self)
         return self.displayed()

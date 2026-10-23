@@ -201,7 +201,7 @@ class GLRenderer:
             x0, y0, w, h = pr.region(self.size[0], self.size[1])
             fbo = self.outs[pr.output.name]["ring"][0]["fbo"]
             data = fbo.read(viewport=(x0, y0, w, h), components=4, dtype="f4")
-            pr.update(np.frombuffer(data, dtype=np.float32).reshape(h, w, 4))
+            pr.update(np.frombuffer(data, dtype=np.float32).reshape(h, w, 4), self.ctx_time)
 
     def _swap(self, output: Output):
         ring = self.outs[output.name]["ring"]

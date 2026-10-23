@@ -309,6 +309,14 @@ latency), on both backends; that's the image as a sequencer. `CvOut(file="cv.wav
 the voltages as a multichannel WAV during an offline render instead, to play from the DAW into the
 ES-3 next to the video.
 
+**Audio out: the painted oscillator.** `out.send(k, Soundtrack(o0, x=0.5, gain=0.5))` sends a drawn
+soundtrack (below) down an ES-3 channel at audio rate — a VCO made of charcoal, ±5 V, to be put
+through a filter — while the other channels carry CVs, and the ES-6 brings pitch, wobble and grit
+back in. `patches/26_painted_oscillator.py` is that loop: a `wave` stroke standing upright down the
+middle of the frame, the column through it read as the waveform, 1 V/oct from `wave(2 ** pitch * 2)`
+(`pitch` a `CvIn` channel in volts); a damped `harmonograph` as a second, rougher voice. The file
+mode records the audio channels too.
+
 **OSC.** `OscIn(57120).value("/synth/freq", default, lo, hi, smooth)`, `.trig("/kick")`;
 `OscOut(host, port).send("/addr", signal_or_probe)`. VCV Rack's cvOSCcv makes this a second CV path
 without hardware.
@@ -434,9 +442,12 @@ track = Soundtrack(o0, x=0.5)                              # what you see down t
 save_mp4(render_frames(seconds=12, fps=24), "ornament.mp4", fps=24, audio=track)   # or `hydrapy render ... --out x.mp4`
 ```
 
-`docs/ornament_sound.mp4` is twelve seconds of it. The HTML export plays the track live
+`docs/ornament_sound.mp4` is twelve seconds of it. The track keeps its own clock (a frame is read
+only when 1/fps has passed, so a 60 fps window and a 24 fps render sound the same) and follows a
+frame hold (`set_frame_rate(18)` reads at 18, as Super 8 sound did). The HTML export plays it live
 (`readPixels` of the strip into the audio output; click to start), so a browser patch can score
-itself; the GL window is silent unless you route `track.samples` yourself — a `CvOut` channel, say.
+itself; `CvOut().send(k, track)` plays it out of a DC-coupled interface into the modular (see the
+modular section above).
 
 ## Op reference
 

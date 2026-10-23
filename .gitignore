@@ -5,7 +5,7 @@ __pycache__/
 *.gif
 !docs/*.gif
 *.mp4
-!docs/tour.mp4
+!docs/*.mp4
 *.html
 !patches/*.html
 *.wav

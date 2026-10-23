@@ -189,6 +189,7 @@ COMBINATIONS = [
     ("24_cutout.py", "o0", "cut paper, on twos", 3),
     ("24_cutout.py", "o2", "a title card (КИНО)", 3),
     ("25_ornament_sound.py", "o1", "ornament sound: the patch draws its soundtrack", 3),
+    ("26_painted_oscillator.py", "o1", "a painted oscillator, patched into the modular", 4),
 ]
 
 

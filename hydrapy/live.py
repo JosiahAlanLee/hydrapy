@@ -585,8 +585,12 @@ class CvOut:
     ``channels[k]`` to the signal's value in volts, every frame, ramped across the audio block so the
     modular sees a smooth voltage.  The ES-3 is ±10 V at full scale (``volts_per_fs=10``).
 
-    ``CvOut(file="cv.wav", ...)`` records the same voltages to a multichannel WAV instead (call
-    ``close()`` when the render is done) to play back from a DAW into the ES-3 alongside the video.
+    ``send(k, soundtrack)`` routes a ``Soundtrack`` at audio rate instead: the picture's drawn
+    waveform leaves the interface as sound (a VCO made of charcoal — patch it into a filter).
+
+    ``CvOut(file="cv.wav", ...)`` records the same voltages (and soundtracks) to a multichannel WAV
+    instead (call ``close()`` when the render is done) to play back from a DAW into the ES-3
+    alongside the video.
     """
 
     def __init__(self, device=None, channels: Sequence[int] = (0, 1), samplerate: Optional[int] = None,
@@ -594,6 +598,7 @@ class CvOut:
         self.channels = list(channels)
         self.volts_per_fs = float(volts_per_fs)
         self.routes: dict[int, Signal] = {}
+        self.audio_routes: dict[int, AudioQueue] = {}
         self._target = np.zeros(len(self.channels), dtype=np.float32)
         self._current = np.zeros(len(self.channels), dtype=np.float32)
         self.file = file
@@ -612,7 +617,14 @@ class CvOut:
         register_hook(self.tick)
 
     def send(self, k: int, signal) -> "CvOut":
+        if isinstance(signal, Soundtrack):
+            if k in self.audio_routes:
+                self.audio_routes[k].close()
+            self.audio_routes[k] = AudioQueue(signal, self.samplerate)
+            self.routes.pop(k, None)
+            return self
         from .signals import as_signal
+        self.audio_routes.pop(k, None)
         self.routes[k] = as_signal(signal)
         return self
 
@@ -629,27 +641,46 @@ class CvOut:
         block = self._current[None, :] + (self._target - self._current)[None, :] * ramp
         for i, ch in enumerate(self.channels):
             outdata[:, ch] = np.clip(block[:, i], -1.0, 1.0)
+        for i, q in self.audio_routes.items():
+            outdata[:, self.channels[i]] = np.clip(q.pull(frames), -1.0, 1.0)
         self._current[:] = self._target
 
     def close(self):
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
         if self.stream is not None:
             self.stream.stop(); self.stream.close()
-        if self.file is not None and self._frames:
-            import wave
+        for q in self.audio_routes.values():
+            q.close()
+        if self.file is None:
+            return
+        import wave
+        nchan = max(self.channels) + 1
+        out = np.zeros((0, nchan), dtype=np.float32)
+        if self._frames:
             per = max(int(round(self.samplerate / self.fps)), 1)
             frames = np.array(self._frames, dtype=np.float32)                 # (nframes, nchan)
             prev = np.vstack([frames[:1], frames[:-1]])
             ramp = np.linspace(0.0, 1.0, per, endpoint=False, dtype=np.float32)
             sig = prev[:, None, :] + (frames - prev)[:, None, :] * ramp[None, :, None]   # (nframes, per, nchan)
             sig = np.clip(sig.reshape(-1, frames.shape[1]), -1.0, 1.0)
-            nchan = max(self.channels) + 1
             out = np.zeros((sig.shape[0], nchan), dtype=np.float32)
             for i, ch in enumerate(self.channels):
                 out[:, ch] = sig[:, i]
+        for i, q in self.audio_routes.items():               # a drawn soundtrack, resampled to the file's rate
+            tr = q.track
+            a = tr.samples
+            if tr.sr != self.samplerate and len(a):
+                a = np.interp(np.linspace(0.0, len(a) - 1, int(round(len(a) * self.samplerate / tr.sr))), np.arange(len(a)), a)
+            if len(a) > out.shape[0]:
+                out = np.vstack([out, np.zeros((len(a) - out.shape[0], nchan), dtype=np.float32)])
+            out[: len(a), self.channels[i]] = np.clip(a, -1.0, 1.0)
+        if out.shape[0]:
             with wave.open(self.file, "wb") as w:
                 w.setnchannels(nchan); w.setsampwidth(2); w.setframerate(self.samplerate)
                 w.writeframes((out * 32767).astype("<i2").tobytes())
-            self._frames = []
+        self._frames = []
 
 
 # -----------------------------------------------------------------------------
@@ -671,6 +702,7 @@ class Probe(Signal):
         self.x, self.y, self.size, self.channel = float(x), float(y), float(size), channel
         self.lo, self.hi = float(lo), float(hi)
         self.live = LiveValue(f"probe({self.output.name})", 0.0, smooth=smooth)
+        self.patch = p
         p.probes.append(self)
 
     def region(self, width: int, height: int):
@@ -682,8 +714,8 @@ class Probe(Signal):
         y0 = min(max(y0, 0), max(height - h, 0))
         return x0, y0, w, h
 
-    def update(self, rgba: np.ndarray):
-        """Feed the region's pixels, (h, w, 4) float, any row order."""
+    def update(self, rgba: np.ndarray, t: Optional[float] = None):
+        """Feed the region's pixels, (h, w, 4) float, any row order (``t``: the frame's time, if known)."""
         if self.channel == "luma":
             v = float((rgba[..., 0] * 0.2125 + rgba[..., 1] * 0.7154 + rgba[..., 2] * 0.0721).mean())
         else:
@@ -704,21 +736,28 @@ class Soundtrack(Probe):
     to bottom, and its luminance is the waveform for the next 1/``fps`` of a second — variable-density
     sound-on-film, the way Fischinger's *Ornament Sound* and the Soviet graphical-sound films
     (Avraamov, Sholpo's Variophone, Yankovsky) drew their music onto the track.  Horizontal stripes
-    at *n* cycles per frame height sound at *n × fps* Hz: ``osc(10).rotate(1.5708)`` at 24 fps is a
-    240 Hz tone; a stripe pattern scrolling up is a continuous waveform, a still picture repeats
-    once a frame.  ``ac`` removes the DC (a one-pole high-pass at 20 Hz), ``gain`` scales ±1.
+    at *n* cycles per frame height sound at *n × fps* Hz: ``osc(10 * 6.2832).rotate(1.5708)`` at 24 fps
+    is a 240 Hz tone; a still picture repeats once a frame, so a non-integer *n* buzzes at the frame
+    rate unless the pattern advances the fractional cycle per frame.  ``ac`` removes the DC (a one-pole
+    high-pass at 20 Hz), ``gain`` scales ±1 full scale (±10 V out of an ES-3; 0.5 for modular levels).
 
-    Render, then ``wav(path)``, or ``save_mp4(frames, path, fps, audio=track)``.  The HTML export
-    plays it live (``readPixels`` of the strip into a ScriptProcessor); the GL window is silent
-    unless you pipe ``samples`` somewhere yourself.  As a Probe it is also a signal: the strip's
-    mean brightness, one frame late.
+    The track keeps its own clock: a frame is read only when 1/``fps`` has passed since the last
+    one, so a 60 fps window and a 24 fps render sound the same.  Render, then ``wav(path)``, or
+    ``save_mp4(frames, path, fps, audio=track)``; ``CvOut().send(k, track)`` plays it out of a
+    DC-coupled interface at audio rate, live; the HTML export plays it in the page.  As a Probe it is
+    also a signal: the strip's mean brightness, one frame late.  ``record=False`` keeps nothing
+    (for long live sets); otherwise the last ``keep`` seconds are kept.
     """
 
     def __init__(self, output: Optional[Output] = None, x: float = 0.98, width: float = 0.01, fps: float = 24.0,
-                 sr: int = 44100, gain: float = 1.0, ac: bool = True, patch: Optional[Patch] = None):
+                 sr: int = 44100, gain: float = 1.0, ac: bool = True, record: bool = True, keep: float = 1200.0,
+                 patch: Optional[Patch] = None):
         super().__init__(output, x=x, y=0.5, size=1.0, channel="luma", patch=patch)
         self.width, self.fps, self.sr, self.gain, self.ac = float(width), float(fps), int(sr), float(gain), bool(ac)
+        self.record, self.keep = bool(record), float(keep)
         self.chunks: list[np.ndarray] = []
+        self.listeners: list[Callable[[np.ndarray], None]] = []
+        self._last_t: Optional[float] = None
         self._hp_x = 0.0
         self._hp_y = 0.0
         self._hp_a = math.exp(-2.0 * math.pi * 20.0 / self.sr)
@@ -729,13 +768,30 @@ class Soundtrack(Probe):
         x0 = min(max(x0, 0), max(width - w, 0))
         return x0, 0, w, height
 
-    def update(self, rgba: np.ndarray):
+    @property
+    def rate(self) -> float:
+        """Frames of track per second: the patch's frame hold if it has one (Super 8 sound ran at 18), else ``fps``."""
+        return float(self.patch.frame_rate) if getattr(self.patch, "frame_rate", None) else self.fps
+
+    def update(self, rgba: np.ndarray, t: Optional[float] = None):
         col = (rgba[..., 0] * 0.2125 + rgba[..., 1] * 0.7154 + rgba[..., 2] * 0.0721).mean(axis=1)[::-1]  # top to bottom
         self.live.set(float(col.mean()))
-        self.chunks.append(self._frame_audio(np.asarray(col, dtype=np.float64)))
+        fps = self.rate
+        if t is not None and self._last_t is not None and t - self._last_t < 1.0 / fps - 1e-6:
+            return                                        # the track runs at its own fps, whatever the renderer's
+        if t is not None:
+            self._last_t = t if self._last_t is None else self._last_t + math.floor((t - self._last_t) * fps + 1e-6) / fps
+        chunk = self._frame_audio(np.asarray(col, dtype=np.float64))
+        if self.record:
+            self.chunks.append(chunk)
+            limit = int(self.keep * fps)
+            if len(self.chunks) > limit:
+                del self.chunks[: len(self.chunks) - limit]
+        for fn in self.listeners:
+            fn(chunk)
 
     def _frame_audio(self, col: np.ndarray) -> np.ndarray:
-        n = int(round(self.sr / self.fps))
+        n = int(round(self.sr / self.rate))
         h = len(col)
         x = (col - 0.5) * 2.0 * self.gain
         y = np.interp((np.arange(n) + 0.5) * h / n - 0.5, np.arange(h), x)
@@ -760,6 +816,7 @@ class Soundtrack(Probe):
 
     def clear(self):
         self.chunks = []
+        self._last_t = None
         self._hp_x = self._hp_y = 0.0
 
     def wav(self, path: str) -> str:
@@ -773,7 +830,52 @@ class Soundtrack(Probe):
         return path
 
     def spec(self) -> dict:
-        return {"output": self.output.name, "x": self.x, "width": self.width, "fps": self.fps, "gain": self.gain, "ac": self.ac}
+        return {"output": self.output.name, "x": self.x, "width": self.width, "fps": self.rate, "gain": self.gain, "ac": self.ac}
+
+
+class AudioQueue:
+    """Audio-rate chunks from a Soundtrack, resampled to a stream's rate and pulled block by block
+    from the audio callback.  Runs dry -> the last chunk repeats (the sound of a held frame)."""
+
+    def __init__(self, track: Soundtrack, samplerate: int):
+        self.track, self.samplerate = track, int(samplerate)
+        self._q: list[np.ndarray] = []
+        self._pos = 0
+        self._last = np.zeros(max(int(round(self.samplerate / track.rate)), 1), np.float32)
+        self._lock = threading.Lock()
+        track.listeners.append(self.push)
+
+    def push(self, chunk: np.ndarray):
+        if self.samplerate != self.track.sr:
+            n = int(round(len(chunk) * self.samplerate / self.track.sr))
+            chunk = np.interp(np.linspace(0.0, len(chunk) - 1, n), np.arange(len(chunk)), chunk).astype(np.float32)
+        with self._lock:
+            self._q.append(chunk)
+            if len(self._q) > 6:                          # the renderer is ahead of real time: let it go
+                del self._q[: len(self._q) - 6]
+                self._pos = 0
+
+    def pull(self, n: int) -> np.ndarray:
+        out = np.empty(n, np.float32)
+        i = 0
+        with self._lock:
+            while i < n:
+                if not self._q:
+                    self._q.append(self._last)
+                    self._pos = 0
+                c = self._q[0]
+                take = min(n - i, len(c) - self._pos)
+                out[i:i + take] = c[self._pos:self._pos + take]
+                i += take
+                self._pos += take
+                if self._pos >= len(c):
+                    self._last = self._q.pop(0)
+                    self._pos = 0
+        return out
+
+    def close(self):
+        if self.push in self.track.listeners:
+            self.track.listeners.remove(self.push)
 
 
 # -----------------------------------------------------------------------------
