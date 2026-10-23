@@ -1,12 +1,14 @@
 """Recipes: Python functions that compose chains. Nothing here is a new op; it is how the
-paint-on-film ops are meant to be put together.  Copy, edit, ignore.
+paint-on-film and video-decay ops are meant to be put together.  Copy, edit, ignore.
 
     from hydrapy import *
-    from hydrapy.recipes import handpainted, mothlight, film
+    from hydrapy.recipes import handpainted, mothlight, film, vhs, super8
 
     film(handpainted(seed=SH(8, 0, 99), strip=0)).out(o0)     # a new painting every 1/8 s
     film(handpainted(seed=3, strip=24)).out(o1)                # one long painted strip running at 24 fps
     film(mothlight(bank=Bank("wings/"))).out(o2)               # your light-table photos, step-printed
+    vhs(osc(8).kaleid(3), generation=3).out(o3)                # a third-generation dub
+    super8(src(Image("holiday.jpg")), stock=2).out(o0)         # faded Super 8, 18 fps
 
 Three ways to get Brakhage's time:
   * a fresh painting per frame:   seed=SH(24, 0, 99)      (SH(8, …) holds each one for three frames: step printing)
@@ -17,7 +19,8 @@ from __future__ import annotations
 
 from typing import Optional, Sequence
 
-from . import (Chain, Drift, Lfo, SH, Seq, Signal, Time, crackle, drops, dust, fbm, scratches, solid, src, veins)
+from . import (Chain, Drift, Lfo, SH, Seq, Signal, Time, crackle, drops, dust, fbm, scratches, set_frame_rate, solid, src, veins)
+from . import dropouts as _dropouts, gate as _gate
 
 
 def _offset(seed, k: float):
@@ -105,4 +108,69 @@ def film(chain: Chain, grain: float = 0.08, flicker: float = 0.06, weave: float 
         out = out.grain(grain, fps)
     if vignette:
         out = out.vignette(vignette, 0.55)
+    return out
+
+
+def vhs(chain: Chain, tracking: float = 0.5, bleed: float = 0.5, noise: float = 0.3, dropouts: float = 0.5,
+        ringing: float = 0.5, generation: int = 1, fps: float = 30, seed: float = 0.0) -> Chain:
+    """The picture recorded to tape and played back: composite colour bleed, edge ringing, line
+    jitter and a drifting tracking band, head-switching tear at the bottom, dropouts, hiss.
+
+    ``generation`` dubs the tape onto itself that many times; every copy is a little softer,
+    noisier and shakier than the last (three or four is where the picture starts to swim).
+    Every strength is 0..1-ish; 0 switches that stage off.
+    """
+    out = chain
+    gens = max(int(generation), 1)
+    for g in range(gens):
+        k = 1.0 + 0.6 * g                                   # each dub is worse than the one before
+        out = out.yiq(0.008 + 0.03 * bleed * k, 1.0 + 2.0 * bleed * k, 0.002 + 0.005 * bleed * k)
+        if ringing:
+            out = out.ringing(0.6 * ringing, 2 + g)
+        if tracking:
+            out = out.linejitter(0.006 * tracking * k, fps, 0.002 * tracking, seed + g) \
+                     .headswitch(0.04 + 0.03 * tracking, 0.12 * tracking * k, fps, seed + 10 + g)
+        if dropouts:
+            out = out.lighten(_dropouts(0.6 * dropouts * k, 0.25 + 0.1 * g, fps, seed + 20 + g), 0.9)
+        if noise:
+            out = out.grain(0.07 * noise * k, fps, 1)
+    # tape never quite reaches black or white
+    return out.contrast(1.0 - 0.06 * gens).brightness(0.015 * gens)
+
+
+def super8(chain: Chain, stock: int = 0, fps: float = 18, grain: float = 0.15, weave: float = 0.004,
+           flicker: float = 0.08, focus: float = 0.6, halation: float = 0.25, specks: float = 0.15,
+           scratch: float = 0.3, gate: float = 0.95, vignette: float = 0.3, hold: bool = True,
+           seed: float = 0.0) -> Chain:
+    """Small-gauge film: a soft lens, a stock (0 Kodachrome, 1 Ektachrome, 2 faded, 3 Tri-X),
+    reddish halation around highlights, 18 fps judder, gate weave, flicker, coarse grain, dust,
+    scratches, the rounded projector gate and a vignette.
+
+    ``hold=True`` sets the default patch's frame rate to ``fps`` (the whole patch steps at that
+    rate: ``set_frame_rate(None)`` releases it, or pass hold=False and set it yourself).
+    """
+    if hold and fps:
+        set_frame_rate(fps)
+    out = chain
+    if weave:
+        out = out.pan(SH(fps, -weave, weave, seed + 1), SH(fps, -weave, weave, seed + 2))
+    out = out.bake()
+    if focus:
+        out = out.blur(focus)
+    if halation:
+        out = out.add(out.blur(2.5, iterations=2).gamma(2.5).color(1.0, 0.55, 0.35), halation)
+    out = out.filmstock(stock)
+    if scratch:
+        out = out.lighten(scratches(scratch, 0.6, 1.0, 1.0, fps, Drift(0.12, 0, 50, seed + 3)), 0.7)
+    if specks:
+        out = out.mult(dust(specks, 1.8, 0.3, SH(fps, 0, 99, seed + 4)).invert(), 0.9)
+    if flicker:
+        g = 1.0 + SH(fps, -flicker, flicker, seed + 5)
+        out = out.color(g, g, g)
+    if grain:
+        out = out.grain(grain, fps, 2)
+    if vignette:
+        out = out.vignette(vignette, 0.6)
+    if gate:
+        out = out.mult(_gate(gate, gate - 0.02, 0.06, 0.008))
     return out

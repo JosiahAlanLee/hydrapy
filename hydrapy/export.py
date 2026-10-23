@@ -206,6 +206,9 @@ def _needs_helpers(chain: Chain) -> bool:
 # Python source (for `hydrapy import sketch.js`)
 # ---------------------------------------------------------------------------
 
+_PY_NOTES: list = []
+
+
 def _py_arg(a) -> str:
     from .signals import Fft, Seq, Fn
     from .hydra_import import js_expr_to_python
@@ -236,12 +239,45 @@ def _py_arg(a) -> str:
         return s
     if isinstance(a, Fft):
         return f"a.fft[{a.band}]"
+    native = _py_native_signal(a)
+    if native is not None:
+        return native
     if isinstance(a, Fn) and getattr(a, "js_source", None):
         py = js_expr_to_python(a.js_source).replace("_fft(", "a.band_at(_ctx.time, ")
         return f"Fn(lambda _ctx: {py})"
     if isinstance(a, Signal):
-        return f"Fn(lambda _ctx: {a.js()!r} and 0)  # TODO: untranslatable signal"
+        _PY_NOTES.append(type(a).__name__)      # a live or opaque signal (LiveValue, Fx, Audio...): frozen
+        return "Const(0)"
     raise TypeError(f"cannot write {a!r} as Python")
+
+
+def _py_native_signal(a):
+    """hydrapy's own signals written back as their constructors (None for anything else)."""
+    from .signals import SH, Clock, Const, Drift, Env, Expr, Fn1, Lfo, Mouse, Time
+    g = lambda v: f"{float(v):g}"
+    if isinstance(a, Const):
+        return g(a.v)
+    if isinstance(a, Time):
+        return "Time()"
+    if isinstance(a, Mouse):
+        return f"Mouse({a.axis!r})"
+    if isinstance(a, Lfo):
+        return f"Lfo({g(a.freq)}, {a.shape!r}, {g(a.lo)}, {g(a.hi)}, {g(a.phase)}, {g(a.width)})"
+    if isinstance(a, SH):
+        return f"SH({g(a.rate)}, {g(a.lo)}, {g(a.hi)}, {g(a.seed)})"
+    if isinstance(a, Drift):
+        return f"Drift({g(a.rate)}, {g(a.lo)}, {g(a.hi)}, {g(a.seed)})"
+    if isinstance(a, Clock):
+        bpm = "None" if a.bpm is None else g(a.bpm)
+        return f"Clock({g(a.div)}, {bpm}, {g(a.phase)})"
+    if isinstance(a, Env):
+        return f"Env({_py_arg(a.clock)}, {g(a.attack)}, {g(a.decay)}, {g(a.curve)}, {g(a.lo)}, {g(a.hi)})"
+    if isinstance(a, Expr):
+        return f"({_py_arg(a.a)} {a.op} {_py_arg(a.b)})"
+    if isinstance(a, Fn1):
+        extra = "".join(f", {g(e)}" for e in a.extra)
+        return f"as_signal({_py_arg(a.a)}).{a.fn}({extra[2:]})"
+    return None
 
 
 def chain_to_python(chain: Chain) -> str:
@@ -274,11 +310,14 @@ def patch_to_python(patch: Optional[Patch] = None) -> str:
     patch = patch or default_patch()
     body = []
     ext = {}
+    del _PY_NOTES[:]
     for o in patch.active_outputs():
         _externals(o.chain, ext)
         body.append(f"{chain_to_python(o.chain)}.out({o.name})")
     src = "\n".join(body)
     head = ["import math", "from hydrapy import *", ""]
+    if _PY_NOTES:
+        head.append(f"# signals that only exist live were frozen to Const(0): {', '.join(sorted(set(_PY_NOTES)))}")
     for name, e in ext.items():
         head.append(f"# {name} was `{e.note}`: a source hydrapy can't read offline. Swap in an Image, Video, Bank or")
         head.append(f"# Camera; for the p5 'hydra canvas on a plane' loop use src(oN).plane3d(...) in its place.")
@@ -289,6 +328,8 @@ def patch_to_python(patch: Optional[Patch] = None) -> str:
         head.append(f"set_bpm({patch.bpm:g})")
     if patch.speed != 1:
         head.append(f"speed({patch.speed:g})")
+    if patch.frame_rate:
+        head.append(f"set_frame_rate({patch.frame_rate:g})")
     head.append("")
     tail = ["", f"render({patch.display.name})", ""]
     return "\n".join(head) + src + "\n".join(tail)
@@ -376,6 +417,7 @@ def build_spec(patch: Optional[Patch] = None, pixel_ratio: float = 1.0, size: Op
         "display": patch.display.name,
         "bpm": patch.bpm,
         "speed": patch.speed,
+        "frameRate": patch.frame_rate,
         "outputs": outs,
         "history": history,
         "images": images,
@@ -669,6 +711,7 @@ RUNTIME_JS = r"""(function(){
     if (t0 === null) t0 = now;
     if (paused) return;
     var time = ((now - t0) / 1000) * SPEC.speed;
+    if (SPEC.frameRate) time = Math.floor(time * SPEC.frameRate) / SPEC.frameRate;
     curTime = time;
     if (audio) audio.update();
     // only the displayed output and what it samples (transitively) need rendering this frame

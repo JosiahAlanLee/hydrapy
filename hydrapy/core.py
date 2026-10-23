@@ -421,6 +421,7 @@ class Patch:
         self.size = tuple(size)
         self.display: Output = self.o0
         self.speed = 1.0
+        self.frame_rate = None          # e.g. 18: hold time to 18 steps a second (small-gauge film judder)
         self.probes: list = []          # live.Probe instances, updated after every frame
         self.transport = None           # live.Transport (Link, MidiClock) for `hydrapy live`; None = wall clock
 

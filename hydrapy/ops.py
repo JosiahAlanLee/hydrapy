@@ -728,14 +728,14 @@ register(Op("palette", "color", [F("r", 0), F("g", 0.33), F("b", 0.67), F("phase
   return vec4(col, _c0.a);"""))
 
 
-def _np_grain(c, amount, rate, env):
-    n = h31(np.stack([np.floor(env.px[..., 0]), np.floor(env.px[..., 1]), bc(np.floor(env.time * rate), env.px)], axis=-1))
+def _np_grain(c, amount, rate, size, env):
+    n = h31(np.stack([np.floor(env.px[..., 0] / size), np.floor(env.px[..., 1] / size), bc(np.floor(env.time * rate), env.px)], axis=-1))
     am = np.asarray(amount, dtype=np.float32)[..., None] if np.ndim(amount) else amount
     return np.concatenate([c[..., :3] + (n[..., None] - 0.5) * am, c[..., 3:]], axis=-1)
 
 
-register(Op("grain", "color", [F("amount", 0.1), F("rate", 60)], np=_np_grain, doc="Film grain.",
-            glsl="""float n = _h31(vec3(floor(gl_FragCoord.xy), floor(time*rate)));
+register(Op("grain", "color", [F("amount", 0.1), F("rate", 60), F("size", 1)], np=_np_grain, doc="Film grain; `size` in pixels (Super 8 is coarse: 2-3).",
+            glsl="""float n = _h31(vec3(floor(gl_FragCoord.xy / size), floor(time*rate)));
   return vec4(_c0.rgb + (n - 0.5)*amount, _c0.a);"""))
 
 

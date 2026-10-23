@@ -79,6 +79,11 @@ class Program:
         return self.passes[-1].source
 
 
+def iterated(op: Op) -> bool:
+    """Texture ops with an ``iterations`` input get the 0-based iteration index as a trailing ``_pass`` argument."""
+    return op.kind == "texture" and any(i.name == "iterations" for i in op.inputs)
+
+
 def function_source(op: Op) -> str:
     params = [op.fixed_args]
     for inp in op.inputs:
@@ -86,6 +91,8 @@ def function_source(op: Op) -> str:
             continue
         t = {"float": "float", "int": "int", "vec2": "vec2", "vec4": "vec4", "sampler2D": "sampler2D"}[inp.type]
         params.append(f"{t} {inp.name}")
+    if iterated(op):
+        params.append("float _pass")
     return f"{op.returns} {op.name}({', '.join(params)}) {{\n  {op.glsl}\n}}\n"
 
 
@@ -218,14 +225,16 @@ class _Compiler:
                 tmp = self.new_tmp()
                 self.p.passes.append(Pass(tmp, f0("st")))
                 tex = self.sampler_uniform(TmpRef(tmp))
+                # iterated ops get their 0-based iteration index as the last argument
+                last = f", {glsl_float(iterations - 1)}" if iterated(op) else ""
                 # extra iterations ping-pong between this target and one more
                 if iterations > 1:
                     names = [tmp, self.new_tmp()]
                     for i in range(1, iterations):
                         target = names[i % 2]
-                        self.p.passes.append(Pass(target, f"{name}({tex}, st{rest('st')})"))
+                        self.p.passes.append(Pass(target, f"{name}({tex}, st{rest('st')}, {glsl_float(i - 1)})"))
                         tex = self.sampler_uniform(TmpRef(target))
-                frag = lambda uv, tex=tex, name=name, rest=rest: f"{name}({tex}, {uv}{rest(uv)})"
+                frag = lambda uv, tex=tex, name=name, rest=rest, last=last: f"{name}({tex}, {uv}{rest(uv)}{last})"
             else:
                 raise ValueError(op.kind)
         if frag is None:

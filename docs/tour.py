@@ -47,6 +47,8 @@ PRIMITIVES = [
     ("veins  (new)", "veins(3, 5, 2.5, 0.2)"),
     ("scratches  (new)", "scratches(1.0, 0.7, 1.5, 1, 24, Drift(0.2, 0, 50))"),
     ("dust  (new)", "dust(0.6, 2, 0.4, seed=SH(24, 0, 99))"),
+    ("dropouts  (new)", "osc(6, 0.1, 1.2).kaleid(4).lighten(dropouts(2, 0.4, 30), 0.9)"),
+    ("gate  (new)", "osc(6, 0.1, 1.2).kaleid(4).mult(gate(0.9, 0.86, Lfo(0.3, lo=0.01, hi=0.3), 0.01).pan(SH(18, -0.004, 0.004), 0))"),
     ("COORDINATE OPS", None),
     ("rotate", f"{base}.rotate(0.3, 0.4)"),
     ("scale", f"{base}.scale(Lfo(0.5, lo=0.5, hi=2))"),
@@ -64,6 +66,9 @@ PRIMITIVES = [
     ("wobble  (new)", f"{base}.wobble(3, 0.03, 2)"),
     ("glitch  (new)", f"{base}.glitch(10, 0.1, 6)"),
     ("pan  (new)", "drops(4, 0.5, 0.6, seed=2).pan(0, 0, 0, 1.5)"),
+    ("shear  (new)", f"{base}.kaleid(4).shear(Lfo(0.3, 'tri', -0.6, 0.6), Lfo(0.2, 'tri', -0.3, 0.3))"),
+    ("linejitter  (new)", f"{base}.kaleid(4).linejitter(Lfo(0.25, 'tri', 0, 0.03), 30, 0.004)"),
+    ("headswitch  (new)", f"{base}.kaleid(4).headswitch(Lfo(0.3, 'tri', 0.05, 0.3), 0.25, 30)"),
     ("COLOUR OPS", None),
     ("posterize", f"{base}.posterize(Seq([2, 3, 5]).fast(2), 0.6)"),
     ("shift", f"{base}.shift(Lfo(0.3), 0.2, 0)"),
@@ -82,7 +87,10 @@ PRIMITIVES = [
     ("levels  (new)", f"{base}.levels(0.3, 0.7)"),
     ("dither  (new)", f"{base}.dither(2, 3)"),
     ("palette  (new)", f"noise(3, 0.2).palette(0, 0.33, 0.67, Lfo(0.1), 2)"),
-    ("grain  (new)", f"{base}.grain(0.3, 24)"),
+    ("grain  (new)", f"{base}.grain(0.3, 24, Seq([1, 2, 3]).fast(1))"),
+    ("contours  (new)", f"noise(2.5, 0.2).contours(Lfo(0.2, lo=3, hi=12), 0.2, 0.4)"),
+    ("sinefold  (new)", f"{base}.kaleid(3).sinefold(Lfo(0.15, lo=1, hi=4), Lfo(0.3))"),
+    ("filmstock  (new)", f"{base}.kaleid(4).filmstock(Seq([0, 1, 2, 3]).fast(0.75))"),
     ("vignette  (new)", f"{base}.vignette(0.9, 0.4)"),
     ("COMBINE OPS", None),
     ("add", f"{base}.add({mod}, Lfo(0.4))"),
@@ -95,6 +103,7 @@ PRIMITIVES = [
     ("lighten / darken  (new)", f"{base}.lighten(rings(6, 1)).darken(shape(32, 0.9))"),
     ("screen / overlay  (new)", f"{base}.screen({mod}).overlay(gradient())"),
     ("wipe  (new)", f"{base}.wipe({mod}, Lfo(0.3, 'tri'), 0.05, 0.4)"),
+    ("bits  (new)", "gradient().scroll(Lfo(0.1)).bits(gradient().rotate(1.5708), Seq([0, 1, 2]).fast(1), 6)"),
     ("stain  (new)", "solid(1,1,1).stain(drops(3, 0.6, 0.5, 1.2, seed=1)).stain(drops(5, 0.5, 0.5, 2.5, seed=2, hue=0.62), 0.8)"),
     ("alpha  (new)", "solid(1,1,1).stain(solid(0.1, 0.3, 1).alpha(shape(5, 0.4).rotate(0, 0.5)), Lfo(0.5, lo=0.2, hi=2))"),
     ("MODULATE OPS", None),
@@ -120,6 +129,10 @@ PRIMITIVES = [
     ("chroma  (new)", f"{base}.kaleid(4).chroma(Lfo(0.5, lo=0, hi=0.03), Lfo(0.3, lo=0, hi=6.28))"),
     ("bleed  (new)", "drops(3, 0.5, 0.5, seed=3).bleed(0.1, 0.15, 0.5, iterations=4).a()"),
     ("pixelsort  (CPU)", "CPU:noise(4, 0.3).thresh(0.4, 0.2).mult(osc(20, 0.1, 0.5)).pixelsort(0.3, 0)"),
+    ("psort  (GPU, feedback)", "PATCH:psort"),
+    ("ruttetra  (new)", "noise(2.5, 0.3).brightness(0.1).contrast(1.6).ruttetra(60, Lfo(0.2, lo=0.1, hi=0.4), 1.4, 0.3).color(0.7, 1, 0.8)"),
+    ("yiq  (new)", f"{base}.posterize(4, 1).kaleid(5).yiq(Lfo(0.25, 'tri', 0, 0.08), 2, 0.006)"),
+    ("ringing  (new)", f"{base}.posterize(4, 1).kaleid(5).ringing(Lfo(0.3, 'tri', 0, 2), 3)"),
     ("plane3d  (new)", f"{base}.kaleid(4).plane3d(1.2, 0, Lfo(0.1, lo=-0.3, hi=0.3), 0.55, 70, 1, 0.4, 0.4)"),
     ("sphere3d  (new)", f"{base}.kaleid(4).sphere3d(0.3, Time() * 0.6, 0, 0.45, 1, 60, 0.6)"),
     ("cylinder3d  (new)", f"{base}.cylinder3d(0.3, Time() * 0.6, 0, 0.4, 0.9, 1, 60, 0, 0.5)"),
@@ -153,6 +166,14 @@ COMBINATIONS = [
     ("15_canvas_in_3d.py", "o1", "text on a cylinder", 3),
     ("16_delay_line.py", "o1", "delay(): echoes", 3),
     ("16_delay_line.py", "o2", "delay(): A/B roll", 3),
+    ("19_entropy_lock.py", "o0", "entropy-locked glitch feedback", 4),
+    ("20_video_synth.py", "o0", "Rutt-Etra scan processor", 3),
+    ("20_video_synth.py", "o1", "ramp XOR ramp, sine staircase", 3),
+    ("20_video_synth.py", "o3", "contour keyer over a pixel-sort loop", 3),
+    ("21_vhs.py", "o1", "VHS, first generation", 3),
+    ("21_vhs.py", "o2", "VHS, fourth-generation dub", 3),
+    ("22_super8.py", "o0", "Super 8, Kodachrome, 18 fps", 4),
+    ("22_super8.py", "o2", "Super 8, Tri-X", 3),
 ]
 
 
@@ -168,6 +189,11 @@ def special_patch(kind: str, size):
         src(o3).g().palette(0.1, 0.4, 0.7, Lfo(0.02), 1.5).out(p.o0, patch=p)
         p.render(p.o0)
         return p, 60
+    if kind == "psort":
+        pic = noise(2.5, 0.15).brightness(0.1).contrast(1.6).kaleid(3)
+        src(o2).psort(0.3, 0, iterations=8).blend(pic, Lfo(1 / 3, "pulse", width=0.06)).out(p.o2, patch=p)
+        p.render(p.o2)
+        return p, 2
     if kind == "delay":
         shape(5, 0.18, 0.02).scroll(Lfo(0.3, "tri", -0.3, 0.3), Lfo(0.21, "sine", -0.2, 0.2)).rotate(Time() * 2).color(1, 0.6, 0.2).out(p.o0, patch=p)
         src(o0).add(delay(o0, 4).color(0.8, 0.3, 0.9), 0.7).add(delay(o0, 8).color(0.3, 0.9, 0.8), 0.5).add(delay(o0, 12).color(0.9, 0.9, 0.3), 0.35).out(p.o1, patch=p)
@@ -268,7 +294,8 @@ def main():
             if expr.startswith("PATCH:"):
                 p, warm = special_patch(expr[6:], size)
                 code = {"life": "src(o0).life().add(seed, pulse).out(o0)", "rd": "src(o3).rd(0.037, 0.06, iterations=8).add(seed, 0.1).out(o3)",
-                        "delay": "src(o0).add(delay(o0, 4)).add(delay(o0, 8)).add(delay(o0, 12))"}[expr[6:]]
+                        "delay": "src(o0).add(delay(o0, 4)).add(delay(o0, 8)).add(delay(o0, 12))",
+                        "psort": "src(o2).psort(0.3, 0, iterations=8).blend(pic, pulse).out(o2)"}[expr[6:]]
             else:
                 code = expr[4:] if cpu else expr
                 p = Patch(size=size, bpm=120)
@@ -296,7 +323,7 @@ def main():
             stills.append((title, frames[len(frames) // 2]))
             print(f"[{time.time() - t0:5.0f}s] {fname} {out}")
         for f in render_patch(bg, size, fps, 2.0):
-            w.append_data(cap.card(f, "hydrapy", "github.com/JosiahAlanLee/Generative_Art"))
+            w.append_data(cap.card(f, "hydrapy", "github.com/JosiahAlanLee/hydrapy"))
     finally:
         w.close()
     print("wrote", a.out)

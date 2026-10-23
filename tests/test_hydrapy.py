@@ -414,3 +414,112 @@ def test_tear_and_shred_remap_coordinates():
     shredded = voronoi(5).shred(2.0, 4, 0.3, 1.5).render(0.0, size=(64, 36))
     assert not np.allclose(base, torn) and np.isfinite(shredded).all()
     assert "tear(" in osc().tear(EntropyLock("x", 12, 0.01, steps=16)).glsl()
+
+
+# --- video synthesis, tape, film -----------------------------------------------------------------
+
+def test_psort_fully_sorts_rows_given_enough_passes():
+    p = Patch(size=(48, 3))
+    white(60, 1).psort(0.0, 0, iterations=50).out(p.o0, patch=p)
+    rows = Renderer(p, size=(48, 3), fps=30).step(1.0)[..., 0]
+    assert all(np.all(np.diff(r) >= -1e-6) for r in rows)
+    # the GLSL gets the 0-based iteration index as a trailing argument, one pass per iteration
+    prog = compile_chain(osc(6).psort(0.3, 0, iterations=3))
+    assert [ps.expr.rsplit(", ", 1)[-1] for ps in prog.passes[1:]] == ["0.0)", "1.0)", "2.0)"]
+    assert "float _pass" in prog.source and "uniform float _pass" not in prog.source
+
+
+def test_psort_leaves_dark_runs_alone():
+    p = Patch(size=(32, 2))
+    # a bright run on the left, darkness on the right: only the run may change
+    left = gradient(0).r().thresh(0.5, 0.0).invert().mult(white(60, 2).brightness(0.3))
+    left.psort(0.2, 0, iterations=40).out(p.o0, patch=p)
+    before = left.render(1.0, size=(32, 2))[..., 0]
+    after = Renderer(p, size=(32, 2), fps=30).step(1.0)[..., 0]
+    assert before[:, 16:].max() == 0.0 and before[:, :16].min() > 0.2
+    assert np.allclose(before[:, 16:], after[:, 16:])
+    assert np.allclose(np.sort(before[:, :16], axis=1), after[:, :16], atol=1e-5)
+
+
+def test_bits_is_bitwise_logic_on_quantised_channels():
+    a, b = solid(0.6, 0.6, 0.6), solid(0.3, 0.3, 0.3)          # 4 bits: 9 and 5 -> xor 12, and 1, or 13
+    x = a.bits(b, 0, 4).render(0, size=(2, 2))[0, 0, 0]
+    n = a.bits(b, 1, 4).render(0, size=(2, 2))[0, 0, 0]
+    o = a.bits(b, 2, 4).render(0, size=(2, 2))[0, 0, 0]
+    assert (round(x * 15), round(n * 15), round(o * 15)) == (12, 1, 13)
+
+
+def test_ruttetra_draws_lines_with_alpha_and_lifts_them():
+    flat = solid(0, 0, 0).ruttetra(20, 0.3, 1.0, 0.0).render(0, size=(64, 64))
+    assert 0.2 < flat[..., 3].mean() < 0.6 and flat[..., :3].max() < 1e-6      # lines but no colour on black
+    lit = solid(1, 1, 1).ruttetra(20, 0.3, 1.0, 0.0).render(0, size=(64, 64))
+    rows_flat = np.where(flat[..., 3].mean(1) > 0.3)[0]
+    rows_lit = np.where(lit[..., 3].mean(1) > 0.3)[0]
+    assert rows_lit.mean() < rows_flat.mean() - 5                            # brightness lifts the raster (row 0 = top)
+
+
+def test_contours_sinefold_filmstock_gate_shapes():
+    ramp = gradient(0).r()                                                   # a grey ramp 0..1 left to right
+    c = ramp.contours(4, 0.1, 0.0).render(0, size=(128, 4))[0, :, 0]
+    assert 3 <= (np.diff((c > 0.5).astype(int)) > 0).sum() <= 5                # isolines where luminance crosses levels
+    s = ramp.sinefold(2, 0).render(0, size=(128, 4))[0, :, 0]
+    assert s.min() < 0.05 and s.max() > 0.95 and (np.diff(np.sign(np.diff(s))) != 0).sum() >= 3
+    trix = osc(5).filmstock(3).render(0, size=(16, 4))
+    assert np.allclose(trix[..., 0], trix[..., 1]) and np.allclose(trix[..., 1], trix[..., 2])
+    g = gate(0.5, 0.5, 0.05, 0.0).render(0, size=(64, 36))[..., 3]
+    assert g[18, 32] == 1.0 and g[0, 0] == 0.0 and 0.2 < g.mean() < 0.3
+
+
+def test_tape_ops_keep_the_picture_and_add_defects():
+    pic = osc(6, 0.1, 1.2).rotate(0.4)
+    base = pic.render(1.0, size=(96, 54))[..., :3]
+    bled = pic.yiq(0.05, 2.0, 0.01).render(1.0, size=(96, 54))[..., :3]
+    assert abs(bled.mean() - base.mean()) < 0.03 and not np.allclose(bled, base)
+    jit = pic.linejitter(0.1, 30, 0.0, 1).render(1.0, size=(96, 54))[..., :3]
+    assert np.abs(jit - base).mean() > 0.01 and np.abs(jit.mean(1) - base.mean(1)).max() < 0.08  # rows keep their content
+    hs = pic.headswitch(0.1, 0.3, 30, 1).render(1.0, size=(96, 54))[..., :3]
+    assert np.allclose(hs[:-8], base[:-8]) and not np.allclose(hs[-4:], base[-4:])                 # only the bottom band tears (row 0 = top)
+    d = dropouts(2.0, 0.5, 30, 1).render(1.0, size=(96, 54))
+    assert 0 < (d[..., 3] > 0).mean() < 0.2 and np.allclose(d[..., 0], d[..., 3])
+
+
+def test_frame_rate_holds_time_on_both_backends_and_in_html():
+    from hydrapy.export import build_spec
+    p = Patch(size=(16, 8))
+    p.frame_rate = 4
+    solid(Time(), 0, 0).out(p.o0, patch=p)
+    rn = Renderer(p, size=(16, 8), fps=30)
+    assert abs(rn.step(0.3)[0, 0, 0] - 0.25) < 1e-6 and abs(rn.step(0.49)[0, 0, 0] - 0.25) < 1e-6
+    assert build_spec(p)["frameRate"] == 4
+    if _gl_available():
+        from hydrapy.backend_gl import GLRenderer
+        rg = GLRenderer(p, size=(16, 8), fps=30)
+        rg.step(0.3)
+        assert abs(rg.read()[0, 0, 0] / 255.0 - 0.25) < 0.01
+        rg.release()
+
+
+def test_vhs_and_super8_recipes_render_on_both_backends():
+    from hydrapy.recipes import super8, vhs
+    pic = osc(5, 0.1, 1.1).kaleid(4)
+    for chain in (vhs(pic), vhs(pic, generation=3), super8(pic, hold=False), super8(pic, stock=3, hold=False)):
+        frame = chain.render(1.0, size=SIZE)
+        assert np.isfinite(frame).all() and 0.05 < frame[..., :3].mean() < 0.95
+        assert "void main" in compile_chain(chain).source
+    assert default_patch().frame_rate is None                                   # hold=False left the patch alone
+
+
+def test_python_export_round_trips_native_signals_and_frame_rate():
+    from hydrapy.export import patch_to_python
+    from hydrapy.recipes import super8
+    reset_patch()
+    super8(osc(5).kaleid(4), stock=2).out(o0)
+    osc(20).rotate((Lfo(0.5) * 2 + SH(3)).sin() * 3).kaleid(Lfo(0.2, lo=2, hi=8).quantize(1)).color(Env(Clock(2), 0.02), 1, Mouse("x")).out(o1)
+    py = patch_to_python()
+    before = [Renderer(default_patch(), size=(32, 18), fps=30).step(t) for t in (0.3, 1.9)]
+    reset_patch()
+    exec(py, {})
+    assert default_patch().frame_rate == 18 and "Const(0)" not in py
+    after = [Renderer(default_patch(), size=(32, 18), fps=30).step(t) for t in (0.3, 1.9)]
+    assert all(np.array_equal(np.nan_to_num(a), np.nan_to_num(b)) for a, b in zip(before, after))
+    reset_patch()

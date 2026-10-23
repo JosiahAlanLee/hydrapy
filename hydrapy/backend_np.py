@@ -32,6 +32,7 @@ class Env:
         self.buffers: dict[int, np.ndarray] = {}   # keyed by output index: latest completed frame
         self.rings: dict[int, list] = {}            # output index -> [latest, one before, ...] for delay()
         self.current_output: Optional[Output] = None
+        self.pass_index = 0          # iteration index inside an iterated texture op (GLSL: _pass)
         self._frames_cache: dict = {}
 
     @property
@@ -172,9 +173,13 @@ def _make_stage(op, f0, other, argfns, env):
                 iters = max(int(v[it_idx]), 1)
                 v = v[:it_idx] + v[it_idx + 1:]
             tex = f0(env.base_st)
-            for _ in range(iters - 1):
+            for k in range(iters - 1):
+                env.pass_index = k
                 tex = f32(npf(tex, env.base_st, *v, env))
-            return f32(npf(tex, st, *v, env))
+            env.pass_index = iters - 1
+            out = f32(npf(tex, st, *v, env))
+            env.pass_index = 0
+            return out
         return stage
     raise ValueError(kind)
 
@@ -205,6 +210,8 @@ class Renderer:
         self._compile()
         ctx = self.env.ctx
         ctx.time = (self.frame / self.fps if t is None else t) * self.patch.speed
+        if self.patch.frame_rate:
+            ctx.time = math.floor(ctx.time * self.patch.frame_rate) / self.patch.frame_rate
         ctx.frame = self.frame
         ctx.fps = self.fps
         ctx.dt = 1.0 / self.fps

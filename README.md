@@ -4,10 +4,11 @@
 
 [Hydra](https://hydra.ojack.xyz) — Olivia Jack's browser video synth — ported to Python, then pushed in a
 modular-synth direction: every parameter is a CV input, there's a wavefolder, Conway's Life and
-Gray–Scott reaction–diffusion run as feedback ops, and patches export back to Hydra, to standalone
-WebGL pages, or to video files.
+Gray–Scott reaction–diffusion run as feedback ops, a Rutt-Etra scan processor and a GPU pixel sorter,
+painted-film, VHS and Super 8 layers, and patches export back to Hydra, to standalone WebGL pages,
+or to video files.
 
-`docs/tour.mp4` (3 min 20 s) shows every primitive for a second and then the combination patches;
+`docs/tour.mp4` (4 min) shows every primitive for a second and then the combination patches;
 `python docs/tour.py` re-renders it.
 
 ```python
@@ -350,6 +351,47 @@ src(o0).shred(lock, 4, 0.25, 1.5)               # samples of the image copied on
 steps so the HTML export carries the same loops. `tear` and `shred` are coordinate ops, so they are
 free and work on any source; `patches/19_entropy_lock.py` is the full loop.
 
+## Video synthesis, tape and small-gauge film
+
+The analog video-synth vocabulary (the LZX / Rutt-Etra end of it), then the two media that most
+of that work was ever seen on. `patches/20_video_synth.py`, `21_vhs.py`, `22_super8.py`.
+
+```python
+noise(2.5).ruttetra(lines=72, amount=Lfo(0.07, lo=0.1, hi=0.4), glow=0.3)   # scan processor: lines lifted by brightness
+gradient().bits(gradient().rotate(1.5708), 0, 6).sinefold(2)                 # ramp XOR ramp at 6 bits, through a sine staircase
+src(o0).contours(8, 0.2, fill=0.5)                                           # isolines of luminance (a contour keyer)
+src(o2).psort(0.3, 0, iterations=8).blend(pic, Lfo(1/6, "pulse", width=0.03)).out(o2)   # a picture loaded every 6 s, then left to melt
+```
+
+* **`ruttetra(lines, amount, thickness, glow)`** — a raster of scan lines, each displaced upward by
+  `amount` × the brightness beneath it. Rotate or scale the chain before it to tilt the raster.
+* **`contours`**, **`sinefold`**, **`bits`**, **`shear`** — a contour keyer; the sine staircase
+  shaper (ramps become rainbows); bitwise XOR/AND/OR between two chains quantised to `depth` bits;
+  skew.
+* **`psort`** — pixel sorting on the GPU. Each iteration is one odd-even transposition step along
+  rows (or columns) inside runs brighter than `threshold`, so `iterations=8` sorts eight pixels'
+  worth per frame. Feed it back and the picture melts into sorted streaks over seconds; the
+  CPU-only `pixelsort` still sorts a frame completely in one go.
+
+Tape: `yiq(chroma, luma, shift)` is composite-video bandwidth (chroma smeared over a fraction of
+the width and delayed, luma softened), `ringing` the overshoot of a deck's sharpening circuit,
+`linejitter` the time-base error (every scan line shifts by its own amount, worse in drifting
+tracking bands), `headswitch` the tear in the bottom band, `dropouts` the white streaks. Film:
+`filmstock` (Kodachrome, Ektachrome, faded, Tri-X), `gate` (the rounded projector aperture),
+`grain(amount, rate, size)` with `size` in pixels, and **`set_frame_rate(18)`** — the whole patch
+holds `time` to 18 steps a second, so everything judders like the projector, signals included
+(16 for Regular 8, 24 for sound speed, `None` to release). All of it is CV-able, so bad tracking can
+come from an LFO or from your modular.
+
+```python
+from hydrapy.recipes import vhs, super8
+
+vhs(pic).out(o0)                                    # first-generation copy
+vhs(pic, generation=4).out(o1)                      # dubbed four times: softer, noisier, shakier each time
+super8(pic, stock=0).out(o2)                        # Kodachrome, 18 fps, reddish halation, weave, grain, gate
+super8(handpainted(seed=SH(6, 0, 99)), stock=2)     # the painted-film recipes, projected
+```
+
 ## Op reference
 
 ### Sources
@@ -374,6 +416,8 @@ free and work on any source; `patches/19_entropy_lock.py` is the full loop.
 | `veins` | `scale=3, octaves=5, sharpness=2, speed=0, seed=0` | **new** | Ridged multifractal noise: leaf veins, wing membranes, cracked ice. Bright lines on dark. |
 | `scratches` | `density=0.5, extent=0.6, width=1.2, jitter=1, rate=24, seed=0` | **new** | Vertical emulsion scratches (white on black, alpha = line), wiggling `jitter` pixels `rate` times a second. Drift the seed slowly; scratches run along the strip. |
 | `dust` | `density=0.3, size=1.5, hairs=0.3, seed=0` | **new** | Specks and hairs on the gate (white on black, alpha = dust). New seed every frame for the real thing: seed=SH(24, 0, 99). |
+| `dropouts` | `density=0.5, extent=0.3, rate=60, seed=0` | **new** | Tape dropouts: short bright streaks along random scan lines, new ones `rate` times a second (white on black, alpha = streak). lighten() them onto the picture. |
+| `gate` | `width=0.96, height=0.94, radius=0.06, softness=0.01` | **new** | The projector gate: a rounded-rectangle mask (white inside, alpha = inside). mult() the picture by it; pan it a little for a frame that doesn't sit still. |
 
 ### Coordinate ops
 
@@ -399,6 +443,9 @@ free and work on any source; `patches/19_entropy_lock.py` is the full loop.
 | `pan` | `x=0, y=0, speedX=0, speedY=0` | **new** | Translate without wrapping (scroll wraps). pan(0, 0, 0, fps) moves one frame-height per frame: a painted strip running through the gate, so smears continue from frame to frame. |
 | `tear` | `seed=0, count=3, size=0.12, shift=0.3, vertical=0` | **new** | `count` horizontal bands (vertical=1: columns) torn sideways by up to `shift`; which bands and how far come from `seed`. |
 | `shred` | `seed=0, count=4, size=0.2, scale=1` | **new** | `count` rectangular samples of the image copied onto other places (magnified by `scale`); which, where and how big come from `seed`. Later copies copy from earlier ones. |
+| `shear` | `x=0.3, y=0` | **new** | Skew: x shifts rows by their height, y shifts columns by their width. |
+| `linejitter` | `amount=0.004, rate=60, wobble=0.002, seed=0` | **new** | Tracking error: every scan line shifts sideways by its own random amount, worse in drifting bands, plus a slow time-base wobble. |
+| `headswitch` | `height=0.06, amount=0.08, rate=60, seed=0` | **new** | Head-switching noise: the bottom `height` of the frame tears sideways, more towards the very bottom, re-rolled `rate` times a second. |
 
 ### Colour ops
 
@@ -425,8 +472,11 @@ free and work on any source; `patches/19_entropy_lock.py` is the full loop.
 | `levels` | `lo=0, hi=1` | **new** | Stretch lo..hi to 0..1 and clip. |
 | `dither` | `levels=2, size=1` | **new** | Ordered (Bayer 4x4) dithering to `levels` levels per channel; `size` = dot size in pixels. |
 | `palette` | `r=0, g=0.33, b=0.67, phase=0, frequency=1` | **new** | Map luminance through a cosine palette (Inigo Quilez); r/g/b are per-channel phase offsets. |
-| `grain` | `amount=0.1, rate=60` | **new** | Film grain. |
+| `grain` | `amount=0.1, rate=60, size=1` | **new** | Film grain; `size` in pixels (Super 8 is coarse: 2-3). |
 | `vignette` | `amount=0.6, radius=0.6` | **new** | Darken the corners. |
+| `contours` | `levels=6, width=0.15, fill=0` | **new** | Topographic keyer: white isolines where luminance crosses `levels` thresholds; `fill` keeps that much of the image between them. |
+| `sinefold` | `stages=2, phase=0` | **new** | Sine staircase shaper: each channel through `stages` cycles of a sine; ramps become rainbows, gradients become bands. |
+| `filmstock` | `stock=0, amount=1` | **new** | Film stock tone: 0 Kodachrome (warm, dense), 1 Ektachrome (cool shadows), 2 faded (lifted blacks, yellowed), 3 Tri-X (B&W S-curve). |
 
 ### Combine ops (take another chain)
 
@@ -446,6 +496,7 @@ free and work on any source; `patches/19_entropy_lock.py` is the full loop.
 | `wipe` | `amount=0.5, softness=0.02, angle=0` | **new** | Spatial crossfade along a direction (amount 0..1 sweeps it). |
 | `stain` | `density=1` | **new** | Shine the chain through a layer of transparent dye: rgb of the layer is what the dye lets through, alpha its thickness. Multiplicative, like ink; start from solid(1,1,1) as clear leader. |
 | `alpha` | `` | **new** | Set alpha from another chain's luminance without premultiplying (mask() premultiplies). Use it to build dye layers: solid(1,0.2,0.1).alpha(shape(4)). |
+| `bits` | `mode=0, depth=4` | **new** | Bitwise logic between two chains quantised to `depth` bits: mode 0 XOR, 1 AND, 2 OR. Two ramps XORed are the oldest video-synth texture there is. |
 
 ### Modulate ops (coordinates driven by another chain)
 
@@ -483,6 +534,10 @@ free and work on any source; `patches/19_entropy_lock.py` is the full loop.
 | `plane3d` | `rotX=0.5, rotY=0, rotZ=0, distance=1, fov=60, wrap=0, shade=0, fade=0` | **new** | The chain as a textured plane in perspective (rotations in radians). wrap=1 tiles it to the horizon (the Hydra floor); shade darkens it by its angle to the light; fade darkens it with distance (fog). |
 | `sphere3d` | `rotX=0, rotY=0, rotZ=0, radius=0.45, distance=1, fov=60, shade=0.5` | **new** | The chain wrapped around a sphere (x = longitude, y = latitude), lit from the upper right by `shade`. |
 | `cylinder3d` | `rotX=0.3, rotY=0, rotZ=0, radius=0.4, height=0.9, distance=1, fov=60, wrap=0, shade=0.5` | **new** | The chain wrapped around an open cylinder (x goes around, y along the axis); you see the inside through the open ends. |
+| `psort` | `threshold=0.3, vertical=0, iterations=8` | **new** | Pixel sorting on the GPU: each iteration is one odd-even transposition step along rows (vertical=1: columns) within runs brighter than `threshold`. Feed it back (src(o0).psort()) and it keeps sorting frame after frame. |
+| `ruttetra` | `lines=90, amount=0.25, thickness=1.2, glow=0.3` | **new** | Rutt-Etra scan processor: `lines` horizontal scan lines, each displaced upward by `amount` times the brightness under it, drawn `thickness` pixels wide (alpha = line). Rotate/scale the chain before it to tilt the raster. |
+| `yiq` | `chroma=0.03, luma=1, shift=0.004` | **new** | Composite-video bandwidth: chroma (I/Q) smeared horizontally over `chroma` of the width and delayed by `shift`, luma softened over `luma` pixels. The colour bleed of tape. |
+| `ringing` | `amount=0.5, offset=2` | **new** | Edge ringing: overshoot and a second ripple to the right of every vertical edge, `offset` pixels apart. The sharpening of a worn tape deck. |
 
 ## Backend notes
 
@@ -538,16 +593,18 @@ hydrapy/backend_gl.py  moderngl renderer, headless and windowed
 hydrapy/ops_paint.py   painted-film ops: stain alpha drops crackle veins scratches dust bleed bake pan
 hydrapy/ops_3d.py      plane3d sphere3d cylinder3d
 hydrapy/ops_glitch.py  tear, shred (entropy-locked glitch feedback)
+hydrapy/ops_video.py   psort ruttetra contours sinefold bits shear · yiq linejitter headswitch dropouts ringing · filmstock gate
 hydrapy/drawing.py     Text, Lines (SVG flattener), plant()/meadow(), to_svg()
-hydrapy/recipes.py     handpainted(), mothlight(), film()
+hydrapy/recipes.py     handpainted(), mothlight(), film(), vhs(), super8()
 hydrapy/live.py        CvIn/CvOut, OscIn/OscOut, Midi, Link, Probe, per-frame hooks
 hydrapy/synth.py       image quilting, Quilt frame bank
 hydrapy/export.py      GIF/MP4/PNG/ANSI, Hydra JS, Python, standalone HTML runtime
 hydrapy/hydra_import.py Hydra JS -> patch
 hydrapy/cli.py
-patches/               examples (00–19)
+patches/               examples (00–22)
 docs/tour.py           renders docs/tour.mp4, the feature tour
-tests/                 ~300 tests incl. CPU/GPU parity for every op
+docs/optable.py        regenerates the op reference below from the registry
+tests/                 ~370 tests incl. CPU/GPU parity for every op
 ```
 
 ## License

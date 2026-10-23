@@ -9,6 +9,7 @@ and sent as uniforms.
 """
 from __future__ import annotations
 
+import math
 import time as _time
 from typing import Optional
 
@@ -167,6 +168,9 @@ class GLRenderer:
         ctx.time = (self.frame / self.fps if t is None else t) * self.patch.speed
         ctx.frame = self.frame
         self.ctx_time = ctx.time
+        if self.patch.frame_rate:
+            ctx.time = math.floor(ctx.time * self.patch.frame_rate) / self.patch.frame_rate
+            self.ctx_time = ctx.time
         current = None
         for output, target, gprog, vao, floats, samplers in self._passes:
             if output is not current and current is not None:
