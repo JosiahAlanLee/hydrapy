@@ -578,6 +578,15 @@ the synthesis hold rate; render warm-up is excluded. Set `record=True` and a suf
 `keep` when exporting audio through the Python API. The CLI does this for its selected soundtrack.
 GPU brightness probes reduce their regions before readback; audio strips are read only when due.
 
+## Demoscene tools
+
+Height-field normals, relief lighting, environment reflections, animated metaballs,
+retained spline wireframes, composable 3D distance fields, recursive fractal folds,
+and music-directed keyframe tracks. Shader features run on NumPy, desktop GL, and
+standalone HTML; wire geometry retains its paths for SVG export.
+
+[Guide and examples](docs/DEMOSCENE.md) · [18-second preview](docs/demoscene_preview.mp4)
+
 ## Op reference
 
 ### Sources
@@ -608,6 +617,10 @@ GPU brightness probes reduce their regions before readback; audio strips are rea
 | `wave` | `frequency=3, amplitude=0.15, width=0.012, speed=1, phase=0, length=1, taper=0` | **new** | An oscillator drawn as a stroke: a sine across the frame, `frequency` cycles per width, travelling at `speed`. `length` is the stroke's extent (fraction of the width); `taper` thins both ends. |
 | `arc` | `radius=0.3, start=0, sweep=3.1416, width=0.012, taper=0, speed=0` | **new** | An arc stroke about the centre from angle `start` through `sweep` radians (a full circle: 6.2832), turning at `speed`. `taper` thins the tail; the head is the end of the arc. |
 | `dab` | `size=0.15, aspect=0.5, angle=0, bristles=0.5, softness=0.3, seed=0` | **new** | One touch of a bristle brush: an ellipse `size` tall (fraction of the height) and `aspect` as wide, turned by `angle`, streaked along its length by `bristles`. White, alpha = paint. Feed it back for accretive painting: src(o0).layer(dab(...).color(...)). |
+| `orbitVoronoi` | `points=9, rings=4, radius=0.42, speed=0.18, phase=0, width=0.004, mode=0` | **new** | Alternating rotating rings of Voronoi sites. points=3..20 per ring, rings=1..4; speed in radians/second. mode=0 shaded cells, 1 edges, 2 nearest distance. width uses the nearest/second-nearest distance gap (not a geometric polygon inset). |
+| `sdfCircle` | `radius=0.25, x=0.5, y=0.5` | **new** | Signed distance to a circle; negative inside. radius is in screen-height units, x/y in normalized screen coordinates. Finish with sdfMask or sdfBands. |
+| `sdfBox` | `width=0.45, height=0.35, radius=0.04, x=0.5, y=0.5` | **new** | Signed distance to a rounded box. Full width/height and corner radius are screen-height units; center x/y is normalized. Finish with sdfMask or sdfBands. |
+| `sdfMetaballs` | `count=5, radius=0.12, spread=0.28, smoothness=0.12, speed=0.5, seed=0` | **new** | Smooth union of 1..16 animated circles, a negative-inside distance bound. Deterministic motion in seconds; radius/spread/smoothness use screen-height units. Finish with sdfMask/sdfBands or derive a normal map. |
 
 ### Coordinate ops
 
@@ -670,6 +683,9 @@ GPU brightness probes reduce their regions before readback; audio strips are rea
 | `sinefold` | `stages=2, phase=0` | **new** | Sine staircase shaper: each channel through `stages` cycles of a sine; ramps become rainbows, gradients become bands. |
 | `filmstock` | `stock=0, amount=1` | **new** | Film stock tone: 0 Kodachrome (warm, dense), 1 Ektachrome (cool shadows), 2 faded (lifted blacks, yellowed), 3 Tri-X (B&W S-curve), 4 Orwo / Sovcolor (muted, green mids, magenta shadows). |
 | `halftone` | `size=6, angle=0.7854, sharpness=0.7` | **new** | Screen print: each channel becomes a grid of ink dots `size` pixels apart, sized by how dark the channel is, the three screens turned 0, 60 and 15 degrees from `angle` so they moiré like a cheap colour print. |
+| `sdfMask` | `offset=0, softness=0` | **new** | Finish an SDF as an opaque black/white mask. Positive offset expands; softness has a half-pixel minimum. Apply palettes/texture masks afterwards. |
+| `sdfBands` | `frequency=20, width=0.3, phase=0` | **new** | Finish an SDF as repeated contour bands; frequency per height unit, width is the filled fraction, phase shifts the bands. Animate the field before this op for continuous morphs. |
+| `relight` | `azimuth=0.8, elevation=0.7, ambient=0.18, diffuse=0.65, specular=0.35, shininess=32` | **new** | Light an encoded normal map with Lambert diffuse + Blinn specular. Angles in radians; elevation=pi/2 faces the viewer. Returns HDR grayscale lighting with the input alpha; multiply by pigment separately. |
 
 ### Combine ops (take another chain)
 
@@ -691,6 +707,9 @@ GPU brightness probes reduce their regions before readback; audio strips are rea
 | `stain` | `density=1` | **new** | Shine the chain through a layer of transparent dye: rgb of the layer is what the dye lets through, alpha its thickness. Multiplicative, like ink; start from solid(1,1,1) as clear leader. |
 | `alpha` | `` | **new** | Set alpha from another chain's luminance without premultiplying (mask() premultiplies). Use it to build dye layers: solid(1,0.2,0.1).alpha(shape(4)). |
 | `bits` | `mode=0, depth=4` | **new** | Bitwise logic between two chains quantised to `depth` bits: mode 0 XOR, 1 AND, 2 OR. Two ramps XORed are the oldest video-synth texture there is. |
+| `sdfUnion` | `smoothness=0` | **new** | Union of signed distance fields; smoothness > 0 rounds the join with a polynomial smooth minimum. |
+| `sdfIntersect` | `` | **new** | Intersection of signed distance fields (maximum). |
+| `sdfSubtract` | `` | **new** | Cut the other signed distance field out of this field. |
 
 ### Modulate ops (coordinates driven by another chain)
 
@@ -708,6 +727,8 @@ GPU brightness probes reduce their regions before readback; audio strips are rea
 | `modulateRotate` | `multiple=1, offset=0` | Hydra |  |
 | `modulateHue` | `amount=1` | Hydra |  |
 | `displace` | `amount=0.1` | **new** | Like modulate but centred: 0.5 in the modulator means no displacement. |
+| `envMap` | `rotation=0` | **new** | Sample this chain as a latitude/longitude environment reflected by encoded normals. rotation is turns. A view-facing normal samples (0.75,0.5). Set coverage separately with alpha(normals.a()). |
+| `refractMap` | `amount=0.05` | **new** | Screen-space glass distortion from encoded normals; amount in screen-height units. This is a normal-driven UV offset, not physical ray refraction. Zero amount is identity. |
 
 ### Texture ops (neighbourhood; multi-pass on the GPU)
 
@@ -734,6 +755,7 @@ GPU brightness probes reduce their regions before readback; audio strips are rea
 | `ringing` | `amount=0.5, offset=2` | **new** | Edge ringing: overshoot and a second ripple to the right of every vertical edge, `offset` pixels apart. The sharpening of a worn tape deck. |
 | `charcoal` | `tooth=0.5, rough=1.5, scale=90, seed=0` | **new** | Paper tooth removes coverage from alpha while preserving straight RGB colour. Edges jitter by `rough` pixels; grain at `scale` stays fixed in image space. Composite over paper with `over` or `recipes.on_paper`. |
 | `smear` | `angle=0, length=0.02` | **new** | Paint dragged: 12 taps behind each pixel along `angle` (radians; a chain makes it a flow field), `length` of the height. Paint on glass, smudged charcoal, motion blur. |
+| `normalMap` | `strength=0.03, radius=1` | **new** | Red channel as height; central-difference normals encoded in RGB as 0.5+0.5*n, +Y up. strength is height per screen height; radius is the sampling distance in pixels (minimum 0.5). Preserves alpha; sampling wraps. |
 
 ## Backend notes
 

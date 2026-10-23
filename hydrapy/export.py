@@ -377,7 +377,10 @@ def _py_arg(a) -> str:
 def _py_native_signal(a):
     """hydrapy's own signals written back as their constructors (None for anything else)."""
     from .signals import SH, Clock, Const, Decay, Drift, Env, Expr, Fn1, Lfo, Mouse, Time
+    from .timeline import Track
     g = lambda v: f"{float(v):g}"
+    if isinstance(a, Track):
+        return repr(a)
     if isinstance(a, Const):
         return g(a.v)
     if isinstance(a, Time):
@@ -409,6 +412,9 @@ def chain_to_python(chain: Chain) -> str:
     parts = []
     for tr in chain.transforms:
         op = tr.op
+        if op.python_source is not None:
+            parts.append(op.python_source(tr.args, _py_arg))
+            continue
         pairs = list(zip(tr.args, op.inputs))
         keep = 1 if op.kind in ("combine", "combineCoord") else 0
         while len(pairs) > keep:

@@ -32,10 +32,14 @@ from . import ops_glitch as _ops_glitch  # noqa: F401  (tear/shred)
 from . import ops_video as _ops_video  # noqa: F401  (psort/ruttetra/contours/bits/yiq/linejitter/...)
 from . import ops_stroke as _ops_stroke  # noqa: F401  (harmonograph/wave/arc/dab/charcoal/smear/halftone/boil/polarRepeat)
 from . import ops_fields as _ops_fields  # noqa: F401  (orbitVoronoi, signed distance fields)
+from . import ops_material as _ops_material  # noqa: F401  (normals, lighting, reflections)
 from .core import (REGISTRY, Bank, Camera, Chain, Ctx, External, FrameSource, Image, Input, Op, Output, Patch, Texture, Transform, Video,
                    default_patch, normalize_args, reset_patch)
 from .cellular import CARule, Cellular, MultiCA1D, WOLFRAM3, WOLFRAM5
 from .geometry import flora_lines, fuzzy_paths, subdivide
+from .wire import catmull_rom, lathe_wire, project_wire, sweep_wire
+from .timeline import Timeline, Track
+from .sdf3d import SDF3, raymarch
 from .synth import Quilt, quilt
 from .drawing import Lines, Text, meadow, plant, to_svg
 from .live import (CvIn, CvOut, Link, LiveValue, Midi, MidiClock, OscIn, OscOut, Probe, Soundtrack, Transport, TrigPhase, audio_devices,
@@ -174,6 +178,8 @@ __all__ = (
         "o0", "o1", "o2", "o3", "render", "hush", "set_bpm", "set_resolution", "set_frame_rate", "set_composite_alpha", "speed", "patch",
         "Chain", "Patch", "Output", "Image", "Video", "Camera", "Bank", "Quilt", "quilt", "Text", "Lines", "plant", "meadow", "to_svg",
         "FrameSource", "Cellular", "CARule", "MultiCA1D", "WOLFRAM3", "WOLFRAM5", "subdivide", "fuzzy_paths", "flora_lines",
+        "catmull_rom", "lathe_wire", "project_wire", "sweep_wire", "Track", "Timeline",
+        "SDF3", "raymarch",
         "CvIn", "CvOut", "Link", "LiveValue", "Midi", "MidiClock", "OscIn", "OscOut", "Probe", "Soundtrack", "Transport", "TrigPhase", "audio_devices", "register_hook", "Ctx", "reset_patch", "default_patch",
         "Signal", "Lfo", "Seq", "Clock", "Env", "SH", "Decay", "Drift", "Mouse", "Time", "Fn", "Fx", "EntropyLock", "Fft", "Audio", "Const", "Expr", "External", "as_signal",
         "Renderer", "iter_frames", "render_chain", "render_frames", "save_gif", "save_mp4", "save_png", "to_image", "to_ansi",
