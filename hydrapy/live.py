@@ -604,6 +604,7 @@ class CvOut:
         self.file = file
         self.fps = float(fps)
         self._frames: list[np.ndarray] = []
+        self._frame_times = []
         self.stream = None
         self.samplerate = int(samplerate or 48000)
         if file is None:
@@ -624,7 +625,9 @@ class CvOut:
             self.routes.pop(k, None)
             return self
         from .signals import as_signal
-        self.audio_routes.pop(k, None)
+        previous = self.audio_routes.pop(k, None)
+        if previous is not None:
+            previous.close()
         self.routes[k] = as_signal(signal)
         return self
 
@@ -634,6 +637,12 @@ class CvOut:
             self._target[k] = (float(v) if math.isfinite(v) else 0.0) / self.volts_per_fs
         if self.file is not None:
             self._frames.append(self._target.copy())
+            self._frame_times.append((getattr(ctx, "presentation_time", (len(self._frames) - 1) / self.fps),
+                                      getattr(ctx, "presentation_dt", 1.0 / self.fps)))
+
+    def clear_recording(self):
+        self._frames = []
+        self._frame_times = []
 
     def _callback(self, outdata, frames, time_info, status):
         outdata.fill(0.0)
@@ -649,6 +658,8 @@ class CvOut:
         if getattr(self, "_closed", False):
             return
         self._closed = True
+        if self.tick in _HOOKS:
+            _HOOKS.remove(self.tick)
         if self.stream is not None:
             self.stream.stop(); self.stream.close()
         for q in self.audio_routes.values():
@@ -659,12 +670,18 @@ class CvOut:
         nchan = max(self.channels) + 1
         out = np.zeros((0, nchan), dtype=np.float32)
         if self._frames:
-            per = max(int(round(self.samplerate / self.fps)), 1)
             frames = np.array(self._frames, dtype=np.float32)                 # (nframes, nchan)
-            prev = np.vstack([frames[:1], frames[:-1]])
-            ramp = np.linspace(0.0, 1.0, per, endpoint=False, dtype=np.float32)
-            sig = prev[:, None, :] + (frames - prev)[:, None, :] * ramp[None, :, None]   # (nframes, per, nchan)
-            sig = np.clip(sig.reshape(-1, frames.shape[1]), -1.0, 1.0)
+            origin = self._frame_times[0][0]
+            ends = [t for t, _ in self._frame_times[1:]] + [sum(self._frame_times[-1])]
+            bounds = [0] + [max(0, round((t - origin) * self.samplerate)) for t in ends]
+            sig = np.zeros((bounds[-1], len(self.channels)), np.float32)
+            for k, (start, end) in enumerate(zip(bounds, bounds[1:])):
+                if end <= start:
+                    continue
+                previous = frames[max(0, k - 1)]
+                ramp = np.linspace(0, 1, end - start, endpoint=False, dtype=np.float32)[:, None]
+                sig[start:end] = previous + (frames[k] - previous) * ramp
+            sig = np.clip(sig, -1.0, 1.0)
             out = np.zeros((sig.shape[0], nchan), dtype=np.float32)
             for i, ch in enumerate(self.channels):
                 out[:, ch] = sig[:, i]
@@ -680,7 +697,7 @@ class CvOut:
             with wave.open(self.file, "wb") as w:
                 w.setnchannels(nchan); w.setsampwidth(2); w.setframerate(self.samplerate)
                 w.writeframes((out * 32767).astype("<i2").tobytes())
-        self._frames = []
+        self.clear_recording()
 
 
 # -----------------------------------------------------------------------------
@@ -706,8 +723,8 @@ class Probe(Signal):
         p.probes.append(self)
 
     def region(self, width: int, height: int):
-        h = max(int(self.size * height), 1)
-        w = h
+        h = min(max(int(self.size * height), 1), height)
+        w = min(h, width)
         x0 = int(self.x * width - w / 2)
         y0 = int(self.y * height - h / 2)
         x0 = min(max(x0, 0), max(width - w, 0))
@@ -716,6 +733,13 @@ class Probe(Signal):
 
     def update(self, rgba: np.ndarray, t: Optional[float] = None):
         """Feed the region's pixels, (h, w, 4) float, any row order (``t``: the frame's time, if known)."""
+        if self.patch.composite_alpha:
+            rgba = rgba.copy()
+            rgba[..., :3] *= np.clip(rgba[..., 3:4], 0, 1)
+        self.update_mean(rgba.mean(axis=(0, 1), keepdims=True), t)
+
+    def update_mean(self, rgba: np.ndarray, t: Optional[float] = None):
+        """Accept a GPU-reduced mean of visible RGB and raw alpha."""
         if self.channel == "luma":
             v = float((rgba[..., 0] * 0.2125 + rgba[..., 1] * 0.7154 + rgba[..., 2] * 0.0721).mean())
         else:
@@ -741,8 +765,8 @@ class Soundtrack(Probe):
     rate unless the pattern advances the fractional cycle per frame.  ``ac`` removes the DC (a one-pole
     high-pass at 20 Hz), ``gain`` scales ±1 full scale (±10 V out of an ES-3; 0.5 for modular levels).
 
-    The track keeps its own clock: a frame is read only when 1/``fps`` has passed since the last
-    one, so a 60 fps window and a 24 fps render sound the same.  Render, then ``wav(path)``, or
+    The optical clock keeps its rate independently of the renderer. Missing intervals use the
+    preceding picture, and fractional samples carry between chunks. Render, then ``wav(path)``, or
     ``save_mp4(frames, path, fps, audio=track)``; ``CvOut().send(k, track)`` plays it out of a
     DC-coupled interface at audio rate, live; the HTML export plays it in the page.  As a Probe it is
     also a signal: the strip's mean brightness, one frame late.  ``record=False`` keeps nothing
@@ -755,15 +779,22 @@ class Soundtrack(Probe):
         super().__init__(output, x=x, y=0.5, size=1.0, channel="luma", patch=patch)
         self.width, self.fps, self.sr, self.gain, self.ac = float(width), float(fps), int(sr), float(gain), bool(ac)
         self.record, self.keep = bool(record), float(keep)
+        if not math.isfinite(self.fps) or self.fps <= 0 or self.sr <= 0 or self.keep < 0:
+            raise ValueError("Soundtrack requires positive fps/sr and nonnegative keep")
         self.chunks: list[np.ndarray] = []
         self.listeners: list[Callable[[np.ndarray], None]] = []
         self._last_t: Optional[float] = None
+        self._origin = None
+        self._tick = 0
+        self._clock_rate = self.rate
+        self._sample_remainder = 0.0
+        self._column = None
         self._hp_x = 0.0
         self._hp_y = 0.0
         self._hp_a = math.exp(-2.0 * math.pi * 20.0 / self.sr)
 
     def region(self, width: int, height: int):
-        w = max(int(round(self.width * width)), 1)
+        w = min(max(int(round(self.width * width)), 1), width)
         x0 = int(self.x * width - w / 2)
         x0 = min(max(x0, 0), max(width - w, 0))
         return x0, 0, w, height
@@ -773,25 +804,62 @@ class Soundtrack(Probe):
         """Frames of track per second: the patch's frame hold if it has one (Super 8 sound ran at 18), else ``fps``."""
         return float(self.patch.frame_rate) if getattr(self.patch, "frame_rate", None) else self.fps
 
-    def update(self, rgba: np.ndarray, t: Optional[float] = None):
-        col = (rgba[..., 0] * 0.2125 + rgba[..., 1] * 0.7154 + rgba[..., 2] * 0.0721).mean(axis=1)[::-1]  # top to bottom
+    def needs_update(self, t: float, duration: Optional[float] = None) -> bool:
+        if self._origin is None or self.rate != self._clock_rate or t < self._last_t - 1e-9:
+            return True
+        next_t = self._origin + self._tick / self._clock_rate
+        return next_t < t + duration - 1e-9 if duration is not None else next_t <= t + 1e-9
+
+    def update(self, rgba: np.ndarray, t: Optional[float] = None, duration: Optional[float] = None):
+        # The audible strip is the visible image over black, not hidden RGB outside a stroke.
+        rgb = rgba[..., :3]
+        if self.patch.composite_alpha:
+            rgb = rgb * np.clip(rgba[..., 3:4], 0, 1)
+        col = (rgb[..., 0] * 0.2125 + rgb[..., 1] * 0.7154 + rgb[..., 2] * 0.0721).mean(axis=1)[::-1]
         self.live.set(float(col.mean()))
-        fps = self.rate
-        if t is not None and self._last_t is not None and t - self._last_t < 1.0 / fps - 1e-6:
-            return                                        # the track runs at its own fps, whatever the renderer's
-        if t is not None:
-            self._last_t = t if self._last_t is None else self._last_t + math.floor((t - self._last_t) * fps + 1e-6) / fps
-        chunk = self._frame_audio(np.asarray(col, dtype=np.float64))
+        col = np.asarray(col, dtype=np.float64)
+        self._advance(t, duration, col)
+        self._column = col
+
+    def advance(self, t: float, duration: Optional[float] = None):
+        """Continue a held picture's sound without reading its pixels again."""
+        if self._column is not None:
+            col = self._column
+            self._advance(t, duration, col)
+            self._column = col
+            return True
+        return False
+
+    def _advance(self, t, duration, col):
+        if t is None:
+            self._emit(col)
+            return
+        if self._last_t is not None and t < self._last_t - 1e-9:
+            self.clear()
+        if self._origin is None or self.rate != self._clock_rate:
+            self._origin, self._tick, self._clock_rate = t, 0, self.rate
+        end = t + duration if duration is not None else t + 1e-8
+        while self._origin + self._tick / self._clock_rate < end - 1e-9:
+            at = self._origin + self._tick / self._clock_rate
+            # A late renderer holds the preceding image across the missing interval.
+            self._emit(self._column if self._column is not None and at < t - 1e-9 else col)
+            self._tick += 1
+        self._last_t = t
+
+    def _emit(self, col):
+        chunk = self._frame_audio(col)
         if self.record:
             self.chunks.append(chunk)
-            limit = int(self.keep * fps)
+            limit = int(self.keep * self.rate)
             if len(self.chunks) > limit:
                 del self.chunks[: len(self.chunks) - limit]
         for fn in self.listeners:
             fn(chunk)
 
     def _frame_audio(self, col: np.ndarray) -> np.ndarray:
-        n = int(round(self.sr / self.rate))
+        self._sample_remainder += self.sr / self.rate
+        n = int(math.floor(self._sample_remainder + 1e-9))
+        self._sample_remainder -= n
         h = len(col)
         x = (col - 0.5) * 2.0 * self.gain
         y = np.interp((np.arange(n) + 0.5) * h / n - 0.5, np.arange(h), x)
@@ -817,6 +885,10 @@ class Soundtrack(Probe):
     def clear(self):
         self.chunks = []
         self._last_t = None
+        self._origin = None
+        self._tick = 0
+        self._sample_remainder = 0.0
+        self._column = None
         self._hp_x = self._hp_y = 0.0
 
     def wav(self, path: str) -> str:
@@ -841,14 +913,20 @@ class AudioQueue:
         self.track, self.samplerate = track, int(samplerate)
         self._q: list[np.ndarray] = []
         self._pos = 0
+        self._source_samples = self._output_samples = 0
         self._last = np.zeros(max(int(round(self.samplerate / track.rate)), 1), np.float32)
         self._lock = threading.Lock()
         track.listeners.append(self.push)
 
     def push(self, chunk: np.ndarray):
         if self.samplerate != self.track.sr:
-            n = int(round(len(chunk) * self.samplerate / self.track.sr))
+            self._source_samples += len(chunk)
+            total = int(round(self._source_samples * self.samplerate / self.track.sr))
+            n = total - self._output_samples
+            self._output_samples = total
             chunk = np.interp(np.linspace(0.0, len(chunk) - 1, n), np.arange(len(chunk)), chunk).astype(np.float32)
+        if not len(chunk):
+            return
         with self._lock:
             self._q.append(chunk)
             if len(self._q) > 6:                          # the renderer is ahead of real time: let it go
@@ -904,3 +982,11 @@ def run_hooks(ctx, renderer=None):
 
 def clear_hooks():
     _HOOKS.clear()
+
+
+def clear_recordings():
+    """Discard warm-up control frames without stopping live output streams."""
+    for fn in _HOOKS:
+        out = getattr(fn, "__self__", None)
+        if isinstance(out, CvOut) and out.file is not None:
+            out.clear_recording()

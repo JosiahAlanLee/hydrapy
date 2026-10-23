@@ -482,6 +482,7 @@ def from_hydra(src: str, patch: Optional[Patch] = None, lenient: Optional[bool] 
     skipped or failed is in ``patch.import_notes``.
     """
     patch = patch or default_patch()
+    patch.composite_alpha = False  # Hydra displays RGB; its alpha can be an independent signal.
     patch.import_notes = []
     if lenient is None:
         try:

@@ -449,6 +449,54 @@ frame hold (`set_frame_rate(18)` reads at 18, as Super 8 sound did). The HTML ex
 itself; `CvOut().send(k, track)` plays it out of a DC-coupled interface into the modular (see the
 modular section above).
 
+## Timing, transparent materials, and streaming exports
+
+`set_frame_rate(18)` holds the actual image and feedback history between updates. Display and
+CV-output hooks still run at the presentation rate; the optical soundtrack keeps playing held
+images. Frame-rate-independent feedback uses a half-life in seconds:
+
+```python
+decay = Decay(0.7)
+src(o0).mult(solid(decay, decay, decay)).over(wave(3).color(0.8, 0.2, 0.1)).out(o0)
+```
+
+For transparent pigment, fade its **alpha** instead of its RGB. `patches/27_material_controls.py`
+demonstrates this, stationary paper under moving pigment, and both radial-repeat modes.
+
+* Strokes carry straight RGB colour with coverage in alpha. `charcoal()` removes coverage once.
+  `over()` is correct source-over for transparent layers; `layer()` retains Hydra's alpha-addition
+  behavior. Final native/HTML display, image/video exports, and brightness/sound probes respect
+  alpha. Raw `Renderer.step()` and `GLRenderer.read_rgba()` retain uncomposited RGBA.
+* `default_patch().composite_alpha = False` restores the previous RGB-only display/probe behavior
+  when alpha is being used as another signal channel (for example in `sub` or `shift`). Imported
+  Hydra sketches select this compatibility mode automatically. Transparent artwork should use
+  the default `True`; flatten it over an opaque colour before RGB-only keying/filtering.
+* `polarRepeat(n)` uses image-space angles, preserving circles on wide and tall frames.
+  `polarRepeat(n, aspect=0)` preserves the former normalized-coordinate distortion.
+* `recipes.on_paper(pigment, paper_color=(0.94, 0.90, 0.81), tooth=0.35, texture=0.025)` applies
+  fixed paper after the pigment's motion. Keep the transparent pigment on its own feedback
+  output so the paper does not accumulate or move with it.
+* `recipes.studie(..., decay_seconds=0.5, motion=0.4, surface=0.002, surface_rate=12)` separates
+  trail lifetime, large-scale movement, and small line jitter. The older `trails` setting remains
+  available when `decay_seconds` is omitted.
+
+The CLI streams video frames directly to the encoder. `render_frames()` and `render_frames_gl()`
+still return lists for callers that need random access; use their iterator counterparts for
+long videos:
+
+```python
+from hydrapy.backend_gl import iter_frames_gl
+save_mp4(iter_frames_gl(seconds=60, fps=30), "minute.mp4", fps=30)
+# CPU: save_mp4(iter_frames(seconds=60, fps=30), "minute.mp4", fps=30)
+```
+
+Soundtracks carry fractional samples between optical frames (44.1 kHz / 24 fps alternates
+1,837 and 1,838 samples), fill missing audio intervals with the held picture, and resample CV
+audio routes using cumulative sample counts. CV files use presentation timestamps rather than
+the synthesis hold rate; render warm-up is excluded. Set `record=True` and a sufficiently long
+`keep` when exporting audio through the Python API. The CLI does this for its selected soundtrack.
+GPU brightness probes reduce their regions before readback; audio strips are read only when due.
+
 ## Op reference
 
 ### Sources
@@ -508,7 +556,7 @@ modular section above).
 | `linejitter` | `amount=0.004, rate=60, wobble=0.002, seed=0` | **new** | Tracking error: every scan line shifts sideways by its own random amount, worse in drifting bands, plus a slow time-base wobble. |
 | `headswitch` | `height=0.06, amount=0.08, rate=60, seed=0` | **new** | Head-switching noise: the bottom `height` of the frame tears sideways, more towards the very bottom, re-rolled `rate` times a second. |
 | `boil` | `amount=0.004, rate=12, scale=6, seed=0` | **new** | Line boil: the drawing redrawn by hand `rate` times a second — coordinates wander by up to `amount` with smooth noise at `scale`, re-rolled each redraw. Pair it with set_frame_rate(12) for animation on twos. |
-| `polarRepeat` | `n=5, offset=0` | **new** | `n` rotated copies of the wedge to the right of the centre, around the centre (kaleid without the mirroring: ornament, rosettes, the Fischinger circle of comets). |
+| `polarRepeat` | `n=5, offset=0, aspect=1` | **new** | `n` rotational copies in image space. `aspect=0` preserves the old normalized-coordinate distortion; default 1 keeps circular orbits on rectangular frames. |
 
 ### Colour ops
 
@@ -549,6 +597,7 @@ modular section above).
 | `add` | `amount=1` | Hydra | Add. |
 | `sub` | `amount=1` | Hydra | Subtract. |
 | `layer` | `` | Hydra | Alpha-composite on top. |
+| `over` | `` | **new** | Straight-alpha source-over, including transparent backgrounds. `layer` retains Hydra's original alpha-addition behavior. |
 | `blend` | `amount=0.5` | Hydra | Crossfade. |
 | `mult` | `amount=1` | Hydra | Multiply. |
 | `diff` | `` | Hydra | Absolute difference. |
@@ -602,7 +651,7 @@ modular section above).
 | `ruttetra` | `lines=90, amount=0.25, thickness=1.2, glow=0.3` | **new** | Rutt-Etra scan processor: `lines` horizontal scan lines, each displaced upward by `amount` times the brightness under it, drawn `thickness` pixels wide (alpha = line). Rotate/scale the chain before it to tilt the raster. |
 | `yiq` | `chroma=0.03, luma=1, shift=0.004` | **new** | Composite-video bandwidth: chroma (I/Q) smeared horizontally over `chroma` of the width and delayed by `shift`, luma softened over `luma` pixels. The colour bleed of tape. |
 | `ringing` | `amount=0.5, offset=2` | **new** | Edge ringing: overshoot and a second ripple to the right of every vertical edge, `offset` pixels apart. The sharpening of a worn tape deck. |
-| `charcoal` | `tooth=0.5, rough=1.5, scale=90, seed=0` | **new** | Paper: the picture (colour and alpha) broken up by paper tooth (`tooth`, grain at `scale`; the paper shows through most where the stroke is faint) and its edges jittered by `rough` pixels in 2-pixel blocks, so strokes go ragged like charcoal on rough paper. |
+| `charcoal` | `tooth=0.5, rough=1.5, scale=90, seed=0` | **new** | Paper tooth removes coverage from alpha while preserving straight RGB colour. Edges jitter by `rough` pixels; grain at `scale` stays fixed in image space. Composite over paper with `over` or `recipes.on_paper`. |
 | `smear` | `angle=0, length=0.02` | **new** | Paint dragged: 12 taps behind each pixel along `angle` (radians; a chain makes it a flow field), `length` of the height. Paint on glass, smudged charcoal, motion blur. |
 
 ## Backend notes

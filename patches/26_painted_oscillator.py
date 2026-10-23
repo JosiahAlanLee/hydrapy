@@ -37,8 +37,8 @@ trackB = Soundtrack(o2, x=0.5, width=0.004, fps=24, gain=0.5)
 
 # the picture: both voices with trails, the read column marked, through the print
 src(o1).mult(solid(0.82, 0.82, 0.82)) \
-    .layer(src(o0).color(0.9, 0.95, 1.0)).layer(src(o2).color(1.0, 0.75, 0.4)) \
-    .layer(gate(0.004, 1.0, 0.0, 0.002).color(1, 0.2, 0.1, 0.35)) \
+    .over(src(o0).color(0.9, 0.95, 1.0)).over(src(o2).color(1.0, 0.75, 0.4)) \
+    .over(gate(0.004, 1.0, 0.0, 0.002).color(1, 0.2, 0.1, 0.35)) \
     .out(o1)
 
 try:

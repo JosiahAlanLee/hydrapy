@@ -15,7 +15,7 @@ from typing import Optional
 
 import numpy as np
 
-from .core import Camera, Ctx, DelayRef, Image, Output, Patch, Video, default_patch
+from .core import Camera, Ctx, DelayRef, Image, Output, Patch, RenderClock, Video, default_patch
 from .glsl import VERTEX_DESKTOP, TmpRef, compile_patch, to_desktop
 from .signals import as_signal
 
@@ -39,6 +39,9 @@ class GLRenderer:
         self.fps = float(fps)
         self.ctx = ctx or _create_context()
         self.frame = 0
+        self.clock = RenderClock(self.fps)
+        self._reduce_targets = {}
+        self._reduce_program = self._reduce_vao = None
         self.mouse = (0.5, 0.5)
         self.programs = compile_patch(self.patch, precision=precision)
         self.vbo = self.ctx.buffer(np.array([-1, -1, 3, -1, -1, 3], dtype="f4").tobytes())
@@ -54,21 +57,21 @@ class GLRenderer:
                 self._passes.append((prog.output, p.target, gprog, vao, prog.float_uniforms, prog.sampler_uniforms))
         self._copy = self.ctx.program(
             vertex_shader=VERTEX_DESKTOP,
-            fragment_shader="#version 330 core\nuniform sampler2D tex; uniform vec2 resolution; out vec4 f;\n"
-                            "void main(){ f = texture(tex, gl_FragCoord.xy / resolution); }")
+            fragment_shader="#version 330 core\nuniform sampler2D tex; uniform vec2 resolution; uniform float compositeAlpha; out vec4 f;\n"
+                            "void main(){ vec4 c = texture(tex, gl_FragCoord.xy / resolution); f = vec4(c.rgb * mix(1.0, clamp(c.a, 0.0, 1.0), compositeAlpha), 1.0); }")
         self._copy_vao = self.ctx.vertex_array(self._copy, [(self.vbo, "2f", "position")])
         self._alloc()
         self.media: dict[str, object] = {}
         self._blank = self.ctx.texture((1, 1), 4, data=bytes([0, 0, 0, 255]))
 
     # -- buffers -----------------------------------------------------------
-    def _fbo(self):
-        tex = self.ctx.texture(self.size, 4, dtype="f2")
+    def _fbo(self, size=None, dtype="f2"):
+        tex = self.ctx.texture(size or self.size, 4, dtype=dtype)
         tex.filter = (self.gl.LINEAR, self.gl.LINEAR)
         tex.repeat_x = tex.repeat_y = True
         fbo = self.ctx.framebuffer(color_attachments=[tex])
         fbo.use()
-        self.ctx.clear(0.0, 0.0, 0.0, 1.0)
+        self.ctx.clear(0.0, 0.0, 0.0, 0.0)
         return {"tex": tex, "fbo": fbo}
 
     def release(self):
@@ -78,6 +81,12 @@ class GLRenderer:
                 fb["fbo"].release(); fb["tex"].release()
         for fb in getattr(self, "tmps", {}).values():
             fb["fbo"].release(); fb["tex"].release()
+        self._present["fbo"].release(); self._present["tex"].release()
+        for fb in self._reduce_targets.values():
+            fb["fbo"].release(); fb["tex"].release()
+        self._reduce_targets.clear()
+        if self._reduce_program is not None:
+            self._reduce_vao.release(); self._reduce_program.release()
         for m in getattr(self, "media", {}).values():
             if m.get("tex") is not None:
                 m["tex"].release()
@@ -96,12 +105,14 @@ class GLRenderer:
                     fb["fbo"].release(); fb["tex"].release()
             for fb in self.tmps.values():
                 fb["fbo"].release(); fb["tex"].release()
+            self._present["fbo"].release(); self._present["tex"].release()
         depth = {}
         for prog in self.programs:
             for k, v in prog.history.items():
                 depth[k] = max(depth.get(k, 0), v)
         self.outs = {f"o{i}": {"ring": [self._fbo() for _ in range(max(2, depth.get(f"o{i}", 0) + 2))]} for i in range(4)}
         self.tmps = {}
+        self._present = self._fbo(dtype="f1")
         for prog in self.programs:
             for p in prog.passes:
                 if p.target.startswith("tmp") and p.target not in self.tmps:
@@ -111,6 +122,10 @@ class GLRenderer:
         if tuple(size) == self.size:
             return
         self.size = tuple(size)
+        self.clock.last_key = None
+        for fb in self._reduce_targets.values():
+            fb["fbo"].release(); fb["tex"].release()
+        self._reduce_targets.clear()
         self._alloc()
 
     # -- media -------------------------------------------------------------
@@ -164,13 +179,14 @@ class GLRenderer:
 
     # -- frames --------------------------------------------------------------
     def step(self, t: Optional[float] = None):
-        ctx = Ctx(width=self.size[0], height=self.size[1], bpm=self.patch.bpm, mouse=self.mouse, fps=self.fps)
-        ctx.time = (self.frame / self.fps if t is None else t) * self.patch.speed
-        ctx.frame = self.frame
+        ctx, draw, wall_time = self.clock.next(self.patch, self.size, self.mouse, t)
         self.ctx_time = ctx.time
-        if self.patch.frame_rate:
-            ctx.time = math.floor(ctx.time * self.patch.frame_rate) / self.patch.frame_rate
-            self.ctx_time = ctx.time
+        self.frame += 1
+        if not draw:
+            self._update_probes(wall_time, changed=False)
+            from .live import run_hooks
+            run_hooks(ctx, self)
+            return
         current = None
         for output, target, gprog, vao, floats, samplers in self._passes:
             if output is not current and current is not None:
@@ -191,17 +207,75 @@ class GLRenderer:
             vao.render(self.gl.TRIANGLES)
         if current is not None:
             self._swap(current)
-        self.frame += 1
-        self._update_probes()
+        self._update_probes(wall_time)
         from .live import run_hooks
         run_hooks(ctx, self)
 
-    def _update_probes(self):
+    def _probe_mean(self, texture, region):
+        """Exact tiled sum in float32; only one RGBA pixel crosses to the CPU."""
+        if self._reduce_program is None:
+            self._reduce_program = self.ctx.program(vertex_shader=VERTEX_DESKTOP, fragment_shader="""#version 330 core
+uniform sampler2D source; uniform ivec2 origin; uniform ivec2 extent; uniform bool visible; out vec4 result;
+void main() {
+    ivec2 base = ivec2(gl_FragCoord.xy) * 8;
+    vec4 total = vec4(0.0);
+    for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) {
+        ivec2 p = base + ivec2(x, y);
+        if (p.x < extent.x && p.y < extent.y) {
+            vec4 c = texelFetch(source, origin + p, 0);
+            if (visible) c.rgb *= clamp(c.a, 0.0, 1.0);
+            total += c;
+        }
+    }
+    result = total;
+}""")
+            self._reduce_vao = self.ctx.vertex_array(self._reduce_program, [(self.vbo, "2f", "position")])
+        x, y, w, h = region
+        count = w * h
+        level = 0
+        while True:
+            size = ((w + 7) // 8, (h + 7) // 8)
+            key = (level, size)
+            if key not in self._reduce_targets:
+                self._reduce_targets[key] = self._fbo(size, "f4")
+            dest = self._reduce_targets[key]
+            dest["fbo"].use()
+            self.ctx.viewport = (0, 0, *size)
+            texture.use(location=0)
+            self._reduce_program["source"].value = 0
+            self._reduce_program["origin"].value = (x, y)
+            self._reduce_program["extent"].value = (w, h)
+            self._reduce_program["visible"].value = level == 0 and self.patch.composite_alpha
+            self._reduce_vao.render(self.gl.TRIANGLES)
+            if size == (1, 1):
+                data = dest["fbo"].read(components=4, dtype="f4")
+                self.ctx.viewport = (0, 0, *self.size)
+                return np.frombuffer(data, np.float32).reshape(1, 1, 4) / count
+            texture, (w, h), x, y = dest["tex"], size, 0, 0
+            level += 1
+
+    def _update_probes(self, wall_time, changed=True):
+        from .live import Probe
         for pr in self.patch.probes:
+            audio = hasattr(pr, "advance")
+            if not changed:
+                if not audio or pr.advance(wall_time, 1.0 / self.fps):
+                    continue
+            if audio and not pr.needs_update(wall_time, 1.0 / self.fps):
+                continue
             x0, y0, w, h = pr.region(self.size[0], self.size[1])
-            fbo = self.outs[pr.output.name]["ring"][0]["fbo"]
-            data = fbo.read(viewport=(x0, y0, w, h), components=4, dtype="f4")
-            pr.update(np.frombuffer(data, dtype=np.float32).reshape(h, w, 4), self.ctx_time)
+            source = self.outs[pr.output.name]["ring"][0]
+            if type(pr) is Probe:
+                rgba = self._probe_mean(source["tex"], (x0, y0, w, h))
+                pr.update_mean(rgba, self.ctx_time)
+                continue
+            else:
+                data = source["fbo"].read(viewport=(x0, y0, w, h), components=4, dtype="f4")
+                rgba = np.frombuffer(data, dtype=np.float32).reshape(h, w, 4)
+            if audio:
+                pr.update(rgba, wall_time, 1.0 / self.fps)
+            else:
+                pr.update(rgba, self.ctx_time)
 
     def _swap(self, output: Output):
         ring = self.outs[output.name]["ring"]
@@ -216,10 +290,21 @@ class GLRenderer:
         return self.outs[self.patch.display.name]["ring"][0]["tex"]
 
     def read(self) -> np.ndarray:
-        """The displayed output as uint8 RGB (H, W, 3), row 0 = top."""
-        fbo = self.outs[self.patch.display.name]["ring"][0]["fbo"]
-        data = fbo.read(components=3, dtype="f1")
+        """The displayed output over black as RGB, row 0 = top."""
+        self._present["fbo"].use()
+        self.ctx.viewport = (0, 0, *self.size)
+        self.displayed_texture().use(location=0)
+        self._set(self._copy, "tex", 0)
+        self._set(self._copy, "resolution", tuple(map(float, self.size)))
+        self._set(self._copy, "compositeAlpha", float(self.patch.composite_alpha))
+        self._copy_vao.render(self.gl.TRIANGLES)
+        data = self._present["fbo"].read(components=3, dtype="f1")
         return np.frombuffer(data, dtype=np.uint8).reshape(self.size[1], self.size[0], 3)[::-1].copy()
+
+    def read_rgba(self) -> np.ndarray:
+        """Uncomposited straight RGBA, for analysis and transparent-layer tests."""
+        fbo = self.outs[self.patch.display.name]["ring"][0]["fbo"]
+        return np.frombuffer(fbo.read(components=4, dtype="f4"), np.float32).reshape(self.size[1], self.size[0], 4)[::-1].copy()
 
     def blit_to_screen(self, screen_size):
         self.ctx.screen.use()
@@ -227,6 +312,7 @@ class GLRenderer:
         self.displayed_texture().use(location=0)
         self._set(self._copy, "tex", 0)
         self._set(self._copy, "resolution", (float(screen_size[0]), float(screen_size[1])))
+        self._set(self._copy, "compositeAlpha", float(self.patch.composite_alpha))
         self._copy_vao.render(self.gl.TRIANGLES)
 
     def frames(self, n: int, start: float = 0.0):
@@ -235,15 +321,25 @@ class GLRenderer:
             yield self.read()
 
 
+def iter_frames_gl(patch: Optional[Patch] = None, seconds: float = 4.0, fps: float = 30.0, size=None,
+                   start: float = 0.0, warmup: int = 0):
+    r = GLRenderer(patch, size=size, fps=fps)
+    try:
+        for i in range(warmup):
+            r.step(start - (warmup - i) / fps)
+        from .live import clear_recordings
+        clear_recordings()
+        for pr in r.patch.probes:
+            if hasattr(pr, "clear"):
+                pr.clear()
+        yield from r.frames(int(round(seconds * fps)), start=start)
+    finally:
+        r.release()
+
+
 def render_frames_gl(patch: Optional[Patch] = None, seconds: float = 4.0, fps: float = 30.0, size=None,
                      start: float = 0.0, warmup: int = 0) -> list[np.ndarray]:
-    r = GLRenderer(patch, size=size, fps=fps)
-    for i in range(warmup):
-        r.step(start - (warmup - i) / fps)
-    for pr in r.patch.probes:
-        if hasattr(pr, "clear"):
-            pr.clear()                      # a Soundtrack starts at `start`, not at the warm-up
-    return list(r.frames(int(round(seconds * fps)), start=start))
+    return list(iter_frames_gl(patch, seconds, fps, size, start, warmup))
 
 
 def live(patch: Optional[Patch] = None, size=(1280, 720), fps: float = 60.0, title: str = "hydrapy",

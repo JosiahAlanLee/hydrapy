@@ -44,7 +44,9 @@ def _stroke_alpha(q, pts, width, taper, head_at_end=True):
 
 
 def _white(alpha):
-    return np.stack([alpha, alpha, alpha, alpha], axis=-1).astype(np.float32)
+    # Straight alpha: coverage belongs in alpha, not in the colour as well.
+    one = np.ones_like(alpha)
+    return np.stack([one, one, one, alpha], axis=-1).astype(np.float32)
 
 
 # -----------------------------------------------------------------------------
@@ -106,7 +108,7 @@ register(Op("harmonograph", "src",
     float u = (float(i) - 0.5) / n;
 """ + _STROKE_GLSL + """
   }
-  return vec4(vec3(best), best);"""))
+  return vec4(vec3(1.0), best);"""))
 
 
 def _wave_segments(frequency, length) -> int:
@@ -160,7 +162,7 @@ register(Op("wave", "src",
     best = max(best, a);
     prev = p;
   }
-  return vec4(vec3(best), best);"""))
+  return vec4(vec3(1.0), best);"""))
 
 
 def _arc_segments(sweep) -> int:
@@ -193,7 +195,7 @@ register(Op("arc", "src",
     float u = (float(i) - 0.5) / n;
 """ + _STROKE_GLSL + """
   }
-  return vec4(vec3(best), best);"""))
+  return vec4(vec3(1.0), best);"""))
 
 
 # -----------------------------------------------------------------------------
@@ -227,7 +229,7 @@ register(Op("dab", "src", [F("size", 0.15), F("aspect", 0.5), F("angle", 0), F("
   float b = _h11(row * 1.7 + seed * 131.0);
   float dry = _h21(vec2(floor(e.x * 40.0), row));
   float a = base * mix(1.0, 0.3 + 0.7 * b, bristles) * mix(1.0, 0.6 + 0.4 * dry, bristles * 0.5);
-  return vec4(vec3(a), a);"""))
+  return vec4(vec3(1.0), a);"""))
 
 
 def _np_charcoal(tex, st, tooth, rough, scale, seed, env):
@@ -238,12 +240,14 @@ def _np_charcoal(tex, st, tooth, rough, scale, seed, env):
     n = 0.5 + 0.5 * snoise3(np.stack([st[..., 0] * scale * asp[0], st[..., 1] * scale, np.full(st.shape[:2], seed * 7.1 + 0.37, np.float32)], axis=-1))
     n2 = h21(np.floor(st * env.res) + seed)
     t = mix(1.0, n * (0.7 + 0.3 * n2), tooth * (1.0 - 0.6 * np.clip(c[..., 3], 0.0, 1.0)))
-    return (c * t[..., None]).astype(np.float32)
+    c = c.copy()
+    c[..., 3] *= t
+    return c.astype(np.float32)
 
 
 register(Op("charcoal", "texture", [F("tooth", 0.5, scalar=True), F("rough", 1.5, scalar=True), F("scale", 90, scalar=True), F("seed", 0, scalar=True)],
             np=_np_charcoal,
-            doc="Paper: the picture (colour and alpha) broken up by paper tooth (`tooth`, grain at `scale`; the paper shows through most where the stroke is faint) and its edges jittered by `rough` pixels in 2-pixel blocks, so strokes go ragged like charcoal on rough paper.",
+            doc="Paper tooth removes coverage from alpha while preserving straight RGB colour. Edges jitter by `rough` pixels; grain at `scale` stays fixed in image space. Composite over paper with `over` or `recipes.on_paper`.",
             glsl=ASP + """
   vec2 block = floor(_st * resolution / 2.0);
   vec2 j = (_h22(block + seed * 131.0) - 0.5) * rough / resolution;
@@ -251,7 +255,7 @@ register(Op("charcoal", "texture", [F("tooth", 0.5, scalar=True), F("rough", 1.5
   float n = 0.5 + 0.5 * _noise(vec3(_st * scale * asp, seed * 7.1 + 0.37));
   float n2 = _h21(floor(_st * resolution) + seed);
   float t = mix(1.0, n * (0.7 + 0.3 * n2), tooth * (1.0 - 0.6 * clamp(c.a, 0.0, 1.0)));
-  return c * t;"""))
+  return vec4(c.rgb, c.a * t);"""))
 
 
 def _np_smear(tex, st, angle, length, env):
@@ -335,20 +339,22 @@ register(Op("boil", "coord", [F("amount", 0.004), F("rate", 12), F("scale", 6), 
   return _st + n * amount;"""))
 
 
-def _np_polar_repeat(st, n, offset, env):
-    q = st - 0.5
+def _np_polar_repeat(st, n, offset, aspect, env):
+    asp = np.stack([1.0 + (env.res[0] / env.res[1] - 1.0) * bc(aspect, st), np.ones(st.shape[:2])], axis=-1)
+    q = (st - 0.5) * asp
     r = np.sqrt((q * q).sum(-1))
     a = np.arctan2(q[..., 1], q[..., 0])
     wedge = TAU / bc(n, st)
     a = np.mod(a + bc(offset, st), wedge)
-    return 0.5 + r[..., None] * np.stack([np.cos(a), np.sin(a)], axis=-1)
+    return 0.5 + r[..., None] * np.stack([np.cos(a), np.sin(a)], axis=-1) / asp
 
 
-register(Op("polarRepeat", "coord", [F("n", 5), F("offset", 0)], np=_np_polar_repeat,
-            doc="`n` rotated copies of the wedge to the right of the centre, around the centre (kaleid without the mirroring: ornament, rosettes, the Fischinger circle of comets).",
-            glsl="""vec2 q = _st - 0.5;
+register(Op("polarRepeat", "coord", [F("n", 5), F("offset", 0), F("aspect", 1)], np=_np_polar_repeat,
+            doc="`n` rotational copies in image space. `aspect=0` preserves the old normalized-coordinate distortion; default 1 keeps circular orbits on rectangular frames.",
+            glsl="""vec2 asp = vec2(mix(1.0, resolution.x / resolution.y, aspect), 1.0);
+  vec2 q = (_st - 0.5) * asp;
   float r = length(q);
   float a = atan(q.y, q.x);
   float wedge = 6.283185307 / n;
   a = mod(a + offset, wedge);
-  return 0.5 + r * vec2(cos(a), sin(a));"""))
+  return 0.5 + r * vec2(cos(a), sin(a)) / asp;"""))

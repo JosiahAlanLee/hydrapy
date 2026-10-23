@@ -139,6 +139,21 @@ class Const(Signal):
     def js(self): return _num(self.v)
 
 
+class Decay(Signal):
+    """Feedback retention with a half-life in seconds, using actual simulation dt."""
+
+    def __init__(self, half_life: float = 0.5):
+        if not math.isfinite(half_life) or half_life <= 0:
+            raise ValueError("half_life must be positive and finite")
+        self.half_life = float(half_life)
+
+    def value(self, ctx):
+        return math.exp(-math.log(2) * max(0.0, ctx.dt) / self.half_life)
+
+    def js(self):
+        return f"Math.exp(-Math.LN2 * Math.max(0, typeof dt === 'number' ? dt : 1/60) / {self.half_life!r})"
+
+
 class Time(Signal):
     """Seconds since start (Hydra's ``time``)."""
     def value(self, ctx): return ctx.time

@@ -182,7 +182,7 @@ def test_cpu_and_gpu_agree(name, chain):
     rn, rg = Renderer(p, size=SIZE, fps=30), GLRenderer(p, size=SIZE, fps=30)
     a = np.clip(np.nan_to_num(rn.step(1.3)[..., :3]), 0, 1)
     rg.step(1.3)
-    b = rg.read().astype(np.float32) / 255.0
+    b = np.clip(rg.read_rgba()[..., :3], 0, 1)
     d = np.abs(a - b)
     assert d.mean() < 0.02 and (d < 0.05).mean() > 0.97, name
 
@@ -531,7 +531,7 @@ def test_strokes_are_white_with_alpha_and_follow_their_curves():
     circle = arc(0.3, 0, 6.2832, 0.02, 0, 0).render(0, size=(128, 128))
     r = np.hypot(*np.meshgrid((np.arange(128) + 0.5) / 128 - 0.5, (np.arange(128) + 0.5) / 128 - 0.5))
     on = circle[..., 3] > 0.5
-    assert np.allclose(circle[..., 0], circle[..., 3]) and 0.26 < r[on].min() and r[on].max() < 0.34
+    assert np.allclose(circle[..., :3], 1) and 0.26 < r[on].min() and r[on].max() < 0.34
     lis = harmonograph(1, 1, 0, 0, 1.5708, 0, 1, 0.3, 0.02).render(0, size=(128, 128))[..., 3]   # phase pi/2: a circle
     assert np.abs(lis - circle[..., 3]).mean() < 0.02
     w = wave(2, 0.2, 0.02, 0, 0, 1, 0).render(0, size=(128, 72))[..., 3]
@@ -575,7 +575,7 @@ def test_soundtrack_reads_the_strip_as_audio():
     for i in range(24):
         r.step(i / 24)
     s = tr.samples
-    assert len(s) == 24 * round(44100 / 24) and abs(tr.duration - 1.0) < 0.01
+    assert len(s) == 44100 and tr.duration == 1.0
     spec = np.abs(np.fft.rfft(s * np.hanning(len(s))))
     freqs = np.fft.rfftfreq(len(s), 1 / tr.sr)
     assert abs(freqs[spec.argmax()] - 240) < 2 and abs(s.mean()) < 0.02                  # the drawn pitch, DC removed
