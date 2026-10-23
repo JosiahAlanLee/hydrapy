@@ -613,6 +613,7 @@ function __smoothstep(t){t=Math.min(Math.max(t,0),1);return t*t*(3-2*t);}
 function __drift(x,seed){var i=Math.floor(x),a=__hash11(i+seed),b=__hash11(i+1+seed);return a+(b-a)*__smoothstep(x-i);}
 function __env(p,a,d,c,lo,hi){var u=p<a?p/a:Math.pow(Math.max(0,1-(p-a)/d),c);return lo+(hi-lo)*u;}
 function __table(tbl,rate,t){var x=t*rate,n=tbl.length,i=Math.floor(x)%n,j=(i+1)%n,f=x-Math.floor(x);return tbl[i]+(tbl[j]-tbl[i])*f;}
+function __steptable(tbl,rate,t){var n=tbl.length,i=((Math.floor(t*rate)%n)+n)%n;return tbl[i];}
 var __EASE={linear:function(t){return t;},easeInQuad:function(t){return t*t;},easeOutQuad:function(t){return t*(2-t);},
 easeInOutQuad:function(t){return t<0.5?2*t*t:-1+(4-2*t)*t;},easeInCubic:function(t){return t*t*t;},easeOutCubic:function(t){return Math.pow(t-1,3)+1;},
 easeInOutCubic:function(t){return t<0.5?4*t*t*t:(t-1)*(2*t-2)*(2*t-2)+1;},easeInQuart:function(t){return t*t*t*t;},easeOutQuart:function(t){return 1-Math.pow(t-1,4);},
@@ -630,21 +631,92 @@ function __seq(arr,speed,smooth,offset,ease,time,bpm){var n=arr.length;var index
 # ---------------------------------------------------------------------------
 
 class Fx:
-    """A seeded random source with the fxhash helper names: ``rand()``, ``rnd_btw``, ``rnd_btwexp``,
-    ``rnd_int``, ``pick``. Same hash, same numbers, so a patch is reproducible from its seed:
+    """fxhash-style determinism, with entropy locking.
 
-        fx = Fx("ooXYZ...")               # or any string/int
-        osc(fx.rnd_btw(5, 40), 0.1, fx.rnd_btwexp(0, 2)).kaleid(fx.rnd_int(3, 8)).out()
+    ``Fx("oo…")`` reproduces fxhash's own generator bit for bit (the ``sfc32`` snippet seeded from
+    the hash), so a hash gives the same numbers here as in a browser; any other string or int seeds
+    it too.  The helper names are the usual ones: ``rand()``, ``rnd_btw``, ``rnd_btwexp``,
+    ``rnd_int``, ``pick``.
+
+    ``lock`` is aebrer's entropy locking (CC0): with that probability, each draw first pulls the
+    generator back to its seed state, so the stream keeps falling into earlier sequences — loops of
+    unpredictable length, sometimes a few values, sometimes never.  The check consumes a draw of
+    its own, as in the original ``if (random_int(1,1000) > 997) fxrand = sfc32(...hashes)``.
+    ``reseed()`` locks by hand; ``save()``/``restore()`` make bottlenecks anywhere.
+
+        fx = Fx("ooHydrapy", lock=0.003)
+        osc(fx.rnd_btw(5, 40)).kaleid(fx.rnd_int(3, 8)).out()
     """
 
-    def __init__(self, hash_or_seed="hydrapy"):
-        import random, zlib
-        seed = hash_or_seed if isinstance(hash_or_seed, int) else zlib.crc32(str(hash_or_seed).encode("utf-8"))
-        self.hash = hash_or_seed
-        self._rng = random.Random(seed)
+    ALPHABET = "123456789abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ"
 
+    def __init__(self, hash_or_seed="hydrapy", lock: float = 0.0):
+        self.hash = hash_or_seed
+        self.lock = float(lock)
+        self._seed_state = self._seed_from(hash_or_seed)
+        self._state = list(self._seed_state)
+        self.locks = 0
+
+    # -- seeding ----------------------------------------------------------
+    @classmethod
+    def _b58dec(cls, s: str) -> float:
+        p = 0.0
+        for i, c in enumerate(s):      # float64 accumulation with exactly-rounded powers: what V8 computes
+            p = p + cls.ALPHABET.index(c) * float(len(cls.ALPHABET) ** (len(s) - i - 1))
+        return p
+
+    @classmethod
+    def _seed_from(cls, h) -> list[int]:
+        M = 0xFFFFFFFF
+        if isinstance(h, str) and h.startswith("oo") and len(h) > 10 and all(c in cls.ALPHABET for c in h[2:]):
+            n = len(h) // 4
+            trunc = h[2:]
+            chunks = [trunc[i:i + n] for i in range(0, len(trunc) - len(trunc) % n, n)][:4]
+            while len(chunks) < 4:
+                chunks.append(chunks[-1])
+            return [int(cls._b58dec(c)) & M for c in chunks]
+        import zlib
+        base = h if isinstance(h, int) else zlib.crc32(str(h).encode("utf-8"))
+        x = base & M
+        out = []
+        for _ in range(4):                 # splitmix32 to spread one seed into four words
+            x = (x + 0x9E3779B9) & M
+            z = x
+            z = ((z ^ (z >> 16)) * 0x85EBCA6B) & M
+            z = ((z ^ (z >> 13)) * 0xC2B2AE35) & M
+            out.append((z ^ (z >> 16)) & M)
+        return out
+
+    def _raw(self) -> float:
+        M = 0xFFFFFFFF
+        a, b, c, d = self._state
+        t = (a + b + d) & M
+        d = (d + 1) & M
+        a = b ^ (b >> 9)
+        b = (c + (c << 3)) & M
+        c = ((c << 21) | (c >> 11)) & M
+        c = (c + t) & M
+        self._state = [a, b, c, d]
+        return t / 4294967296.0
+
+    # -- the lock ---------------------------------------------------------------
+    def reseed(self):
+        """Pull the generator back to the hash state (what the lock does at random)."""
+        self._state = list(self._seed_state)
+        self.locks += 1
+
+    def save(self):
+        return list(self._state)
+
+    def restore(self, state):
+        self._state = list(state)
+
+    # -- draws -------------------------------------------------------------------
     def rand(self) -> float:
-        return self._rng.random()
+        v = self._raw()
+        if self.lock > 0 and self._raw() > 1.0 - self.lock:   # the check draws too; a lock restarts the stream exactly
+            self.reseed()
+        return v
 
     fxrand = rand
 
@@ -661,3 +733,33 @@ class Fx:
 
     def pick(self, seq):
         return seq[self.rnd_int(0, len(seq) - 1)]
+
+    def table(self, n: int, lo: float = 0.0, hi: float = 1.0) -> list[float]:
+        return [self.rnd_btw(lo, hi) for _ in range(n)]
+
+
+class EntropyLock(Signal):
+    """A stepped random signal drawn from an entropy-locked ``Fx`` stream: ``rate`` new values a
+    second, in ``lo..hi``.  Because the stream reseeds itself at random, the sequence of values keeps
+    recurring in loops of unpredictable length; drive ``tear``/``shred`` seeds or any parameter with it
+    and the glitches come back.  ``steps`` values are precomputed so the HTML export carries the same
+    loops.  After aebrer's entropy locking (CC0).
+    """
+
+    def __init__(self, hash_or_seed="hydrapy", rate: float = 12.0, lock: float = 0.003, lo: float = 0.0,
+                 hi: float = 1.0, steps: int = 2048):
+        self.fx = Fx(hash_or_seed, lock=lock)
+        self.rate, self.lo, self.hi = float(rate), float(lo), float(hi)
+        self.values = self.fx.table(int(steps), lo, hi)
+
+    def value(self, ctx):
+        i = int(math.floor(ctx.time * self.rate)) % len(self.values)
+        return self.values[i]
+
+    def js(self):
+        tbl = "[" + ",".join(f"{v:.5g}" for v in self.values) + "]"
+        return f"__steptable({tbl},{_num(self.rate)},time)"
+
+    def hydra_array(self) -> str:
+        bpm = 30.0
+        return "[" + ",".join(f"{v:.4g}" for v in self.values[:512]) + f"].fast({self.rate * 60 / bpm:g})"

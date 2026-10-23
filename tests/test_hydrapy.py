@@ -386,3 +386,31 @@ def test_cvfile_and_cvout_roundtrip(tmp_path):
     out.close(); clear_hooks()
     back = CvIn.from_file(str(tmp_path / "out.wav"))
     assert abs(back.cv[0](Ctx(time=0.5)) - 5.0 * Lfo(0.5)(Ctx(time=14 / 30))) < 0.15
+
+
+# --- entropy locking -------------------------------------------------------------------------
+
+def test_fx_matches_fxhash_sfc32_bit_for_bit():
+    # expected values come from the fxhash snippet run in node for this hash
+    fx = Fx("ooQ2j7x9KmN3pRtVwYz5AbCdEfGhJkLmNpQrStUvWxYz1234567")
+    expected = [0.66925048828125, 0.01876902603544295, 0.2789015178568661, 0.4374880369286984,
+                0.4301606831140816, 0.6958099333569407, 0.3829852268099785, 0.7686102406587452]
+    assert [fx.rand() for _ in range(8)] == expected
+
+
+def test_entropy_lock_recurs():
+    fx = Fx("ooQ2j7x9KmN3pRtVwYz5AbCdEfGhJkLmNpQrStUvWxYz1234567", lock=0.02)
+    vals = [fx.rand() for _ in range(400)]
+    assert fx.locks > 0 and vals.count(vals[0]) == fx.locks + 1      # every lock restarts the stream exactly
+    el = EntropyLock("ooQ2j7x9KmN3pRtVwYz5AbCdEfGhJkLmNpQrStUvWxYz1234567", rate=12, lock=0.003, steps=512)
+    seq = [el(Ctx(time=i / 12)) for i in range(512)]
+    assert len(set(seq)) < 400                                           # a free stream would give ~512 distinct values
+    assert "__steptable(" in el.js()
+
+
+def test_tear_and_shred_remap_coordinates():
+    base = osc(10).render(0.0, size=(64, 36))
+    torn = osc(10).tear(3.0, 3, 0.2, 0.3).render(0.0, size=(64, 36))
+    shredded = voronoi(5).shred(2.0, 4, 0.3, 1.5).render(0.0, size=(64, 36))
+    assert not np.allclose(base, torn) and np.isfinite(shredded).all()
+    assert "tear(" in osc().tear(EntropyLock("x", 12, 0.01, steps=16)).glsl()

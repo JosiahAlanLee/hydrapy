@@ -326,6 +326,30 @@ the ES-6/ES-3 are nominally ±10 V at full scale, but check one channel against 
 `volts_per_fs` accordingly. Note the browser export can't see any of this (pages freeze live values
 at what they were when exported); the GL window is the live venue.
 
+## Entropy locking (after aebrer)
+
+[aebrer](https://www.raster.art/artwork/entropy-locked-recursive-glitch-textures-by-aebrer/about)'s
+entropy locking is a seeded random stream that, with a small probability on each draw, gets pulled
+back to its seed state — `if (random_int(1,1000) > 997) fxrand = sfc32(...hashes)` — so the
+sequence keeps falling into earlier sequences, loops of unpredictable length, "random bottlenecks"
+that make a system with too much entropy occupy a [lesser infinity](https://www.raster.art/artwork/lesser-infinities-by-aebrer/about).
+When that stream steers pixel feedback the same glitches recur, and recurrence on top of feedback
+grows the fractal texture. CC0; ported here with thanks.
+
+```python
+fx = Fx("ooYourFxhashHash")                      # fxhash's own sfc32, bit for bit: a hash gives the same numbers as the browser did
+lock = EntropyLock("ooYourFxhashHash", rate=24, lock=0.01)   # 24 draws a second from a locked copy of the stream
+src(o0).shred(lock, 4, 0.25, 1.5)               # samples of the image copied onto itself (magnified)
+       .tear(lock * 7, 3, 0.1, 0.3)              # bands torn sideways
+       .blend(osc(20).kaleid(fx.rnd_int(3, 7)), 0.05)
+       .out(o0)
+```
+
+`Fx(hash, lock=p)` locks any draw sequence (`rand`, `rnd_btw`, `rnd_btwexp`, `rnd_int`, `pick`,
+`table`; `reseed()`, `save()`/`restore()` for bottlenecks by hand). `EntropyLock` precomputes its
+steps so the HTML export carries the same loops. `tear` and `shred` are coordinate ops, so they are
+free and work on any source; `patches/19_entropy_lock.py` is the full loop.
+
 ## Op reference
 
 ### Sources
@@ -373,6 +397,8 @@ at what they were when exported); the GL window is the live venue.
 | `wobble` | `frequency=3, amount=0.02, speed=1` | **new** | Sinusoidal displacement. |
 | `glitch` | `blocks=8, amount=0.1, rate=4, seed=0` | **new** | Random block displacement, re-rolled `rate` times a second. |
 | `pan` | `x=0, y=0, speedX=0, speedY=0` | **new** | Translate without wrapping (scroll wraps). pan(0, 0, 0, fps) moves one frame-height per frame: a painted strip running through the gate, so smears continue from frame to frame. |
+| `tear` | `seed=0, count=3, size=0.12, shift=0.3, vertical=0` | **new** | `count` horizontal bands (vertical=1: columns) torn sideways by up to `shift`; which bands and how far come from `seed`. |
+| `shred` | `seed=0, count=4, size=0.2, scale=1` | **new** | `count` rectangular samples of the image copied onto other places (magnified by `scale`); which, where and how big come from `seed`. Later copies copy from earlier ones. |
 
 ### Colour ops
 
@@ -511,6 +537,7 @@ hydrapy/glsl.py        chain -> multi-pass GLSL compiler
 hydrapy/backend_gl.py  moderngl renderer, headless and windowed
 hydrapy/ops_paint.py   painted-film ops: stain alpha drops crackle veins scratches dust bleed bake pan
 hydrapy/ops_3d.py      plane3d sphere3d cylinder3d
+hydrapy/ops_glitch.py  tear, shred (entropy-locked glitch feedback)
 hydrapy/drawing.py     Text, Lines (SVG flattener), plant()/meadow(), to_svg()
 hydrapy/recipes.py     handpainted(), mothlight(), film()
 hydrapy/live.py        CvIn/CvOut, OscIn/OscOut, Midi, Link, Probe, per-frame hooks
@@ -518,7 +545,7 @@ hydrapy/synth.py       image quilting, Quilt frame bank
 hydrapy/export.py      GIF/MP4/PNG/ANSI, Hydra JS, Python, standalone HTML runtime
 hydrapy/hydra_import.py Hydra JS -> patch
 hydrapy/cli.py
-patches/               examples (00–18)
+patches/               examples (00–19)
 docs/tour.py           renders docs/tour.mp4, the feature tour
 tests/                 ~300 tests incl. CPU/GPU parity for every op
 ```

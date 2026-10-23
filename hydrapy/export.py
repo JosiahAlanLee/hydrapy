@@ -95,7 +95,7 @@ def to_ansi(frame: np.ndarray, cols: int = 80, rows: Optional[int] = None) -> st
 
 def _hydra_signal(sig) -> str:
     sig = as_signal(sig)
-    if isinstance(sig, Seq):
+    if isinstance(sig, Seq) or hasattr(sig, "hydra_array"):
         return sig.hydra_array()
     if isinstance(sig, Fn):
         if getattr(sig, "js_source", None):   # came from a Hydra sketch: give it back verbatim
