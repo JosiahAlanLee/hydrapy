@@ -687,9 +687,9 @@ class CvOut:
                 out[:, ch] = sig[:, i]
         for i, q in self.audio_routes.items():               # a drawn soundtrack, resampled to the file's rate
             tr = q.track
-            a = tr.samples
-            if tr.sr != self.samplerate and len(a):
-                a = np.interp(np.linspace(0.0, len(a) - 1, int(round(len(a) * self.samplerate / tr.sr))), np.arange(len(a)), a)
+            resampler = _LinearResampler(tr.sr, self.samplerate)
+            a = (np.concatenate([resampler.process(c) for c in tr.chunks])
+                 if tr.chunks else np.zeros(0, np.float32))
             if len(a) > out.shape[0]:
                 out = np.vstack([out, np.zeros((len(a) - out.shape[0], nchan), dtype=np.float32)])
             out[: len(a), self.channels[i]] = np.clip(a, -1.0, 1.0)
@@ -788,6 +788,7 @@ class Soundtrack(Probe):
         self._tick = 0
         self._clock_rate = self.rate
         self._sample_remainder = 0.0
+        self._generation = 0
         self._column = None
         self._hp_x = 0.0
         self._hp_y = 0.0
@@ -857,12 +858,15 @@ class Soundtrack(Probe):
             fn(chunk)
 
     def _frame_audio(self, col: np.ndarray) -> np.ndarray:
-        self._sample_remainder += self.sr / self.rate
-        n = int(math.floor(self._sample_remainder + 1e-9))
-        self._sample_remainder -= n
+        span = self.sr / self.rate
+        remainder = self._sample_remainder
+        # Assign sample centres to optical intervals, carrying the fractional
+        # boundary instead of stretching each picture to its integer chunk size.
+        n = int(math.floor(remainder + span + 0.5 + 1e-9))
+        self._sample_remainder = remainder + span - n
         h = len(col)
         x = (col - 0.5) * 2.0 * self.gain
-        y = np.interp((np.arange(n) + 0.5) * h / n - 0.5, np.arange(h), x)
+        y = np.interp((np.arange(n) + 0.5 - remainder) * h / span - 0.5, np.arange(h), x)
         if self.ac:
             a, px, py = self._hp_a, self._hp_x, self._hp_y
             out = np.empty(n)
@@ -883,6 +887,7 @@ class Soundtrack(Probe):
         return sum(len(c) for c in self.chunks) / self.sr
 
     def clear(self):
+        self._generation += 1
         self.chunks = []
         self._last_t = None
         self._origin = None
@@ -905,6 +910,41 @@ class Soundtrack(Probe):
         return {"output": self.output.name, "x": self.x, "width": self.width, "fps": self.rate, "gain": self.gain, "ac": self.ac}
 
 
+class _LinearResampler:
+    """Causal linear interpolation on one sample grid, independent of chunking.
+
+    Output centres are delayed by half an input sample. This fixed latency lets
+    each push return its rounded cumulative sample count without looking into
+    the next chunk; only the preceding sample is needed at the seam. As before,
+    this is linear interpolation, not an anti-aliasing filter.
+    """
+
+    def __init__(self, source_rate: int, output_rate: int):
+        self.source_rate, self.output_rate = source_rate, output_rate
+        self._source_samples = self._output_samples = 0
+        self._previous = None
+
+    def process(self, chunk: np.ndarray) -> np.ndarray:
+        if not len(chunk) or self.source_rate == self.output_rate:
+            return chunk
+        start = self._source_samples
+        self._source_samples += len(chunk)
+        # Integer nearest-even rounding avoids a floating clock at long durations.
+        total, remainder = divmod(self._source_samples * self.output_rate, self.source_rate)
+        total += 2 * remainder > self.source_rate or (2 * remainder == self.source_rate and total % 2)
+        n = total - self._output_samples
+        # Subtract integer origins BEFORE conversion to float, keeping phase
+        # precision even when a performance has already emitted millions of samples.
+        offset = (((2 * self._output_samples + 1) * self.source_rate - 2 * start * self.output_rate)
+                  / (2 * self.output_rate) - 1)
+        positions = offset + np.arange(n) * (self.source_rate / self.output_rate)
+        previous = chunk[0] if self._previous is None else self._previous
+        values = np.concatenate(([previous], chunk))
+        self._previous = chunk[-1]
+        self._output_samples = total
+        return np.interp(positions, np.arange(-1, len(chunk)), values).astype(np.float32)
+
+
 class AudioQueue:
     """Audio-rate chunks from a Soundtrack, resampled to a stream's rate and pulled block by block
     from the audio callback.  Runs dry -> the last chunk repeats (the sound of a held frame)."""
@@ -912,22 +952,24 @@ class AudioQueue:
     def __init__(self, track: Soundtrack, samplerate: int):
         self.track, self.samplerate = track, int(samplerate)
         self._q: list[np.ndarray] = []
-        self._pos = 0
-        self._source_samples = self._output_samples = 0
-        self._last = np.zeros(max(int(round(self.samplerate / track.rate)), 1), np.float32)
         self._lock = threading.Lock()
+        self._reset()
         track.listeners.append(self.push)
 
+    def _reset(self):
+        self._q.clear()
+        self._pos = 0
+        self._generation = self.track._generation
+        self._resampler = _LinearResampler(self.track.sr, self.samplerate)
+        self._last = np.zeros(max(int(round(self.samplerate / self.track.rate)), 1), np.float32)
+
     def push(self, chunk: np.ndarray):
-        if self.samplerate != self.track.sr:
-            self._source_samples += len(chunk)
-            total = int(round(self._source_samples * self.samplerate / self.track.sr))
-            n = total - self._output_samples
-            self._output_samples = total
-            chunk = np.interp(np.linspace(0.0, len(chunk) - 1, n), np.arange(len(chunk)), chunk).astype(np.float32)
-        if not len(chunk):
-            return
         with self._lock:
+            if self._generation != self.track._generation:
+                self._reset()
+            chunk = self._resampler.process(chunk)
+            if not len(chunk):
+                return
             self._q.append(chunk)
             if len(self._q) > 6:                          # the renderer is ahead of real time: let it go
                 del self._q[: len(self._q) - 6]
@@ -937,6 +979,8 @@ class AudioQueue:
         out = np.empty(n, np.float32)
         i = 0
         with self._lock:
+            if self._generation != self.track._generation:
+                self._reset()
             while i < n:
                 if not self._q:
                     self._q.append(self._last)

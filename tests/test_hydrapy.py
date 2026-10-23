@@ -650,7 +650,7 @@ def test_cvout_carries_a_soundtrack_at_audio_rate(tmp_path):
     clear_hooks()
     with wavemod.open(str(tmp_path / "cv.wav")) as w:
         sr, data = w.getframerate(), np.frombuffer(w.readframes(w.getnframes()), "<i2").reshape(-1, w.getnchannels()) / 32767.0
-    assert sr == 48000 and data.shape[1] == 2 and abs(data.shape[0] - 96000) < 100       # rounding per frame: 0.03% long
+    assert sr == 48000 and data.shape == (96000, 2)
     spec = np.abs(np.fft.rfft(data[:, 0] * np.hanning(len(data)))); fr = np.fft.rfftfreq(len(data), 1 / sr); spec[fr < 30] = 0
     assert abs(fr[spec.argmax()] - 240) < 2 and 0.45 < np.abs(data[:, 0]).max() < 0.56      # the drawn tone, resampled, at ±5 V
     assert data[:, 1].min() > -0.01 and abs(data[:, 1].max() - 0.5) < 0.02                  # the CV beside it, 0..5 V
@@ -658,5 +658,10 @@ def test_cvout_carries_a_soundtrack_at_audio_rate(tmp_path):
     tr.listeners.clear()
     q = AudioQueue(tr, 48000)
     q.push(np.linspace(-1, 1, 1837, dtype=np.float32)); q.push(np.full(1837, 0.5, np.float32))
+    queued = [c.copy() for c in q._q]
     a, b = q.pull(3000), q.pull(3000)
-    assert a[0] == -1 and a[1998] > 0.99 and a[1999] == 0.5 and (b == 0.5).all()           # 1837 @ 44.1k -> 1999 @ 48k
+    assert a[0] == -1 and a[1998] > 0.99 and 0.5 < a[1999] < 1
+    assert (a[2001:] == 0.5).all()                           # interpolate through the seam
+    expected = np.concatenate([*queued, np.tile(queued[-1], 3)])[:6000]
+    np.testing.assert_array_equal(np.concatenate([a, b]), expected)  # hold the whole converted chunk
+    q.close()
