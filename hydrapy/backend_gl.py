@@ -240,6 +240,9 @@ def render_frames_gl(patch: Optional[Patch] = None, seconds: float = 4.0, fps: f
     r = GLRenderer(patch, size=size, fps=fps)
     for i in range(warmup):
         r.step(start - (warmup - i) / fps)
+    for pr in r.patch.probes:
+        if hasattr(pr, "clear"):
+            pr.clear()                      # a Soundtrack starts at `start`, not at the warm-up
     return list(r.frames(int(round(seconds * fps)), start=start))
 
 

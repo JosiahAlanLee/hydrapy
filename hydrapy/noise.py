@@ -261,7 +261,23 @@ float _bayer4(vec2 px) {
   else if (a == 12.0) m = 15.0; else if (a == 13.0) m = 7.0; else if (a == 14.0) m = 13.0; else m = 5.0;
   return (m + 0.5) / 16.0;
 }
+float _segd(vec2 p, vec2 a, vec2 b) {
+  vec2 pa = p - a, ba = b - a;
+  float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-9), 0.0, 1.0);
+  return length(pa - ba * h);
+}
 """
+
+
+def segd(p: np.ndarray, a, b) -> np.ndarray:
+    """Distance from points p (..., 2) to the segment a-b (same maths as the GLSL `_segd`)."""
+    a = np.asarray(a, dtype=np.float32)
+    b = np.asarray(b, dtype=np.float32)
+    pa = p - a
+    ba = b - a
+    h = np.clip((pa * ba).sum(-1) / max(float((ba * ba).sum()), 1e-9), 0.0, 1.0)
+    d = pa - ba * h[..., None]
+    return np.sqrt((d * d).sum(-1))
 
 BAYER4 = np.array([[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]], dtype=np.float32)
 

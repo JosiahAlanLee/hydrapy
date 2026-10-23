@@ -146,7 +146,8 @@ def main(argv=None):
         if ext == ".gif":
             save_gif(frames, a.out, fps=a.fps, scale=a.scale)
         elif ext in (".mp4", ".mov", ".webm", ".mkv"):
-            save_mp4(frames, a.out, fps=a.fps, scale=a.scale)
+            track = next((pr for pr in patch.probes if hasattr(pr, "chunks") and pr.chunks), None)   # a Soundtrack the patch drew
+            save_mp4(frames, a.out, fps=a.fps, scale=a.scale, audio=track)
         elif ext == ".png":
             save_png(frames[-1], a.out)
         elif ext == "":

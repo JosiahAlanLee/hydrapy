@@ -523,3 +523,94 @@ def test_python_export_round_trips_native_signals_and_frame_rate():
     after = [Renderer(default_patch(), size=(32, 18), fps=30).step(t) for t in (0.3, 1.9)]
     assert all(np.array_equal(np.nan_to_num(a), np.nan_to_num(b)) for a, b in zip(before, after))
     reset_patch()
+
+
+# --- strokes, paper, print, drawn sound ---------------------------------------------------------
+
+def test_strokes_are_white_with_alpha_and_follow_their_curves():
+    circle = arc(0.3, 0, 6.2832, 0.02, 0, 0).render(0, size=(128, 128))
+    r = np.hypot(*np.meshgrid((np.arange(128) + 0.5) / 128 - 0.5, (np.arange(128) + 0.5) / 128 - 0.5))
+    on = circle[..., 3] > 0.5
+    assert np.allclose(circle[..., 0], circle[..., 3]) and 0.26 < r[on].min() and r[on].max() < 0.34
+    lis = harmonograph(1, 1, 0, 0, 1.5708, 0, 1, 0.3, 0.02).render(0, size=(128, 128))[..., 3]   # phase pi/2: a circle
+    assert np.abs(lis - circle[..., 3]).mean() < 0.02
+    w = wave(2, 0.2, 0.02, 0, 0, 1, 0).render(0, size=(128, 72))[..., 3]
+    cols = np.where(w.max(0) > 0.5)[0]
+    assert cols.min() <= 1 and cols.max() >= 126 and 0.01 < (w > 0.5).mean() < 0.3    # spans the width, is a line
+    tapered = arc(0.3, 0, 3.0, 0.03, 1.0, 0).render(0, size=(128, 128))[..., 3]
+    head, tail = tapered[:, :64].sum(), tapered[:, 64:].sum()                         # the arc ends on the left (3 rad)
+    assert head > tail * 1.5                                                            # the head (end of the arc) is heavier
+
+
+def test_dab_charcoal_smear_halftone_boil_polar_repeat():
+    d = dab(0.3, 0.5, 0.0, 0.0, 0.3).render(0, size=(96, 96))[..., 3]
+    assert d[48, 48] > 0.95 and d[48, 5] == 0 and d.mean() < 0.4
+    stroke = arc(0.3, 0, 6.2832, 0.03, 0, 0)
+    plain, paper = stroke.render(0, size=(96, 96))[..., 3], stroke.charcoal(1.0, 2.0, 60).render(0, size=(96, 96))[..., 3]
+    assert paper.mean() < plain.mean() and (paper > 0.01).sum() > 0                    # tooth takes charcoal away
+    bar = shape(4, 0.3, 0.002).scale(1, 0.1, 1)                                            # a thin vertical bar at the centre
+    plain, sm = bar.render(0, size=(96, 54))[..., 0], bar.smear(0.0, 0.3).render(0, size=(96, 54))[..., 0]
+    cols_plain, cols_sm = np.where(plain.sum(0) > 0.01)[0], np.where(sm.sum(0) > 0.01)[0]
+    assert abs(sm.sum() - plain.sum()) < 0.5 and len(cols_sm) > len(cols_plain) * 3        # a normalised drag: same ink, spread out
+    assert cols_sm.min() >= cols_plain.min() - 1 and cols_sm.max() > cols_plain.max() + 10  # to the right only
+    pic = osc(6, 0.1, 1.2).rotate(0.4)
+    base = pic.render(1.0, size=(96, 54))[..., :3]
+    ht = solid(0.5, 0.5, 0.5).halftone(8, 0.0, 1.0).render(0, size=(96, 96))[..., 0]
+    assert ((ht < 0.05) | (ht > 0.95)).mean() > 0.7 and 0.25 < ht.mean() < 0.75             # dots: ink or paper, soft edges
+    assert solid(1, 1, 1).halftone(8).render(0, size=(32, 32))[..., :3].min() > 0.99      # white stays paper
+    b = pic.boil(0.05, 12, 4).render(1.0, size=(96, 54))[..., :3]
+    assert np.abs(b - base).mean() > 0.01 and abs(b.mean() - base.mean()) < 0.03
+    sq = shape(4, 0.1, 0.002).scroll(-0.3, 0).polarRepeat(5).render(0, size=(96, 96))[..., 0]
+    ang = np.arctan2(*np.meshgrid((np.arange(96) + 0.5) / 96 - 0.5, (np.arange(96) + 0.5) / 96 - 0.5)[::-1])
+    hist = np.histogram(ang[sq > 0.5], bins=10, range=(-np.pi, np.pi))[0]
+    assert (hist > 0).sum() >= 5                                                          # five copies around the centre
+
+
+def test_soundtrack_reads_the_strip_as_audio():
+    import math
+    p = Patch(size=(160, 90))
+    osc(10 * 2 * math.pi, 0, 0).rotate(1.5708).out(p.o0, patch=p)                        # 10 stripes per frame -> 240 Hz at 24 fps
+    tr = Soundtrack(p.o0, x=0.5, width=0.02, fps=24, patch=p)
+    r = Renderer(p, size=(160, 90), fps=24)
+    for i in range(24):
+        r.step(i / 24)
+    s = tr.samples
+    assert len(s) == 24 * round(44100 / 24) and abs(tr.duration - 1.0) < 0.01
+    spec = np.abs(np.fft.rfft(s * np.hanning(len(s))))
+    freqs = np.fft.rfftfreq(len(s), 1 / tr.sr)
+    assert abs(freqs[spec.argmax()] - 240) < 2 and abs(s.mean()) < 0.02                  # the drawn pitch, DC removed
+    assert 0.2 < tr(Ctx(time=1.0)) < 0.8                                                  # still a probe: the strip's mean
+    from hydrapy.export import build_spec
+    assert build_spec(p)["soundtrack"]["output"] == "o0"
+
+
+def test_save_mp4_muxes_a_soundtrack(tmp_path):
+    import math
+    pytest.importorskip("imageio_ffmpeg")
+    p = Patch(size=(64, 36))
+    osc(4 * 2 * math.pi, 0, 0).rotate(1.5708).out(p.o0, patch=p)
+    tr = Soundtrack(p.o0, fps=12, patch=p)
+    r = Renderer(p, size=(64, 36), fps=12)
+    frames = list(r.frames(12))
+    out = save_mp4(frames, str(tmp_path / "t.mp4"), fps=12, audio=tr)
+    import imageio_ffmpeg, subprocess
+    info = subprocess.run([imageio_ffmpeg.get_ffmpeg_exe(), "-i", out], capture_output=True, text=True).stderr
+    assert "Audio: aac" in info and "Video: h264" in info
+    tr.wav(str(tmp_path / "t.wav"))
+    assert (tmp_path / "t.wav").stat().st_size > 44
+
+
+def test_studie_and_cutout_recipes_render():
+    from hydrapy.recipes import cutout, studie
+    reset_patch()
+    studie(o0, comets=5, waves=1).out(o0)
+    cutout(osc(5).kaleid(3), screen=4, hold=True).out(o1)
+    assert default_patch().frame_rate == 12
+    r = Renderer(default_patch(), size=SIZE, fps=24)
+    for t in (0.0, 0.5, 1.0):
+        r.step(t)
+    a = r.env.texture(o0); b = r.env.texture(o1)
+    assert np.isfinite(a).all() and a[..., :3].max() > 0.3 and a[..., :3].mean() < 0.3    # strokes on black, with trails
+    assert np.isfinite(b).all() and 0.1 < b[..., :3].mean() < 0.95
+    assert len(compile_patch()) == 2
+    reset_patch()

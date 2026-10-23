@@ -5,10 +5,10 @@
 [Hydra](https://hydra.ojack.xyz) — Olivia Jack's browser video synth — ported to Python, then pushed in a
 modular-synth direction: every parameter is a CV input, there's a wavefolder, Conway's Life and
 Gray–Scott reaction–diffusion run as feedback ops, a Rutt-Etra scan processor and a GPU pixel sorter,
-painted-film, VHS and Super 8 layers, and patches export back to Hydra, to standalone WebGL pages,
-or to video files.
+painted-film, VHS and Super 8 layers, Fischinger's charcoal oscillators, a patch that draws its own
+soundtrack, and patches export back to Hydra, to standalone WebGL pages, or to video files.
 
-`docs/tour.mp4` (4 min) shows every primitive for a second and then the combination patches;
+`docs/tour.mp4` (5 min) shows every primitive for a second and then the combination patches;
 `python docs/tour.py` re-renders it.
 
 ```python
@@ -392,6 +392,52 @@ super8(pic, stock=0).out(o2)                        # Kodachrome, 18 fps, reddis
 super8(handpainted(seed=SH(6, 0, 99)), stock=2)     # the painted-film recipes, projected
 ```
 
+## Fischinger, cut paper, and the drawn soundtrack
+
+Three more things from the history of abstract animation. `patches/23_studie.py`, `24_cutout.py`,
+`25_ornament_sound.py`.
+
+**Painted oscillators.** Fischinger's *Studie* films (1929–34) are oscillators drawn in charcoal —
+comets, sine sweeps, arcs, pulsing to a record — so here the oscillator is a *stroke*:
+
+```python
+harmonograph(3, 2, 0, 0, 1.5708, 0, 1, 0.4, 0.012)        # a Lissajous drawn as a line (f3/f4 > 0: damped double pendulum)
+wave(3, 0.2, 0.015, 1, 0, 0.9, taper=1)                    # a sine across the frame, thinning at the ends
+arc(0.3, 0, 2.5, 0.04, taper=1, speed=0.5)                 # a comet circling: thick head, thin tail
+arc(0.3, 0, 1.0, 0.04, 1).polarRepeat(6, Time() * 0.2)     # six of them around the centre
+   .charcoal(0.5, 1.5, 90)                                 # paper tooth and ragged edges
+src(o0).layer(dab(0.07, 0.4, angle, 0.8).scroll(x, y).color(r, g, b)).out(o0)   # Motion Painting No. 1: one touch a frame, never erased
+src(o0).smear(noise(2, 0.1) * 6.28, 0.02)                  # paint dragged along a flow field (paint on glass)
+```
+
+`recipes.studie(o0, beat=Clock(1)).out(o0)` is the whole thing — comets breathing with the beat,
+smoke behind them; give it `beat=a.flux` from an `Audio` and it dances to the record. Every stroke
+is white with alpha = stroke, so `layer` / `stain` / `alpha` all apply.
+
+**Cut paper.** The flat-graphic animation of the sixties East — Zagreb, Soyuzmultfilm's Khitruk
+years, Pannónia, the Polish poster school: `halftone` (a three-angle screen print), `boil` (the line
+redrawn by hand every frame), `polarRepeat` (ornament), `filmstock(4)` (Orwo / Sovcolor), and
+`set_frame_rate(12)` for animation on twos. `recipes.cutout(chain, levels=3, screen=5)` does the
+posterising, boil, misregistration, paper and grading in one go; `Text("КИНО")` works, DejaVu has
+Cyrillic.
+
+**The drawn soundtrack.** In 1932 Fischinger photographed ornaments onto the optical track of the
+film; the same year in Leningrad Avraamov, Sholpo and Yankovsky were drawing sound by hand and by
+machine. `Soundtrack(o0, x=0.5)` reads a vertical strip of an output every frame, top to bottom,
+and makes it the next 1/24 s of audio: a pattern repeating *n* times per frame height sounds at
+*n × 24* Hz, and the shape of the pattern is the timbre.
+
+```python
+notes = Seq([10, 12, 16, 20]).fast(1)                      # stripes per frame -> 240, 288, 384, 480 Hz
+shape(Seq([3, 4, 64]).fast(0.25), 0.2).repeat(7, notes).out(o0)   # triangle, square, round: the waveform
+track = Soundtrack(o0, x=0.5)                              # what you see down the middle is what you hear
+save_mp4(render_frames(seconds=12, fps=24), "ornament.mp4", fps=24, audio=track)   # or `hydrapy render ... --out x.mp4`
+```
+
+`docs/ornament_sound.mp4` is twelve seconds of it. The HTML export plays the track live
+(`readPixels` of the strip into the audio output; click to start), so a browser patch can score
+itself; the GL window is silent unless you route `track.samples` yourself — a `CvOut` channel, say.
+
 ## Op reference
 
 ### Sources
@@ -418,6 +464,10 @@ super8(handpainted(seed=SH(6, 0, 99)), stock=2)     # the painted-film recipes, 
 | `dust` | `density=0.3, size=1.5, hairs=0.3, seed=0` | **new** | Specks and hairs on the gate (white on black, alpha = dust). New seed every frame for the real thing: seed=SH(24, 0, 99). |
 | `dropouts` | `density=0.5, extent=0.3, rate=60, seed=0` | **new** | Tape dropouts: short bright streaks along random scan lines, new ones `rate` times a second (white on black, alpha = streak). lighten() them onto the picture. |
 | `gate` | `width=0.96, height=0.94, radius=0.06, softness=0.01` | **new** | The projector gate: a rounded-rectangle mask (white inside, alpha = inside). mult() the picture by it; pan it a little for a frame that doesn't sit still. |
+| `harmonograph` | `f1=3, f2=2, f3=0, f4=0, phase=1.5708, decay=0, length=1, size=0.4, width=0.012, taper=0, speed=0.1` | **new** | A Lissajous / harmonograph curve drawn as a stroke (white, alpha = stroke): x = sin(f1 t + phase), y = sin(f2 t); f3/f4 > 0 add a second pendulum per axis, `decay` damps it over `length` turns, `speed` turns the phase. `taper` thins the tail; the head is the end of the curve. Keep length x frequency under ~10 for a smooth curve (256 segments). |
+| `wave` | `frequency=3, amplitude=0.15, width=0.012, speed=1, phase=0, length=1, taper=0` | **new** | An oscillator drawn as a stroke: a sine across the frame, `frequency` cycles per width, travelling at `speed`. `length` is the stroke's extent (fraction of the width); `taper` thins both ends. |
+| `arc` | `radius=0.3, start=0, sweep=3.1416, width=0.012, taper=0, speed=0` | **new** | An arc stroke about the centre from angle `start` through `sweep` radians (a full circle: 6.2832), turning at `speed`. `taper` thins the tail; the head is the end of the arc. |
+| `dab` | `size=0.15, aspect=0.5, angle=0, bristles=0.5, softness=0.3, seed=0` | **new** | One touch of a bristle brush: an ellipse `size` tall (fraction of the height) and `aspect` as wide, turned by `angle`, streaked along its length by `bristles`. White, alpha = paint. Feed it back for accretive painting: src(o0).layer(dab(...).color(...)). |
 
 ### Coordinate ops
 
@@ -446,6 +496,8 @@ super8(handpainted(seed=SH(6, 0, 99)), stock=2)     # the painted-film recipes, 
 | `shear` | `x=0.3, y=0` | **new** | Skew: x shifts rows by their height, y shifts columns by their width. |
 | `linejitter` | `amount=0.004, rate=60, wobble=0.002, seed=0` | **new** | Tracking error: every scan line shifts sideways by its own random amount, worse in drifting bands, plus a slow time-base wobble. |
 | `headswitch` | `height=0.06, amount=0.08, rate=60, seed=0` | **new** | Head-switching noise: the bottom `height` of the frame tears sideways, more towards the very bottom, re-rolled `rate` times a second. |
+| `boil` | `amount=0.004, rate=12, scale=6, seed=0` | **new** | Line boil: the drawing redrawn by hand `rate` times a second — coordinates wander by up to `amount` with smooth noise at `scale`, re-rolled each redraw. Pair it with set_frame_rate(12) for animation on twos. |
+| `polarRepeat` | `n=5, offset=0` | **new** | `n` rotated copies of the wedge to the right of the centre, around the centre (kaleid without the mirroring: ornament, rosettes, the Fischinger circle of comets). |
 
 ### Colour ops
 
@@ -476,7 +528,8 @@ super8(handpainted(seed=SH(6, 0, 99)), stock=2)     # the painted-film recipes, 
 | `vignette` | `amount=0.6, radius=0.6` | **new** | Darken the corners. |
 | `contours` | `levels=6, width=0.15, fill=0` | **new** | Topographic keyer: white isolines where luminance crosses `levels` thresholds; `fill` keeps that much of the image between them. |
 | `sinefold` | `stages=2, phase=0` | **new** | Sine staircase shaper: each channel through `stages` cycles of a sine; ramps become rainbows, gradients become bands. |
-| `filmstock` | `stock=0, amount=1` | **new** | Film stock tone: 0 Kodachrome (warm, dense), 1 Ektachrome (cool shadows), 2 faded (lifted blacks, yellowed), 3 Tri-X (B&W S-curve). |
+| `filmstock` | `stock=0, amount=1` | **new** | Film stock tone: 0 Kodachrome (warm, dense), 1 Ektachrome (cool shadows), 2 faded (lifted blacks, yellowed), 3 Tri-X (B&W S-curve), 4 Orwo / Sovcolor (muted, green mids, magenta shadows). |
+| `halftone` | `size=6, angle=0.7854, sharpness=0.7` | **new** | Screen print: each channel becomes a grid of ink dots `size` pixels apart, sized by how dark the channel is, the three screens turned 0, 60 and 15 degrees from `angle` so they moiré like a cheap colour print. |
 
 ### Combine ops (take another chain)
 
@@ -538,6 +591,8 @@ super8(handpainted(seed=SH(6, 0, 99)), stock=2)     # the painted-film recipes, 
 | `ruttetra` | `lines=90, amount=0.25, thickness=1.2, glow=0.3` | **new** | Rutt-Etra scan processor: `lines` horizontal scan lines, each displaced upward by `amount` times the brightness under it, drawn `thickness` pixels wide (alpha = line). Rotate/scale the chain before it to tilt the raster. |
 | `yiq` | `chroma=0.03, luma=1, shift=0.004` | **new** | Composite-video bandwidth: chroma (I/Q) smeared horizontally over `chroma` of the width and delayed by `shift`, luma softened over `luma` pixels. The colour bleed of tape. |
 | `ringing` | `amount=0.5, offset=2` | **new** | Edge ringing: overshoot and a second ripple to the right of every vertical edge, `offset` pixels apart. The sharpening of a worn tape deck. |
+| `charcoal` | `tooth=0.5, rough=1.5, scale=90, seed=0` | **new** | Paper: the picture (colour and alpha) broken up by paper tooth (`tooth`, grain at `scale`; the paper shows through most where the stroke is faint) and its edges jittered by `rough` pixels in 2-pixel blocks, so strokes go ragged like charcoal on rough paper. |
+| `smear` | `angle=0, length=0.02` | **new** | Paint dragged: 12 taps behind each pixel along `angle` (radians; a chain makes it a flow field), `length` of the height. Paint on glass, smudged charcoal, motion blur. |
 
 ## Backend notes
 
@@ -578,7 +633,7 @@ osc(10).solarize(0.6).out()
 Kinds are `src`, `coord`, `color`, `combine`, `combineCoord`, `texture`; the fixed first arguments
 are Hydra's (`_st`, `_c0`, `_c1`, plus `_tex` for texture ops). GLSL bodies may use `time`,
 `resolution`, `gl_FragCoord` and the helpers (`_noise`, `_luminance`, `_rgbToHsv`, `_hsvToRgb`,
-`_hash11/21/22/31`, `_bayer4`).
+`_hash11/21/22/31` (Hydra's sin hashes), `_h11/21/22/31` (sin-free, bit-exact with NumPy), `_bayer4`, `_segd`, `_rot3`).
 
 ## Layout
 
@@ -594,17 +649,18 @@ hydrapy/ops_paint.py   painted-film ops: stain alpha drops crackle veins scratch
 hydrapy/ops_3d.py      plane3d sphere3d cylinder3d
 hydrapy/ops_glitch.py  tear, shred (entropy-locked glitch feedback)
 hydrapy/ops_video.py   psort ruttetra contours sinefold bits shear · yiq linejitter headswitch dropouts ringing · filmstock gate
+hydrapy/ops_stroke.py  harmonograph wave arc dab charcoal smear · halftone boil polarRepeat
 hydrapy/drawing.py     Text, Lines (SVG flattener), plant()/meadow(), to_svg()
-hydrapy/recipes.py     handpainted(), mothlight(), film(), vhs(), super8()
-hydrapy/live.py        CvIn/CvOut, OscIn/OscOut, Midi, Link, Probe, per-frame hooks
+hydrapy/recipes.py     handpainted(), mothlight(), film(), vhs(), super8(), studie(), cutout()
+hydrapy/live.py        CvIn/CvOut, OscIn/OscOut, Midi, Link, Probe, Soundtrack (drawn sound), per-frame hooks
 hydrapy/synth.py       image quilting, Quilt frame bank
 hydrapy/export.py      GIF/MP4/PNG/ANSI, Hydra JS, Python, standalone HTML runtime
 hydrapy/hydra_import.py Hydra JS -> patch
 hydrapy/cli.py
-patches/               examples (00–22)
+patches/               examples (00–25)
 docs/tour.py           renders docs/tour.mp4, the feature tour
 docs/optable.py        regenerates the op reference below from the registry
-tests/                 ~370 tests incl. CPU/GPU parity for every op
+tests/                 ~400 tests incl. CPU/GPU parity for every op
 ```
 
 ## License

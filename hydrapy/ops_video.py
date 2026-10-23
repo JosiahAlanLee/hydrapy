@@ -315,6 +315,7 @@ _STOCKS = {
     1: (np.array([0.0, 0.01, 0.03]), np.array([0.98, 1.0, 1.08]), np.array([1.0, 1.0, 0.95]), 1.1),  # ektachrome
     2: (np.array([0.08, 0.07, 0.05]), np.array([0.9, 0.86, 0.78]), np.array([0.9, 0.95, 1.0]), 0.65),  # faded
     3: (np.array([0.0, 0.0, 0.0]), np.array([1.0, 1.0, 1.0]), np.array([1.0, 1.0, 1.0]), 0.0),       # tri-x
+    4: (np.array([0.04, 0.0, 0.05]), np.array([0.95, 1.02, 0.9]), np.array([1.0, 0.9, 1.1]), 0.7),    # orwo / sovcolor
 }
 
 
@@ -332,11 +333,12 @@ def _np_filmstock(c, stock, amount, env):
 
 
 register(Op("filmstock", "color", [I("stock", 0), F("amount", 1)], np=_np_filmstock,
-            doc="Film stock tone: 0 Kodachrome (warm, dense), 1 Ektachrome (cool shadows), 2 faded (lifted blacks, yellowed), 3 Tri-X (B&W S-curve).",
+            doc="Film stock tone: 0 Kodachrome (warm, dense), 1 Ektachrome (cool shadows), 2 faded (lifted blacks, yellowed), 3 Tri-X (B&W S-curve), 4 Orwo / Sovcolor (muted, green mids, magenta shadows).",
             glsl="""vec3 lift = vec3(0.0), gain = vec3(1.0), gam = vec3(1.0); float sat = 1.0;
   if (stock == 0) { gain = vec3(1.08, 1.0, 0.95); gam = vec3(1.2, 1.1, 1.3); sat = 1.3; }
   else if (stock == 1) { lift = vec3(0.0, 0.01, 0.03); gain = vec3(0.98, 1.0, 1.08); gam = vec3(1.0, 1.0, 0.95); sat = 1.1; }
   else if (stock == 2) { lift = vec3(0.08, 0.07, 0.05); gain = vec3(0.9, 0.86, 0.78); gam = vec3(0.9, 0.95, 1.0); sat = 0.65; }
+  else if (stock == 4) { lift = vec3(0.04, 0.0, 0.05); gain = vec3(0.95, 1.02, 0.9); gam = vec3(1.0, 0.9, 1.1); sat = 0.7; }
   else { sat = 0.0; }
   vec3 c = clamp(_c0.rgb, 0.0, 1.0);
   c = pow(clamp(c * gain + lift, 0.0, 1.0), gam);

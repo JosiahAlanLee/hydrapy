@@ -273,4 +273,7 @@ def render_frames(patch: Optional[Patch] = None, seconds: float = 4.0, fps: floa
     r = Renderer(patch, size=size, fps=fps, filter=filter)
     for i in range(warmup):
         r.step(start - (warmup - i) / fps)
+    for pr in r.patch.probes:
+        if hasattr(pr, "clear"):
+            pr.clear()                      # a Soundtrack starts at `start`, not at the warm-up
     return list(r.frames(int(round(seconds * fps)), start=start))

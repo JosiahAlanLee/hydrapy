@@ -697,6 +697,85 @@ class Probe(Signal):
         return _num(self.lo + (self.hi - self.lo) * self.live._raw)
 
 
+class Soundtrack(Probe):
+    """An optical soundtrack the patch draws for itself.
+
+    A vertical strip of an output (``x`` across, ``width`` of the width) is read every frame, top
+    to bottom, and its luminance is the waveform for the next 1/``fps`` of a second — variable-density
+    sound-on-film, the way Fischinger's *Ornament Sound* and the Soviet graphical-sound films
+    (Avraamov, Sholpo's Variophone, Yankovsky) drew their music onto the track.  Horizontal stripes
+    at *n* cycles per frame height sound at *n × fps* Hz: ``osc(10).rotate(1.5708)`` at 24 fps is a
+    240 Hz tone; a stripe pattern scrolling up is a continuous waveform, a still picture repeats
+    once a frame.  ``ac`` removes the DC (a one-pole high-pass at 20 Hz), ``gain`` scales ±1.
+
+    Render, then ``wav(path)``, or ``save_mp4(frames, path, fps, audio=track)``.  The HTML export
+    plays it live (``readPixels`` of the strip into a ScriptProcessor); the GL window is silent
+    unless you pipe ``samples`` somewhere yourself.  As a Probe it is also a signal: the strip's
+    mean brightness, one frame late.
+    """
+
+    def __init__(self, output: Optional[Output] = None, x: float = 0.98, width: float = 0.01, fps: float = 24.0,
+                 sr: int = 44100, gain: float = 1.0, ac: bool = True, patch: Optional[Patch] = None):
+        super().__init__(output, x=x, y=0.5, size=1.0, channel="luma", patch=patch)
+        self.width, self.fps, self.sr, self.gain, self.ac = float(width), float(fps), int(sr), float(gain), bool(ac)
+        self.chunks: list[np.ndarray] = []
+        self._hp_x = 0.0
+        self._hp_y = 0.0
+        self._hp_a = math.exp(-2.0 * math.pi * 20.0 / self.sr)
+
+    def region(self, width: int, height: int):
+        w = max(int(round(self.width * width)), 1)
+        x0 = int(self.x * width - w / 2)
+        x0 = min(max(x0, 0), max(width - w, 0))
+        return x0, 0, w, height
+
+    def update(self, rgba: np.ndarray):
+        col = (rgba[..., 0] * 0.2125 + rgba[..., 1] * 0.7154 + rgba[..., 2] * 0.0721).mean(axis=1)[::-1]  # top to bottom
+        self.live.set(float(col.mean()))
+        self.chunks.append(self._frame_audio(np.asarray(col, dtype=np.float64)))
+
+    def _frame_audio(self, col: np.ndarray) -> np.ndarray:
+        n = int(round(self.sr / self.fps))
+        h = len(col)
+        x = (col - 0.5) * 2.0 * self.gain
+        y = np.interp((np.arange(n) + 0.5) * h / n - 0.5, np.arange(h), x)
+        if self.ac:
+            a, px, py = self._hp_a, self._hp_x, self._hp_y
+            out = np.empty(n)
+            for i in range(n):          # one-pole high-pass, state carried between frames
+                py = y[i] - px + a * py
+                px = y[i]
+                out[i] = py
+            self._hp_x, self._hp_y = px, py
+            y = out
+        return np.clip(y, -1.0, 1.0).astype(np.float32)
+
+    @property
+    def samples(self) -> np.ndarray:
+        return np.concatenate(self.chunks) if self.chunks else np.zeros(0, np.float32)
+
+    @property
+    def duration(self) -> float:
+        return sum(len(c) for c in self.chunks) / self.sr
+
+    def clear(self):
+        self.chunks = []
+        self._hp_x = self._hp_y = 0.0
+
+    def wav(self, path: str) -> str:
+        import wave
+        data = (np.clip(self.samples, -1, 1) * 32767).astype("<i2").tobytes()
+        with wave.open(path, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(self.sr)
+            w.writeframes(data)
+        return path
+
+    def spec(self) -> dict:
+        return {"output": self.output.name, "x": self.x, "width": self.width, "fps": self.fps, "gain": self.gain, "ac": self.ac}
+
+
 # -----------------------------------------------------------------------------
 # per-frame hooks (CvOut.tick, OscOut.tick, your own)
 # -----------------------------------------------------------------------------

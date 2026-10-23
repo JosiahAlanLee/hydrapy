@@ -19,7 +19,8 @@ from __future__ import annotations
 
 from typing import Optional, Sequence
 
-from . import (Chain, Drift, Lfo, SH, Seq, Signal, Time, crackle, drops, dust, fbm, scratches, set_frame_rate, solid, src, veins)
+from . import (Chain, Clock, Drift, Env, Lfo, Output, SH, Seq, Signal, Time, arc, crackle, drops, dust, fbm, harmonograph, scratches,
+               set_frame_rate, solid, src, veins, wave)
 from . import dropouts as _dropouts, gate as _gate
 
 
@@ -174,3 +175,57 @@ def super8(chain: Chain, stock: int = 0, fps: float = 18, grain: float = 0.15, w
     if gate:
         out = out.mult(_gate(gate, gate - 0.02, 0.06, 0.008))
     return out
+
+
+def studie(out: Output, beat: Optional[Signal] = None, comets: int = 6, waves: int = 2, trails: float = 0.8,
+           paper: float = 0.45, seed: float = 0.0) -> Chain:
+    """Fischinger's *Studie* films: charcoal oscillators on black paper, dancing to a beat.
+
+    A ring of comets breathing with the beat, one long comet sweeping round, `waves` sine strokes
+    crossing, a pulse at the centre; every stroke on rough paper (`paper`), the previous frame kept
+    at `trails` so the forms leave smoke behind them.  ``out`` is the output the chain will be
+    assigned to — it reads it back for the trails: ``studie(o1).out(o1)``.  ``beat`` is a phase
+    0..1 per beat (default ``Clock(1)`` at the patch bpm; a record is ``Audio.from_file(...)`` with
+    its flux as the beat).  Put ``film()`` after it for the print.
+    """
+    beat = beat if beat is not None else Clock(1)
+    hit = Env(beat, 0.06, 0.5, 2.0, 0.0, 1.0)
+    sweep_per = 6.2832 / max(int(comets), 1) * 0.8
+    ring = arc(0.3, 0.0, sweep_per, 0.05, 1.0, 0.0).polarRepeat(comets, Time() * 0.2 + seed) \
+        .scale(0.75 + 0.45 * hit).charcoal(paper, 1.0, 80, seed + 1)
+    sweep = arc(0.44, Lfo(0.11, lo=0, hi=6.2832, phase=seed), 2.6, 0.035 + 0.04 * hit, 1.0, 0.0).charcoal(paper, 1.2, 60, seed + 2)
+    strokes = ring.layer(sweep)
+    for i in range(int(waves)):
+        speed = 0.6 * (1 + i) * (1 if i % 2 == 0 else -1)
+        strokes = strokes.layer(wave(2 + i, 0.14 + 0.14 * hit, 0.02, speed, i * 0.3, 0.92, 1.0)
+                                .rotate(0.25 * i - 0.12).charcoal(paper, 1.0, 90, seed + 3 + i))
+    strokes = strokes.layer(arc(0.025 + 0.06 * hit, 0, 6.2832, 0.03, 0, 0).charcoal(paper * 0.6, 1.0, 120, seed + 9))
+    strokes = strokes.contrast(1.25)
+    if trails:
+        return src(out).mult(solid(trails, trails, trails)).layer(strokes)
+    return solid(0, 0, 0).layer(strokes)
+
+
+def cutout(chain: Chain, levels: float = 3, paper: float = 0.35, boil: float = 0.004, misregister: float = 0.003,
+           screen: float = 0, stock: int = 4, fps: float = 12, hold: bool = True, seed: float = 0.0) -> Chain:
+    """The flat-graphic animation of the sixties East — Zagreb, Soyuzmultfilm, Pannónia, the Polish
+    poster school: flat colour in a few `levels`, redrawn by hand every frame (`boil`), printed
+    slightly off register (`misregister`), on paper (`paper`), optionally through a halftone
+    `screen` (dot pitch in pixels), graded like Orwo stock, on twos (12 fps).
+
+    ``hold=True`` sets the default patch's frame rate to ``fps``.
+    """
+    if hold and fps:
+        set_frame_rate(fps)
+    out = chain.posterize(levels, 1.0)
+    if boil:
+        out = out.boil(boil, fps, 5, seed)
+    out = out.bake()
+    if misregister:
+        out = out.chroma(misregister, 0.5)
+    if screen:
+        out = out.halftone(screen, 0.7854, 0.7)
+    if paper:
+        out = out.charcoal(paper, 1.0, 60, seed + 1)
+    out = out.filmstock(stock, 0.6)
+    return out.grain(0.035, fps, 2).vignette(0.25, 0.7)

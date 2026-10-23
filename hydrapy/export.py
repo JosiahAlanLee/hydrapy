@@ -40,10 +40,17 @@ def save_gif(frames, path: str, fps: float = 30.0, scale: int = 1):
     return path
 
 
-def save_mp4(frames, path: str, fps: float = 30.0, quality: int = 8, scale: int = 1):
-    """Write uint8 RGB frames to an H.264 MP4 (needs imageio-ffmpeg or a system ffmpeg)."""
+def save_mp4(frames, path: str, fps: float = 30.0, quality: int = 8, scale: int = 1, audio=None):
+    """Write uint8 RGB frames to an H.264 MP4 (needs imageio-ffmpeg or a system ffmpeg).
+
+    ``audio``: a ``Soundtrack`` (rendered along with the frames), a WAV path, or ``(samples, sr)``;
+    it is muxed in as AAC.
+    """
     import imageio.v2 as iio
-    w = iio.get_writer(path, fps=fps, codec="libx264", quality=quality, macro_block_size=None,
+    video = path
+    if audio is not None:
+        video = path + ".video.mp4"
+    w = iio.get_writer(video, fps=fps, codec="libx264", quality=quality, macro_block_size=None,
                        pixelformat="yuv420p")
     try:
         for f in frames:
@@ -55,7 +62,40 @@ def save_mp4(frames, path: str, fps: float = 30.0, quality: int = 8, scale: int 
             w.append_data(f)
     finally:
         w.close()
+    if audio is not None:
+        _mux_audio(video, audio, path)
+        os.remove(video)
     return path
+
+
+def _mux_audio(video: str, audio, path: str):
+    import subprocess
+    import tempfile
+    import wave
+    wav = audio if isinstance(audio, str) else None
+    tmp = None
+    if wav is None:
+        if hasattr(audio, "wav"):
+            tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False); tmp.close()
+            audio.wav(tmp.name)
+        else:
+            samples, sr = audio
+            tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False); tmp.close()
+            with wave.open(tmp.name, "wb") as wf:
+                wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(int(sr))
+                wf.writeframes((np.clip(np.asarray(samples), -1, 1) * 32767).astype("<i2").tobytes())
+        wav = tmp.name
+    try:
+        import imageio_ffmpeg
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        exe = "ffmpeg"
+    try:
+        subprocess.run([exe, "-y", "-loglevel", "error", "-i", video, "-i", wav, "-c:v", "copy", "-c:a", "aac", "-b:a", "160k",
+                        "-shortest", "-movflags", "+faststart", path], check=True)
+    finally:
+        if tmp is not None:
+            os.remove(tmp.name)
 
 
 def save_frames(frames, directory: str, prefix: str = "frame"):
@@ -418,6 +458,7 @@ def build_spec(patch: Optional[Patch] = None, pixel_ratio: float = 1.0, size: Op
         "bpm": patch.bpm,
         "speed": patch.speed,
         "frameRate": patch.frame_rate,
+        "soundtrack": next((pr.spec() for pr in patch.probes if hasattr(pr, "chunks")), None),
         "outputs": outs,
         "history": history,
         "images": images,
@@ -716,6 +757,7 @@ RUNTIME_JS = r"""(function(){
     if (audio) audio.update();
     // only the displayed output and what it samples (transitively) need rendering this frame
     var needed = {}; var stack = [SPEC.display];
+    if (SPEC.soundtrack) stack.push(SPEC.soundtrack.output);
     while (stack.length) { var nm = stack.pop(); if (needed[nm]) continue; needed[nm] = true;
       outputs.forEach(function(o){ if (o.name === nm) o.samplers.forEach(function(s){ if (/^o[0-3]$/.test(s.ref) && !needed[s.ref]) stack.push(s.ref); }); }); }
     outputs.forEach(function(o){
@@ -741,6 +783,7 @@ RUNTIME_JS = r"""(function(){
       });
       outs[o.name].ring.unshift(outs[o.name].ring.pop());   // the frame just written becomes ring[0]
     });
+    if (track) track.read(now);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, W, H);
     gl.useProgram(copyProg);
@@ -751,9 +794,56 @@ RUNTIME_JS = r"""(function(){
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 
-  var needsGesture = !!SPEC.audio || SPEC.cameras.length > 0;
+  // the optical soundtrack: a strip of an output, read top to bottom once per 1/fps, is the waveform
+  var track = null;
+  function startSoundtrack(){
+    var cfg = SPEC.soundtrack; if (!cfg) return;
+    var AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
+    var actx = new AC();
+    var sr = actx.sampleRate, n = Math.round(sr / cfg.fps);
+    var fifo = [], last = new Float32Array(n), lastT = -1e9, hpx = 0, hpy = 0, hpa = Math.exp(-2 * Math.PI * 20 / sr);
+    var w = Math.max(Math.round(cfg.width * W), 1), x0 = Math.min(Math.max(Math.round(cfg.x * W - w / 2), 0), Math.max(W - w, 0));
+    var useFloat = isGL2 && floatOK;
+    var pix = useFloat ? new Float32Array(w * H * 4) : new Uint8Array(w * H * 4);
+    var node = actx.createScriptProcessor(2048, 0, 1);
+    node.onaudioprocess = function(e){
+      var out = e.outputBuffer.getChannelData(0);
+      var i = 0;
+      while (i < out.length) {
+        if (!fifo.length) fifo.push(last);            // nothing new drawn: hold the last frame's sound
+        var c = fifo[0], k = c.pos || 0;
+        while (i < out.length && k < c.length) out[i++] = c[k++];
+        if (k >= c.length) fifo.shift(); else c.pos = k;
+      }
+    };
+    node.connect(actx.destination);
+    var dbg = window.__hydrapySoundtrack = {chunks: 0, sr: sr, n: n, state: function(){ return actx.state; }};
+    track = { read: function(now){
+      if (now - lastT < 1000 / cfg.fps) return;
+      lastT = now;
+      if (fifo.length > 4) return;                     // the audio clock, not rAF, sets the pace
+      gl.bindFramebuffer(gl.FRAMEBUFFER, outs[cfg.output].ring[0].fb);
+      gl.readPixels(x0, 0, w, H, gl.RGBA, useFloat ? gl.FLOAT : gl.UNSIGNED_BYTE, pix);
+      var col = new Float64Array(H), scale = useFloat ? 1 : 1 / 255;
+      for (var y = 0; y < H; y++) {                    // rows come bottom-up; the track reads top to bottom
+        var s = 0;
+        for (var xx = 0; xx < w; xx++) { var o = ((y * w) + xx) * 4; s += pix[o] * 0.2125 + pix[o + 1] * 0.7154 + pix[o + 2] * 0.0721; }
+        col[H - 1 - y] = s / w * scale;
+      }
+      var chunk = new Float32Array(n);
+      for (var j = 0; j < n; j++) {
+        var p = (j + 0.5) * H / n - 0.5, p0 = Math.max(0, Math.min(H - 1, Math.floor(p))), p1 = Math.min(H - 1, p0 + 1), f = Math.max(0, Math.min(1, p - p0));
+        var v = ((col[p0] * (1 - f) + col[p1] * f) - 0.5) * 2 * cfg.gain;
+        if (cfg.ac) { hpy = v - hpx + hpa * hpy; hpx = v; v = hpy; }
+        chunk[j] = Math.max(-1, Math.min(1, v));
+      }
+      fifo.push(chunk); last = chunk; dbg.chunks++; dbg.peak = Math.max.apply(null, Array.prototype.slice.call(chunk, 0, 256).map(Math.abs));
+    }};
+  }
+
+  var needsGesture = !!SPEC.audio || !!SPEC.soundtrack || SPEC.cameras.length > 0;
   var overlay = document.getElementById('overlay');
-  function start(){ overlay.style.display = 'none'; startAudio(); startCameras(); requestAnimationFrame(frame); }
+  function start(){ overlay.style.display = 'none'; startAudio(); startSoundtrack(); startCameras(); requestAnimationFrame(frame); }
   if (needsGesture) { overlay.style.display = 'flex'; overlay.addEventListener('click', start, {once: true}); }
   else start();
 })();"""
