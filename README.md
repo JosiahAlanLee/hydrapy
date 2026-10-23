@@ -42,6 +42,8 @@ pip install moderngl                        # GPU rendering (headless via EGL on
 pip install glfw                            # `hydrapy live`: a window
 pip install imageio-ffmpeg                  # MP4 export, decoding mp3/flac for Audio
 pip install opencv-python                   # webcam in the GL backend (the HTML export uses getUserMedia)
+pip install sounddevice                     # CV in/out through a DC-coupled interface (ES-6 / ES-3)
+pip install python-osc mido python-rtmidi aalink   # OSC, MIDI, Ableton Link
 ```
 
 Or `pip install -e .[all]` from this directory. Python 3.9+.
@@ -271,6 +273,59 @@ Patches `14_text_and_lines.py`, `15_canvas_in_3d.py`, `16_delay_line.py`, `17_p5
 `docs/tour.mp4` walks through every primitive and the combination patches (`python docs/tour.py`
 re-renders it).
 
+## The modular, OSC, MIDI and Link
+
+`hydrapy.live` turns outside control into ordinary signals, so anything below plugs into any
+parameter. Live sources only move in real time (`hydrapy live`); for a finished render, record them
+and use the file forms.
+
+**Control voltage in (ES-6, ES-8, any DC-coupled interface).** An ES-6 arrives as DC-coupled audio
+inputs on the ADAT channels of your interface; `hydrapy devices` lists devices and channels.
+
+```python
+cv = CvIn(device="ES-8", channels=[8, 9, 10, 11], volts_per_fs=10)   # Expert Sleepers: ±10 V = full scale
+cv.cv[0]                       # volts           cv.uni(0)  0..1 for 0..+10 V      cv.bi(1)  -1..1 for ±5 V
+cv.volt_oct(2)                 # Hz from 1 V/oct
+gate = cv.trig(3, threshold=1.0, length=0.6)      # phase since the last rising edge
+osc(cv.uni(0).map(6, 50)).scale(1 + Env(gate, 0.02, 1.0)).out(o0)
+cv.audio(2).fft[1]             # an audio-rate channel through the same Bark analyser as Audio
+```
+
+`CvIn.from_file("performance.wav", channels=[0, 1, 2, 3])` gives the same signals from a
+multichannel recording, sampled at each frame's time: record the CV in your DAW alongside the audio,
+then `hydrapy render` at any resolution with no dropouts and the envelopes landing on the gates.
+
+**Control voltage out (ES-3).** Values become voltages, ramped across each audio block:
+
+```python
+out = CvOut(device="ES-8", channels=[8, 9])
+out.send(0, Probe(o0, 0.5, 0.5, 0.08, "luma", lo=0, hi=8))   # the centre's brightness, 0..8 V
+out.send(1, Lfo(0.25, "tri", -5, 5))                          # a plain LFO in volts
+```
+
+`Probe(output, x, y, size, channel, lo, hi)` reads a region back after every frame (one frame of
+latency), on both backends; that's the image as a sequencer. `CvOut(file="cv.wav", fps=30)` writes
+the voltages as a multichannel WAV during an offline render instead, to play from the DAW into the
+ES-3 next to the video.
+
+**OSC.** `OscIn(57120).value("/synth/freq", default, lo, hi, smooth)`, `.trig("/kick")`;
+`OscOut(host, port).send("/addr", signal_or_probe)`. VCV Rack's cvOSCcv makes this a second CV path
+without hardware.
+
+**MIDI.** `Midi("port name")`: `.cc(74)` 0..1, `.note(60)` velocity while held, `.gate(60)` a
+trigger, `.bend`, and `.clock` as a transport that follows MIDI clock. Needs `mido python-rtmidi`.
+
+**Ableton Link.** `default_patch().transport = Link(bpm=120)`; `ctx.time` then runs on the session's
+beat grid and `bpm` follows the session tempo, so every `Clock`, `Seq` and `Env` lands on the shared
+beat and `Clock(1)` is the Link beat phase. Needs `aalink`. A transport is any object with `now()`
+and `bpm`; `MidiClock` is the other one supplied.
+
+`patches/18_modular.py` is the whole loop: CV in, envelopes from gates, two probes back out, Link
+as the clock, with file and synthetic fallbacks so it runs anywhere. Calibrate with a known voltage:
+the ES-6/ES-3 are nominally ±10 V at full scale, but check one channel against a meter and set
+`volts_per_fs` accordingly. Note the browser export can't see any of this (pages freeze live values
+at what they were when exported); the GL window is the live venue.
+
 ## Op reference
 
 ### Sources
@@ -458,11 +513,12 @@ hydrapy/ops_paint.py   painted-film ops: stain alpha drops crackle veins scratch
 hydrapy/ops_3d.py      plane3d sphere3d cylinder3d
 hydrapy/drawing.py     Text, Lines (SVG flattener), plant()/meadow(), to_svg()
 hydrapy/recipes.py     handpainted(), mothlight(), film()
+hydrapy/live.py        CvIn/CvOut, OscIn/OscOut, Midi, Link, Probe, per-frame hooks
 hydrapy/synth.py       image quilting, Quilt frame bank
 hydrapy/export.py      GIF/MP4/PNG/ANSI, Hydra JS, Python, standalone HTML runtime
 hydrapy/hydra_import.py Hydra JS -> patch
 hydrapy/cli.py
-patches/               examples (00–17)
+patches/               examples (00–18)
 docs/tour.py           renders docs/tour.mp4, the feature tour
 tests/                 ~300 tests incl. CPU/GPU parity for every op
 ```

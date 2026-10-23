@@ -473,6 +473,16 @@ class Audio:
         self.vol = Fft(self, 0, "vol")
         self.flux = Fft(self, 0, "flux")
         self._bark_edges = None
+        self._live = None   # ring of the latest samples when fed live (CvIn.audio, a stream)
+
+    def feed(self, block):
+        """Live mode: push the newest samples (any length); analysis uses the last fft_size of them."""
+        import numpy as np
+        block = np.asarray(block, dtype=np.float32).reshape(-1)
+        if self._live is None:
+            self._live = np.zeros(self.fft_size, dtype=np.float32)
+        n = min(len(block), self.fft_size)
+        self._live = np.concatenate([self._live[n:], block[-n:]])
 
     # Hydra-compatible setters -------------------------------------------
     def set_bins(self, n: int):
@@ -502,15 +512,18 @@ class Audio:
     # analysis ------------------------------------------------------------
     def _bands_raw(self, t: float) -> list[float]:
         import numpy as np
-        if self.samples is None:
-            return [0.0] * 24
         n = self.fft_size
-        centre = int(t * self.sr)
-        start = centre - n // 2
-        seg = np.zeros(n, dtype=np.float32)
-        s0, s1 = max(start, 0), min(start + n, len(self.samples))
-        if s1 > s0:
-            seg[s0 - start:s1 - start] = self.samples[s0:s1]
+        if self.samples is None:
+            if self._live is None:
+                return [0.0] * 24
+            seg = self._live.copy()
+        else:
+            centre = int(t * self.sr)
+            start = centre - n // 2
+            seg = np.zeros(n, dtype=np.float32)
+            s0, s1 = max(start, 0), min(start + n, len(self.samples))
+            if s1 > s0:
+                seg[s0 - start:s1 - start] = self.samples[s0:s1]
         seg *= np.hanning(n).astype(np.float32)
         mag = np.abs(np.fft.rfft(seg))
         power = mag * mag

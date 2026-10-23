@@ -421,6 +421,8 @@ class Patch:
         self.size = tuple(size)
         self.display: Output = self.o0
         self.speed = 1.0
+        self.probes: list = []          # live.Probe instances, updated after every frame
+        self.transport = None           # live.Transport (Link, MidiClock) for `hydrapy live`; None = wall clock
 
     def assign(self, output: Output, chain: Chain):
         # outputs are matched by index, so the global o0..o3 work with any patch

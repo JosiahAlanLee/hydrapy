@@ -304,3 +304,85 @@ def test_fx_is_deterministic():
     a, b = Fx("ooABC"), Fx("ooABC")
     assert [a.rnd_btw(0, 1) for _ in range(5)] == [b.rnd_btw(0, 1) for _ in range(5)]
     assert Fx("ooABC").rnd_int(3, 8) in range(3, 9) and Fx(1).rand() != Fx(2).rand()
+
+
+# --- live I/O (no hardware needed: loopback OSC, synthetic CV blocks, files, probes) -----------------
+
+def test_osc_loopback_values_and_triggers():
+    pytest.importorskip("pythonosc")
+    import time
+    from hydrapy.live import OscIn, OscOut, clear_hooks
+    oi = OscIn(port=0)
+    try:
+        v = oi.value("/synth/freq", default=10, lo=1, hi=100)
+        tr = oi.trig("/kick", length=0.5)
+        oo = OscOut("127.0.0.1", oi.port)
+        oo.send("/synth/freq", Lfo(1, lo=20, hi=40)).send("/kick", 1.0)
+        oo.tick(Ctx(time=0.25))
+        for _ in range(50):
+            if tr.count:
+                break
+            time.sleep(0.01)
+        assert abs(v(Ctx(time=0)) - 40.0) < 1e-6 and tr.count == 1 and 0.0 <= tr(Ctx()) < 1.0
+    finally:
+        oi.close(); clear_hooks()
+
+
+def test_link_transport_runs_on_the_beat():
+    pytest.importorskip("aalink")
+    import time
+    from hydrapy.live import Link
+    lk = Link(bpm=120)
+    try:
+        t1 = lk.now(); time.sleep(0.2); t2 = lk.now()
+        assert 0.1 < t2 - t1 < 0.5 and abs(lk.bpm - 120) < 1e-6
+        p = Patch(bpm=lk.bpm)
+        assert 0.0 <= Clock(1)(Ctx(time=lk.now(), bpm=lk.bpm)) < 1.0
+    finally:
+        lk.close()
+
+
+def test_cvin_levels_gates_and_audio_from_blocks():
+    import time
+    from hydrapy.live import CvIn
+    cv = CvIn(channels=[0, 1, 2], samplerate=48000, _file="fake")
+    trig = cv.trig(1, threshold=1.0, length=0.5)
+    aud = cv.audio(2)
+    t = np.arange(1024) / 48000
+    block = np.zeros((1024, 3), np.float32)
+    block[:, 0] = 0.25; block[:, 2] = 0.5 * np.sin(2 * np.pi * 440 * t)
+    cv.process(block, now=time.monotonic())
+    assert abs(cv.cv[0](Ctx(time=0.1)) - 2.5) < 1e-5 and abs(cv.uni(0)(Ctx(time=0.1)) - 0.25) < 1e-5
+    assert cv.gate(1)(Ctx(time=0.1)) == 0.0 and trig(Ctx(time=0.1)) == 1.0
+    block[:, 1] = 0.5
+    cv.process(block, now=time.monotonic())
+    assert cv.gate(1)(Ctx(time=0.2)) == 1.0 and trig(Ctx(time=0.2)) < 0.2
+    assert aud.band_at(0.2, 0) > aud.band_at(0.2, 3)        # a 440 Hz tone sits in the lowest band
+
+
+def test_cvfile_and_cvout_roundtrip(tmp_path):
+    import wave
+    from hydrapy.live import CvIn, CvOut, Probe, clear_hooks
+    sr, n = 48000, 48000
+    tt = np.arange(n) / sr
+    d = np.zeros((n, 2), np.float32)
+    d[:, 0] = np.linspace(-0.5, 0.5, n)
+    d[:, 1] = (np.mod(tt, 0.5) < 0.1) * 0.5
+    with wave.open(str(tmp_path / "cv.wav"), "wb") as w:
+        w.setnchannels(2); w.setsampwidth(2); w.setframerate(sr); w.writeframes((d * 32767).astype("<i2").tobytes())
+    cf = CvIn.from_file(str(tmp_path / "cv.wav"), volts_per_fs=10)
+    assert abs(cf.cv[0](Ctx(time=0.25)) + 2.5) < 0.02 and abs(cf.cv[0](Ctx(time=0.75)) - 2.5) < 0.02
+    assert cf.gate(1)(Ctx(time=0.05)) == 1.0 and cf.gate(1)(Ctx(time=0.3)) == 0.0
+    assert abs(cf.trig(1, 1.0, 0.25)(Ctx(time=0.6)) - 0.4) < 0.01
+    # probe -> CvOut file
+    p = Patch(size=(48, 27))
+    solid(Lfo(0.5), 0.2, 0.2).out(p.o0, patch=p)
+    pr = Probe(p.o0, 0.5, 0.5, 0.2, "r", lo=0, hi=5, patch=p)
+    out = CvOut(file=str(tmp_path / "out.wav"), channels=[0], samplerate=sr, fps=30)
+    out.send(0, pr)
+    r = Renderer(p, size=(48, 27), fps=30)
+    for i in range(30):
+        r.step(i / 30)
+    out.close(); clear_hooks()
+    back = CvIn.from_file(str(tmp_path / "out.wav"))
+    assert abs(back.cv[0](Ctx(time=0.5)) - 5.0 * Lfo(0.5)(Ctx(time=14 / 30))) < 0.15

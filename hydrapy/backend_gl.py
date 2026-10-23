@@ -188,6 +188,16 @@ class GLRenderer:
         if current is not None:
             self._swap(current)
         self.frame += 1
+        self._update_probes()
+        from .live import run_hooks
+        run_hooks(ctx, self)
+
+    def _update_probes(self):
+        for pr in self.patch.probes:
+            x0, y0, w, h = pr.region(self.size[0], self.size[1])
+            fbo = self.outs[pr.output.name]["ring"][0]["fbo"]
+            data = fbo.read(viewport=(x0, y0, w, h), components=4, dtype="f4")
+            pr.update(np.frombuffer(data, dtype=np.float32).reshape(h, w, 4))
 
     def _swap(self, output: Output):
         ring = self.outs[output.name]["ring"]
@@ -253,6 +263,7 @@ def live(patch: Optional[Patch] = None, size=(1280, 720), fps: float = 60.0, tit
     ctx = moderngl.create_context()
     fb = glfw.get_framebuffer_size(window)
     r = GLRenderer(patch, size=fb, ctx=ctx, fps=fps)
+    transport = r.patch.transport
     state = {"paused": False, "t0": glfw.get_time(), "paused_at": 0.0}
 
     def on_key(win, key, scancode, action, mods):
@@ -282,7 +293,13 @@ def live(patch: Optional[Patch] = None, size=(1280, 720), fps: float = 60.0, tit
         ws = glfw.get_window_size(window)
         r.mouse = (mx / max(ws[0], 1), 1.0 - my / max(ws[1], 1))
         if not state["paused"]:
-            r.step(glfw.get_time() - state["t0"])
+            if transport is not None:
+                r.patch.bpm = transport.bpm
+                r.step(transport.now())
+            else:
+                r.step(glfw.get_time() - state["t0"])
         r.blit_to_screen(fb)
         glfw.swap_buffers(window)
     glfw.terminate()
+    if transport is not None:
+        transport.close()

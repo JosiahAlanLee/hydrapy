@@ -91,8 +91,22 @@ def main(argv=None):
     im.add_argument("-o", "--out", default=None)
 
     sub.add_parser("ops", help="list ops")
+    sub.add_parser("devices", help="list audio devices and MIDI ports for CvIn/CvOut/Midi")
 
     a = ap.parse_args(argv)
+
+    if a.cmd == "devices":
+        try:
+            from .live import audio_devices
+            print("audio devices (sounddevice):"); print(audio_devices())
+        except Exception as e:
+            print("audio: sounddevice not usable here:", e)
+        try:
+            import mido
+            print("MIDI inputs:", mido.get_input_names())
+        except Exception as e:
+            print("MIDI: mido/python-rtmidi not usable here:", e)
+        return
 
     if a.cmd == "ops":
         from . import REGISTRY, describe

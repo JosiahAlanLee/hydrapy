@@ -212,6 +212,11 @@ class Renderer:
             self.env.current_output = o
             self.env.push(o.index, self._compiled[o][1](self.env.base_st).astype(np.float32), self.depth.get(o.index, 0))
         self.frame += 1
+        for pr in self.patch.probes:
+            x0, y0, w, h = pr.region(self.env.w, self.env.h)
+            pr.update(self.env.texture(pr.output)[y0:y0 + h, x0:x0 + w])
+        from .live import run_hooks
+        run_hooks(ctx, self)
         return self.displayed()
 
     def displayed(self) -> np.ndarray:

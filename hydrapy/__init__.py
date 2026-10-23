@@ -17,6 +17,7 @@ Texture:  blur sharpen edge emboss dilate erode life rd chroma bleed bake plane3
 Paint:    stain alpha drops crackle veins scratches dust pan  (hydrapy.recipes: handpainted mothlight film)
 Textures: src(o0) prev() delay(o0, k) Image Video Camera Bank Quilt Text Lines
 Signals:  Lfo Seq Clock Env SH Drift Mouse Time Fn Fft Audio
+Live:     CvIn CvOut (ES-6/ES-3 or any DC-coupled interface)  OscIn OscOut  Midi  Link  Probe
 """
 from __future__ import annotations
 
@@ -27,6 +28,7 @@ from .core import (REGISTRY, Bank, Camera, Chain, Ctx, External, Image, Input, O
                    default_patch, normalize_args, reset_patch)
 from .synth import Quilt, quilt
 from .drawing import Lines, Text, meadow, plant, to_svg
+from .live import CvIn, CvOut, Link, LiveValue, Midi, MidiClock, OscIn, OscOut, Probe, Transport, TrigPhase, audio_devices, register_hook
 from .signals import SH, Audio, Clock, Const, Drift, Env, Expr, Fft, Fn, Fx, Lfo, Mouse, Seq, Signal, Time, as_signal
 
 __version__ = "0.1.0"
@@ -143,7 +145,8 @@ def describe(name: str) -> str:
 __all__ = (
     list(_sources) + [
         "o0", "o1", "o2", "o3", "render", "hush", "set_bpm", "set_resolution", "speed", "patch",
-        "Chain", "Patch", "Output", "Image", "Video", "Camera", "Bank", "Quilt", "quilt", "Text", "Lines", "plant", "meadow", "to_svg", "Ctx", "reset_patch", "default_patch",
+        "Chain", "Patch", "Output", "Image", "Video", "Camera", "Bank", "Quilt", "quilt", "Text", "Lines", "plant", "meadow", "to_svg",
+        "CvIn", "CvOut", "Link", "LiveValue", "Midi", "MidiClock", "OscIn", "OscOut", "Probe", "Transport", "TrigPhase", "audio_devices", "register_hook", "Ctx", "reset_patch", "default_patch",
         "Signal", "Lfo", "Seq", "Clock", "Env", "SH", "Drift", "Mouse", "Time", "Fn", "Fx", "Fft", "Audio", "Const", "Expr", "External",
         "Renderer", "render_chain", "render_frames", "save_gif", "save_mp4", "save_png", "to_image", "to_ansi",
         "to_html", "chain_to_hydra", "patch_to_hydra", "from_hydra",
