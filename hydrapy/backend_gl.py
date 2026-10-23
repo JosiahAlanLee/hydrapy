@@ -509,6 +509,15 @@ def live(patch: Optional[Patch] = None, size=(1280, 720), fps: float = 60.0, tit
                 state["paused_at"] = glfw.get_time()
             else:
                 state["t0"] += glfw.get_time() - state["paused_at"]
+        elif glfw.KEY_1 <= key <= glfw.KEY_4:
+            r.patch.render(r.patch.outputs[key - glfw.KEY_1])
+        elif key == glfw.KEY_F:
+            if glfw.get_window_monitor(win):
+                glfw.set_window_monitor(win, None, 80, 80, size[0], size[1], 0)
+            else:
+                monitor = glfw.get_primary_monitor()
+                mode = glfw.get_video_mode(monitor)
+                glfw.set_window_monitor(win, monitor, 0, 0, mode.size.width, mode.size.height, mode.refresh_rate)
         elif key == glfw.KEY_S:
             from .export import save_png
             name = f"hydrapy_{int(_time.time())}.png"
@@ -517,6 +526,7 @@ def live(patch: Optional[Patch] = None, size=(1280, 720), fps: float = 60.0, tit
 
     glfw.set_key_callback(window, on_key)
     import os
+    last_status, measured_fps, measured_frames = 0., 0., 0
     mtime = os.path.getmtime(watch) if watch else None
     last_check = glfw.get_time()
     while not glfw.window_should_close(window):
@@ -545,6 +555,23 @@ def live(patch: Optional[Patch] = None, size=(1280, 720), fps: float = 60.0, tit
                 r.step(glfw.get_time() - state["t0"])
         r.blit_to_screen(fb)
         glfw.swap_buffers(window)
+        measured_frames += 1
+        now = glfw.get_time()
+        if now - last_status >= .5:
+            measured_fps = measured_frames / max(now - last_status, .001)
+            measured_frames, last_status = 0, now
+            from .live import resource_status
+            devices = resource_status()
+            failed = sum(d['state'] == 'error' for d in devices)
+            state_name = 'PAUSED' if state['paused'] else 'PLAYING'
+            clock_name = type(transport).__name__ if transport is not None else 'Internal'
+            problem = ' | EDIT REJECTED: ' + getattr(r, 'reload_error', '')[:120] if getattr(r, 'reload_error', '') else ''
+            glfw.set_window_title(window, f'{title} | {state_name} | {r.patch.display.name} | {measured_fps:.1f} fps | '
+                                  f'{r.size[0]}x{r.size[1]} | {clock_name} {r.patch.bpm:g} BPM | '
+                                  f'{len(devices)} connections, {failed} errors{problem} | 1-4 output, Space pause, S save, F fullscreen')
+    from .live import close_resources
+    close_resources()
+    r.release()
     glfw.terminate()
     if transport is not None:
         transport.close()
@@ -553,19 +580,31 @@ def live(patch: Optional[Patch] = None, size=(1280, 720), fps: float = 60.0, tit
 def _reload(old: "GLRenderer", loader, ctx, fps):
     """Build the edited patch; on success swap renderers, carrying each output's last frame over."""
     import traceback
-    from .live import close_resources
-    close_resources()
+    from .live import ResourceStage
+    from .controls import apply_controls
+    new = None
     try:
-        patch = loader()
-        new = GLRenderer(patch, size=old.size, ctx=ctx, fps=fps)
-    except Exception:
+        with ResourceStage() as stage:
+            patch = loader()
+            apply_controls(patch, {k: v.snapshot() for k, v in old.patch.controls.items()})
+            patch.render(patch.outputs[old.patch.display.index])
+            new = GLRenderer(patch, size=old.size, ctx=ctx, fps=fps)
+            for name, o in old.outs.items():
+                if name in new.outs:
+                    for dest, source in zip(new.outs[name]["ring"], o["ring"]):
+                        ctx.copy_framebuffer(dest["fbo"], source["fbo"])
+            new.clock.calls, new.clock.updates = old.clock.calls, old.clock.updates
+            new.clock.last_time, new.clock.last_key = old.clock.last_time, None
+            new.frame, new.mouse = old.frame, old.mouse
+            stage.commit()
+    except Exception as exc:
+        if new is not None:
+            new.release()
+        old.reload_error = str(exc)
         traceback.print_exc()
-        print("hydrapy: the edited patch failed; still running the previous one (its devices were closed)")
+        print("hydrapy: edit rejected; previous patch retained. Check device status if reconnection failed.")
         return old
-    for name, o in old.outs.items():
-        if name in new.outs:
-            ctx.copy_framebuffer(new.outs[name]["ring"][0]["fbo"], o["ring"][0]["fbo"])
-    new.clock.calls, new.frame, new.mouse = old.clock.calls, old.frame, old.mouse
     old.release()
+    new.reload_error = ""
     print("hydrapy: reloaded")
     return new

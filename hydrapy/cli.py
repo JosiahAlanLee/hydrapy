@@ -25,27 +25,48 @@ import sys
 import time
 
 
-def load_patch(path: str, strict: bool = True):
+def load_patch(path: str, strict: bool = True, source=None):
     """Run a patch file (or import a Hydra .js sketch) into a fresh default patch."""
-    from . import default_patch, reset_patch
-    patch = reset_patch()
+    from . import default_patch
+    from . import core
+    # Private outputs keep a failed candidate from mutating the running patch.
+    patch = core.Patch()
+    core._default_patch = patch
     if path.endswith(".js"):
         from .hydra_import import from_hydra
-        with open(path, encoding="utf-8") as f:
-            from_hydra(f.read(), patch)
+        if source is None:
+            with open(path, encoding="utf-8") as f:
+                source = f.read()
+        from_hydra(source, patch)
     else:
+        previous_path = list(sys.path)
+        previous_isolation = core._isolate_patch_outputs
+        core._isolate_patch_outputs = True
         sys.path.insert(0, os.path.dirname(os.path.abspath(path)))
-        ns = runpy.run_path(path, run_name="__hydrapy_patch__")
+        try:
+            if source is None:
+                ns = runpy.run_path(path, run_name="__hydrapy_patch__")
+            else:
+                ns = {'__file__': path, '__name__': '__hydrapy_patch__'}
+                exec(compile(source, path, 'exec'), ns)
+        finally:
+            sys.path[:] = previous_path
+            core._isolate_patch_outputs = previous_isolation
+        patch = default_patch()
         if not default_patch().active_outputs():
             # maybe the file built an explicit Patch object
             for v in ns.values():
                 from .core import Patch
                 if isinstance(v, Patch) and v.active_outputs():
-                    return v
+                    patch = core._default_patch = v
+                    break
     if not patch.active_outputs():
         if not strict:
             raise ValueError("the patch assigns nothing to an output: call .out() on a chain")
         sys.exit("the patch assigns nothing to an output: call .out() on a chain")
+    import json
+    from .controls import apply_controls
+    apply_controls(patch, json.loads(os.environ.get("HYDRAPY_PARAMS", "{}")))
     return patch
 
 
@@ -137,7 +158,21 @@ def main(argv=None):
         sp.add_argument("--fxparam", action="append", default=[], metavar="ID=VALUE",
                         help="an fx(params) value for a Mint's preview (repeatable; sets FXPARAMS)")
 
-    sub.add_parser("ops", help="list ops")
+    op = sub.add_parser("ops", help="search the operator reference")
+    op.add_argument("query", nargs="?", default="")
+    op.add_argument("--kind", choices=["src", "coord", "color", "combine", "combineCoord", "texture"])
+    check = sub.add_parser("check", help="inspect patch compatibility before export")
+    check.add_argument("patch")
+    check.add_argument("--target", choices=["cpu", "gl", "html", "hydra"], default="html")
+    check.add_argument("--json", action="store_true")
+    studio = sub.add_parser("studio", help="open the local patch workspace")
+    studio.add_argument("patch", nargs="?")
+    studio.add_argument("--root", default=".")
+    studio.add_argument("--backend", choices=["auto", "cpu", "gl"], default="auto")
+    studio.add_argument("--size", type=parse_size, default=(640, 360))
+    studio.add_argument("--fps", type=float, default=30.)
+    studio.add_argument("--port", type=int, default=8765)
+    studio.add_argument("--no-browser", action="store_true")
     sub.add_parser("devices", help="list audio devices and MIDI ports for CvIn/CvOut/Midi")
     nc = sub.add_parser("nca", help="neural cellular automata: train a texture rule from one image (needs torch)")
     nc.add_argument("action", choices=["train"])
@@ -153,6 +188,27 @@ def main(argv=None):
     nc.add_argument("--init", default=None, help="a trained .npz to fine-tune (e.g. with longer --steps 64 128 --lr 3e-4)")
 
     a = ap.parse_args(argv)
+
+    if a.cmd == "studio":
+        from .studio import serve
+        serve(a.root, a.patch, a.backend, a.size, a.fps, a.port, not a.no_browser)
+        return
+
+    if a.cmd == "check":
+        import json
+        from .inspect import capabilities
+        from .live import ResourceStage
+        with ResourceStage():
+            result = capabilities(load_patch(a.patch, strict=False), a.target)
+        if a.json:
+            print(json.dumps(result, indent=2))
+        else:
+            print(f"{a.target}: {'ready' if result['ready'] else 'needs changes'}")
+            for item in result['findings']:
+                print(f"  {item['status']}: {item['path']} — {item['message']}")
+        if not result['ready']:
+            raise SystemExit(1)
+        return
 
     if a.cmd == "nca":
         from .nca_train import train
@@ -190,8 +246,10 @@ def main(argv=None):
 
     if a.cmd == "ops":
         from . import REGISTRY, describe
-        for name in REGISTRY:
-            print(describe(name))
+        for name, op in REGISTRY.items():
+            text = describe(name)
+            if a.query.lower() in text.lower() and (not a.kind or op.kind == a.kind):
+                print(text)
         return
 
     if a.cmd == "import":

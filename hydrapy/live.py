@@ -124,62 +124,69 @@ class Link(Transport):
     """
 
     def __init__(self, bpm: float = 120.0, quantum: float = 4.0, start_stop_sync: bool = False):
-        import asyncio
-        try:
-            import aalink
-        except ImportError as e:
-            raise RuntimeError("Link needs the aalink package: pip install aalink") from e
+        self._initial_bpm, self._link = float(bpm), None
         super().__init__(bpm)
-        try:
-            self._link = aalink.Link(bpm)
-        except RuntimeError:
-            self._loop = asyncio.new_event_loop()
-            import warnings
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                self._link = aalink.Link(bpm, self._loop)
-        self._link.quantum = quantum
-        self._link.start_stop_sync_enabled = start_stop_sync
-        self._link.enabled = True
+        def activate():
+            import asyncio
+            try:
+                import aalink
+            except ImportError as e:
+                raise RuntimeError("Link needs the aalink package: pip install aalink") from e
+            try:
+                self._link = aalink.Link(self._initial_bpm)
+            except RuntimeError:
+                self._loop = asyncio.new_event_loop()
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    self._link = aalink.Link(self._initial_bpm, self._loop)
+            self._link.quantum = quantum
+            self._link.start_stop_sync_enabled = start_stop_sync
+            self._link.enabled = True
+        _open_resource(self, activate)
 
     @property
     def tempo(self) -> float:
-        return float(self._link.tempo)
+        return float(self._link.tempo) if self._link is not None else self._initial_bpm
 
     @tempo.setter
     def tempo(self, v: float):
-        self._link.tempo = float(v)
+        self._initial_bpm = float(v)
+        if self._link is not None:
+            self._link.tempo = float(v)
 
     @property
     def bpm(self) -> float:
-        return float(self._link.tempo)
+        return float(self._link.tempo) if self._link is not None else self._initial_bpm
 
     @bpm.setter
     def bpm(self, v: float):
-        if hasattr(self, "_link"):
+        self._initial_bpm = float(v)
+        if self._link is not None:
             self._link.tempo = float(v)
 
     @property
     def beat(self) -> float:
-        return float(self._link.beat)
+        return float(self._link.beat) if self._link is not None else 0.
 
     @property
     def phase(self) -> float:
-        return float(self._link.phase)
+        return float(self._link.phase) if self._link is not None else 0.
 
     @property
     def peers(self) -> int:
-        return int(self._link.num_peers)
+        return int(self._link.num_peers) if self._link is not None else 0
 
     @property
     def playing(self) -> bool:
-        return bool(self._link.playing)
+        return bool(self._link.playing) if self._link is not None else False
 
     def now(self) -> float:
-        return float(self._link.beat) * 60.0 / max(float(self._link.tempo), 1e-6)
+        return self.beat * 60.0 / max(self.bpm, 1e-6)
 
     def close(self):
-        self._link.enabled = False
+        if self._link is not None:
+            self._link.enabled = False
 
 
 # -----------------------------------------------------------------------------
@@ -194,19 +201,22 @@ class OscIn:
     """
 
     def __init__(self, port: int = 57120, host: str = "0.0.0.0"):
-        try:
-            from pythonosc import dispatcher, osc_server
-        except ImportError as e:
-            raise RuntimeError("OscIn needs python-osc: pip install python-osc") from e
         self.values: dict[str, LiveValue] = {}
         self.trigs: dict[str, TrigPhase] = {}
         self.latest: dict[str, list] = {}
-        d = dispatcher.Dispatcher()
-        d.set_default_handler(self._handle)
-        self.server = osc_server.ThreadingOSCUDPServer((host, port), d)
-        self.port = self.server.server_address[1]
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-        self.thread.start()
+        self.port, self.host, self.server = port, host, None
+        def activate():
+            try:
+                from pythonosc import dispatcher, osc_server
+            except ImportError as e:
+                raise RuntimeError("OscIn needs python-osc: pip install python-osc") from e
+            d = dispatcher.Dispatcher()
+            d.set_default_handler(self._handle)
+            self.server = osc_server.ThreadingOSCUDPServer((host, port), d)
+            self.port = self.server.server_address[1]
+            self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+            self.thread.start()
+        _open_resource(self, activate)
 
     def _handle(self, address, *args):
         self.latest[address] = list(args)
@@ -235,18 +245,24 @@ class OscIn:
         return self.trigs[address]
 
     def close(self):
-        self.server.shutdown()
+        if self.server is not None:
+            self.server.shutdown()
+            self.server.server_close()
+            self.server = None
 
 
 class OscOut:
     """Send signals (or probes) as OSC floats every frame: ``out.send("/hydrapy/centre", Probe(o0))``."""
 
     def __init__(self, host: str = "127.0.0.1", port: int = 57121):
-        try:
-            from pythonosc import udp_client
-        except ImportError as e:
-            raise RuntimeError("OscOut needs python-osc: pip install python-osc") from e
-        self.client = udp_client.SimpleUDPClient(host, port)
+        self.host, self.port, self.client = host, port, None
+        def activate():
+            try:
+                from pythonosc import udp_client
+            except ImportError as e:
+                raise RuntimeError("OscOut needs python-osc: pip install python-osc") from e
+            self.client = udp_client.SimpleUDPClient(host, port)
+        _open_resource(self, activate)
         self.routes: list[tuple[str, Signal]] = []
         register_hook(self.tick)
 
@@ -272,20 +288,6 @@ class Midi:
     """
 
     def __init__(self, port: Optional[str] = None, channel: Optional[int] = None):
-        try:
-            import mido
-        except ImportError as e:
-            raise RuntimeError("Midi needs mido and python-rtmidi: pip install mido python-rtmidi") from e
-        names = mido.get_input_names()
-        if port is None:
-            if not names:
-                raise RuntimeError("no MIDI input ports")
-            name = names[0]
-        else:
-            matches = [n for n in names if port.lower() in n.lower()]
-            if not matches:
-                raise RuntimeError(f"no MIDI input matching {port!r}; have {names}")
-            name = matches[0]
         self.channel = channel
         self._cc: dict[int, LiveValue] = {}
         self._note: dict[int, LiveValue] = {}
@@ -294,7 +296,24 @@ class Midi:
         self.last_note = LiveValue("last_note", 60.0)
         self.bend = LiveValue("bend", 0.0, -1.0, 1.0)
         self.clock = MidiClock()
-        self.port = mido.open_input(name, callback=self._handle)
+        self.port, self.port_name = None, port
+        def activate():
+            try:
+                import mido
+            except ImportError as e:
+                raise RuntimeError("Midi needs mido and python-rtmidi: pip install mido python-rtmidi") from e
+            names = mido.get_input_names()
+            if port is None:
+                if not names:
+                    raise RuntimeError("no MIDI input ports")
+                name = names[0]
+            else:
+                matches = [n for n in names if port.lower() in n.lower()]
+                if not matches:
+                    raise RuntimeError(f"no MIDI input matching {port!r}; have {names}")
+                name = matches[0]
+            self.port = mido.open_input(name, callback=self._handle)
+        _open_resource(self, activate)
 
     @staticmethod
     def ports() -> list[str]:
@@ -338,7 +357,9 @@ class Midi:
         return self._gate[number]
 
     def close(self):
-        self.port.close()
+        if self.port is not None:
+            self.port.close()
+            self.port = None
 
 
 class MidiClock(Transport):
@@ -412,14 +433,19 @@ class CvIn:
         self.stream = None
         self.samplerate = samplerate
         if _file is None:
-            import sounddevice as sd
-            if samplerate is None:
-                dev = sd.query_devices(device, "input")
-                samplerate = int(dev["default_samplerate"])
-            self.samplerate = int(samplerate)
-            self.stream = sd.InputStream(device=device, channels=max(self.channels) + 1, samplerate=self.samplerate,
-                                         blocksize=blocksize, dtype="float32", callback=self._callback)
-            self.stream.start()
+            def activate():
+                import sounddevice as sd
+                if samplerate is None:
+                    dev = sd.query_devices(device, "input")
+                    self.samplerate = int(dev["default_samplerate"])
+                self.samplerate = int(self.samplerate)
+                for analyser in self._audio.values():
+                    analyser.sr = self.samplerate
+                    analyser._bark_edges = None
+                self.stream = sd.InputStream(device=device, channels=max(self.channels) + 1, samplerate=self.samplerate,
+                                             blocksize=blocksize, dtype="float32", callback=self._callback)
+                self.stream.start()
+            _open_resource(self, activate)
 
     # -- live ---------------------------------------------------------------
     def _callback(self, indata, frames, time_info, status):
@@ -607,14 +633,23 @@ class CvOut:
         self._frame_times = []
         self.stream = None
         self.samplerate = int(samplerate or 48000)
+        self._resource_state = 'pending' if _DEFER_RESOURCES else 'active'
         if file is None:
-            import sounddevice as sd
-            if samplerate is None:
-                dev = sd.query_devices(device, "output")
-                self.samplerate = int(dev["default_samplerate"])
-            self.stream = sd.OutputStream(device=device, channels=max(self.channels) + 1, samplerate=self.samplerate,
-                                          blocksize=blocksize, dtype="float32", callback=self._callback)
-            self.stream.start()
+            def activate():
+                import sounddevice as sd
+                if samplerate is None:
+                    dev = sd.query_devices(device, "output")
+                    self.samplerate = int(dev["default_samplerate"])
+                # Routes may have been declared while activation was deferred.
+                for q in self.audio_routes.values():
+                    if q.samplerate != self.samplerate:
+                        with q._lock:
+                            q.samplerate = self.samplerate
+                            q._reset()
+                self.stream = sd.OutputStream(device=device, channels=max(self.channels) + 1, samplerate=self.samplerate,
+                                              blocksize=blocksize, dtype="float32", callback=self._callback)
+                self.stream.start()
+            _open_resource(self, activate)
         register_hook(self.tick)
 
     def send(self, k: int, signal) -> "CvOut":
@@ -664,7 +699,7 @@ class CvOut:
             self.stream.stop(); self.stream.close()
         for q in self.audio_routes.values():
             q.close()
-        if self.file is None:
+        if self.file is None or self._resource_state == 'pending':
             return
         import wave
         nchan = max(self.channels) + 1
@@ -1016,11 +1051,16 @@ def register_hook(fn: Callable):
 
 def run_hooks(ctx, renderer=None):
     for fn in list(_HOOKS):
+        owner = getattr(fn, "__self__", None)
+        if getattr(owner, "_resource_state", "active") != "active":
+            continue
         try:
             fn(ctx, renderer)
         except Exception as e:  # a failing hook shouldn't stop the frames
             import sys
             print(f"hydrapy hook {getattr(fn, '__qualname__', fn)!r} failed: {e}", file=sys.stderr)
+            if owner is not None:
+                owner._resource_state, owner._resource_error = "error", str(e)
             _HOOKS.remove(fn)
 
 
@@ -1035,6 +1075,111 @@ def clear_hooks():
 _RESOURCES: list = []
 
 
+_DEFER_RESOURCES = False
+
+
+def _open_resource(resource, activate):
+    resource._activate = activate
+    resource._resource_state = "pending"
+    if not _DEFER_RESOURCES:
+        activate()
+        resource._resource_state = "active"
+
+
+def _suspend_resource(resource):
+    """Release exclusive hardware without destroying logical routes or recordings."""
+    if isinstance(resource, (CvIn, CvOut)):
+        if resource.stream is not None:
+            resource.stream.stop()
+            resource.stream.close()
+            resource.stream = None
+    elif isinstance(resource, (Link, Midi, OscIn)):
+        resource.close()
+    resource._resource_state = "pending"
+
+
+def resource_status():
+    rows = []
+    for r in _RESOURCES:
+        routes = getattr(r, 'routes', {})
+        if isinstance(routes, dict):
+            routes = [f"{k}: {type(v).__name__}" for k, v in routes.items()]
+        elif isinstance(routes, list):
+            routes = [str(v[0]) for v in routes]
+        else:
+            routes = []
+        rows.append(dict(kind=type(r).__name__, state=getattr(r, '_resource_state', 'active'),
+                         description=getattr(r, '_resource_description', getattr(r, 'name', '')),
+                         channels=getattr(r, 'channels', []), routes=routes,
+                         error=getattr(r, '_resource_error', '')))
+    return rows
+
+
+class ResourceStage:
+    """Build a candidate with unopened devices; commit only after renderer validation.
+
+    On an activation error the old device objects are reopened with their existing
+    signals/routes. Arbitrary side effects in user Python are outside this transaction.
+    """
+    def __enter__(self):
+        global _RESOURCES, _HOOKS, _DEFER_RESOURCES
+        from . import core
+        self.old_resources, self.old_hooks = _RESOURCES, _HOOKS
+        self.old_patch, self.old_defer = core._default_patch, _DEFER_RESOURCES
+        self.committed = False
+        _RESOURCES, _HOOKS, _DEFER_RESOURCES = [], [], True
+        return self
+
+    def commit(self, armed=True):
+        old_hardware = [r for r in self.old_resources if hasattr(r, '_activate') and getattr(r, '_resource_state', '') == 'active']
+        opened = []
+        try:
+            for r in old_hardware:
+                _suspend_resource(r)
+            if armed:
+                for r in _RESOURCES:
+                    if hasattr(r, '_activate'):
+                        opened.append(r)
+                        r._activate()
+                    if hasattr(r, '_resource_state'):
+                        r._resource_state = 'active'
+        except Exception as error:
+            for r in reversed(opened):
+                try:
+                    _suspend_resource(r)
+                except Exception:
+                    pass
+            failures = []
+            for r in old_hardware:
+                try:
+                    r._activate()
+                    r._resource_state = 'active'
+                except Exception as restore_error:
+                    r._resource_state, r._resource_error = 'error', str(restore_error)
+                    failures.append(f'{type(r).__name__}: {restore_error}')
+            if failures:
+                raise RuntimeError(f'{error}; reconnection failed: {"; ".join(failures)}') from error
+            raise
+        # Release the previous patch only after replacement activation succeeded.
+        for r in reversed(self.old_resources):
+            try:
+                if hasattr(r, 'close'):
+                    r.close()
+            except Exception as e:
+                import warnings
+                warnings.warn(f'closing previous {type(r).__name__}: {e}')
+        self.committed = True
+
+    def __exit__(self, exc_type, exc, tb):
+        global _RESOURCES, _HOOKS, _DEFER_RESOURCES
+        from . import core
+        if not self.committed:
+            close_resources()
+            _RESOURCES, _HOOKS = self.old_resources, self.old_hooks
+            core._default_patch = self.old_patch
+        _DEFER_RESOURCES = self.old_defer
+
+
 def _tracked(cls):
     import functools
     init = cls.__init__
@@ -1042,6 +1187,7 @@ def _tracked(cls):
     @functools.wraps(init)
     def __init__(self, *a, **k):
         init(self, *a, **k)
+        self._resource_description = repr((a, k))[:240]
         if self not in _RESOURCES:
             _RESOURCES.append(self)
 
@@ -1083,6 +1229,7 @@ class VideoOut:
         self._sink = None
         self._proc = None
         self.frames = 0
+        self._resource_state = "pending" if _DEFER_RESOURCES else "active"
         register_hook(self.tick)
 
     def _open(self, w, h):

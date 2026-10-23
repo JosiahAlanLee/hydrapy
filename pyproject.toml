@@ -31,3 +31,6 @@ hydrapy = "hydrapy.cli:main"
 
 [tool.setuptools]
 packages = ["hydrapy"]
+
+[tool.setuptools.package-data]
+hydrapy = ["studio.html"]
