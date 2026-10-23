@@ -200,9 +200,7 @@ def main(argv=None):
                 if a.seconds and t > a.seconds:
                     break
                 frame = r.step(t)
-                if not patch.composite_alpha:
-                    frame = frame[..., :3]
-                sys.stdout.write("\x1b[H" + to_ansi(frame, cols=cols, rows=rows) + "\n")
+                sys.stdout.write("\x1b[H" + to_ansi(frame, cols=cols, rows=rows, composite=patch.composite_alpha) + "\n")
                 sys.stdout.flush()
                 time.sleep(max(0.0, 1.0 / a.fps - (time.time() - start - t)))
         except KeyboardInterrupt:

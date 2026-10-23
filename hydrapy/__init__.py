@@ -115,6 +115,16 @@ def set_frame_rate(fps: float | None):
     default_patch().frame_rate = float(fps) if fps else None
 
 
+def set_composite_alpha(on: bool = True):
+    """Display (and probe) RGB x alpha over black instead of Hydra's plain RGB.
+
+    For patches built in straight alpha (strokes, Text, pigment layers kept transparent with
+    ``over``). Leave it off for Hydra-style chains: ``.r()/.g()/.b()``, ``mult``, ``luma`` and
+    ``mask`` all use alpha as a number, not as coverage.
+    """
+    default_patch().composite_alpha = bool(on)
+
+
 def patch() -> Patch:
     return default_patch()
 
@@ -157,7 +167,7 @@ def describe(name: str) -> str:
 
 __all__ = (
     list(_sources) + [
-        "o0", "o1", "o2", "o3", "render", "hush", "set_bpm", "set_resolution", "set_frame_rate", "speed", "patch",
+        "o0", "o1", "o2", "o3", "render", "hush", "set_bpm", "set_resolution", "set_frame_rate", "set_composite_alpha", "speed", "patch",
         "Chain", "Patch", "Output", "Image", "Video", "Camera", "Bank", "Quilt", "quilt", "Text", "Lines", "plant", "meadow", "to_svg",
         "CvIn", "CvOut", "Link", "LiveValue", "Midi", "MidiClock", "OscIn", "OscOut", "Probe", "Soundtrack", "Transport", "TrigPhase", "audio_devices", "register_hook", "Ctx", "reset_patch", "default_patch",
         "Signal", "Lfo", "Seq", "Clock", "Env", "SH", "Decay", "Drift", "Mouse", "Time", "Fn", "Fx", "EntropyLock", "Fft", "Audio", "Const", "Expr", "External", "as_signal",

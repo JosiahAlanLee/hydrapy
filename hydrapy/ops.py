@@ -790,15 +790,17 @@ register(Op("layer", "combine", [Input("tex", "chain")], hydra=True, np=_np_laye
 def _np_over(c0, c1, env):
     a0, a1 = np.clip(c0[..., 3:4], 0, 1), np.clip(c1[..., 3:4], 0, 1)
     a = a1 + a0 * (1 - a1)
-    rgb = (c1[..., :3] * a1 + c0[..., :3] * a0 * (1 - a1)) / np.maximum(a, 1e-8)
-    return np.concatenate([rgb, a], axis=-1)
+    num = c1[..., :3] * a1 + c0[..., :3] * a0 * (1 - a1)
+    rgb = np.where(a > 0, num / np.where(a > 0, a, 1.0), 0.0)
+    return np.concatenate([rgb, a], axis=-1).astype(np.float32)
 
 
 register(Op("over", "combine", [Input("tex", "chain")], np=_np_over,
-            doc="Straight-alpha source-over, including transparent backgrounds. `layer` retains Hydra's original alpha-addition behavior.",
+            doc="Straight-alpha source-over, correct for transparent layers on transparent layers (pigment kept apart from its paper). Onto an opaque picture Hydra's `layer` gives the same colour.",
             glsl="""float a0 = clamp(_c0.a, 0.0, 1.0), a1 = clamp(_c1.a, 0.0, 1.0);
   float a = a1 + a0 * (1.0 - a1);
-  return vec4((_c1.rgb * a1 + _c0.rgb * a0 * (1.0 - a1)) / max(a, 1e-8), a);"""))
+  vec3 num = _c1.rgb * a1 + _c0.rgb * a0 * (1.0 - a1);
+  return vec4(a > 0.0 ? num / a : vec3(0.0), a);"""))
 
 
 def _np_blend(c0, c1, amount, env):

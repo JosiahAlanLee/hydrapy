@@ -242,7 +242,7 @@ class Renderer:
         """Yield n uint8 RGB frames (H, W, 3), row 0 = top."""
         for i in range(n):
             rgba = self.step(start + i / self.fps)
-            yield to_uint8(rgba if self.patch.composite_alpha else rgba[..., :3])
+            yield to_uint8(rgba, self.patch.composite_alpha)
 
 
 def _history_depth(patch: Patch) -> dict:
@@ -262,9 +262,11 @@ def _history_depth(patch: Patch) -> dict:
     return depth
 
 
-def to_uint8(rgba: np.ndarray) -> np.ndarray:
+def to_uint8(rgba: np.ndarray, composite: bool = False) -> np.ndarray:
+    """float RGB(A) -> uint8 RGB. ``composite``: RGB x alpha over black (``Patch.composite_alpha``);
+    otherwise alpha is ignored, as Hydra's display ignores it."""
     rgb = rgba[..., :3]
-    if rgba.shape[-1] == 4:
+    if composite and rgba.shape[-1] == 4:
         rgb = rgb * np.clip(rgba[..., 3:4], 0, 1)
     return (np.clip(np.nan_to_num(rgb), 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
 

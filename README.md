@@ -420,7 +420,8 @@ src(o0).smear(noise(2, 0.1) * 6.28, 0.02)                  # paint dragged along
 
 `recipes.studie(o0, beat=Clock(1)).out(o0)` is the whole thing — comets breathing with the beat,
 smoke behind them; give it `beat=a.flux` from an `Audio` and it dances to the record. Every stroke
-is white with alpha = stroke, so `layer` / `stain` / `alpha` all apply.
+is white with alpha = stroke, so put it on something (`solid().layer(arc(...))`); `layer` /
+`over` / `stain` / `alpha` all apply.
 
 **Cut paper.** The flat-graphic animation of the sixties East — Zagreb, Soyuzmultfilm's Khitruk
 years, Pannónia, the Polish poster school: `halftone` (a three-angle screen print), `boil` (the line
@@ -457,20 +458,22 @@ images. Frame-rate-independent feedback uses a half-life in seconds:
 
 ```python
 decay = Decay(0.7)
-src(o0).mult(solid(decay, decay, decay)).over(wave(3).color(0.8, 0.2, 0.1)).out(o0)
+src(o0).mult(solid(decay, decay, decay)).layer(wave(3).color(0.8, 0.2, 0.1)).out(o0)
 ```
 
 For transparent pigment, fade its **alpha** instead of its RGB. `patches/27_material_controls.py`
 demonstrates this, stationary paper under moving pigment, and both radial-repeat modes.
 
-* Strokes carry straight RGB colour with coverage in alpha. `charcoal()` removes coverage once.
-  `over()` is correct source-over for transparent layers; `layer()` retains Hydra's alpha-addition
-  behavior. Final native/HTML display, image/video exports, and brightness/sound probes respect
-  alpha. Raw `Renderer.step()` and `GLRenderer.read_rgba()` retain uncomposited RGBA.
-* `default_patch().composite_alpha = False` restores the previous RGB-only display/probe behavior
-  when alpha is being used as another signal channel (for example in `sub` or `shift`). Imported
-  Hydra sketches select this compatibility mode automatically. Transparent artwork should use
-  the default `True`; flatten it over an opaque colour before RGB-only keying/filtering.
+* Strokes carry straight RGB colour (white) with coverage in alpha; `charcoal()` removes coverage
+  once. Put them on a picture to see them: `solid().layer(wave(3))` — Hydra's `layer` is exact for
+  a straight-alpha layer on an opaque picture. `over()` is source-over for transparent layers on
+  transparent layers (pigment kept apart from its paper).
+* The display is Hydra's: RGB, with alpha as a fourth channel that `.r()/.g()/.b()`, `mult`,
+  `luma` and `mask` use as a number. `set_composite_alpha(True)` shows RGB × alpha over black
+  instead — in the window, the HTML page, exports and brightness/sound probes — for patches built
+  in straight alpha throughout (patch 27). Raw `Renderer.step()` and `GLRenderer.read_rgba()`
+  always return uncomposited RGBA. (`tests/test_patch_brightness.py` holds every example patch to
+  its baseline brightness, so a change to this can't darken them silently.)
 * `polarRepeat(n)` uses image-space angles, preserving circles on wide and tall frames.
   `polarRepeat(n, aspect=0)` preserves the former normalized-coordinate distortion.
 * `recipes.on_paper(pigment, paper_color=(0.94, 0.90, 0.81), tooth=0.35, texture=0.025)` applies
@@ -597,7 +600,7 @@ GPU brightness probes reduce their regions before readback; audio strips are rea
 | `add` | `amount=1` | Hydra | Add. |
 | `sub` | `amount=1` | Hydra | Subtract. |
 | `layer` | `` | Hydra | Alpha-composite on top. |
-| `over` | `` | **new** | Straight-alpha source-over, including transparent backgrounds. `layer` retains Hydra's original alpha-addition behavior. |
+| `over` | `` | **new** | Straight-alpha source-over, correct for transparent layers on transparent layers (pigment kept apart from its paper). Onto an opaque picture Hydra's `layer` gives the same colour. |
 | `blend` | `amount=0.5` | Hydra | Crossfade. |
 | `mult` | `amount=1` | Hydra | Multiply. |
 | `diff` | `` | Hydra | Absolute difference. |

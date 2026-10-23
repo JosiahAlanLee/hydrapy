@@ -77,6 +77,7 @@ def test_feedback_half_life_is_in_seconds(backend, fps, hold):
 @pytest.mark.parametrize("backend", ["numpy", "gl"])
 def test_stroke_coverage_applied_once_in_display_and_sound(backend):
     p = Patch(size=(96, 64))
+    p.composite_alpha = True                       # a transparent stroke shown directly
     c = arc(.3, 0, 2 * math.pi, .04, 0, 0).charcoal(.3, 0, 60)
     c.out(p.o0, patch=p)
     sound = Soundtrack(p.o0, x=.5, fps=24, ac=False, patch=p)
@@ -84,7 +85,7 @@ def test_stroke_coverage_applied_once_in_display_and_sound(backend):
     try:
         rgba = read(r, 0)
         assert np.allclose(rgba[..., :3], 1)
-        image = np.asarray(to_image(rgba))
+        image = np.asarray(to_image(rgba, composite=True))
         assert np.max(np.abs(image[..., 0] / 255 - rgba[..., 3])) < .005
         if backend == "gl":
             assert np.abs(r.read().astype(float) - image).max() <= 1
@@ -92,6 +93,28 @@ def test_stroke_coverage_applied_once_in_display_and_sound(backend):
         assert np.ptp(sound.samples) > .5
         black = solid(0, 0, 0).layer(c).render(size=p.size)
         assert np.allclose(black[..., 0], c.render(size=p.size)[..., 3])
+    finally:
+        release(r)
+
+
+@pytest.mark.parametrize("backend", ["numpy", "gl"])
+def test_default_display_is_hydras_rgb_and_strokes_go_on_black(backend):
+    p = Patch(size=(96, 64))
+    assert p.composite_alpha is False
+    c = arc(.3, 0, 2 * math.pi, .04, 0, 0).charcoal(.3, 0, 60)
+    solid(0, 0, 0).layer(c).out(p.o0, patch=p)
+    solid(0.5, 0.5, 0.5).g().out(p.o1, patch=p)                     # Hydra splats g into alpha; the display ignores it
+    sound = Soundtrack(p.o0, x=.5, fps=24, ac=False, patch=p)
+    r = renderer(backend, p, 24)
+    try:
+        rgba = read(r, 0)
+        assert np.abs(rgba[..., 0] - c.render(size=p.size)[..., 3]).max() < .01   # coverage counted once, on black
+        assert np.ptp(sound.samples) > .5
+        p.render(p.o1)
+        if backend == "gl":
+            assert abs(r.read().astype(float).mean() / 255 - .5) < .01
+        else:
+            assert abs(np.asarray(to_image(r.displayed())).mean() / 255 - .5) < .01
     finally:
         release(r)
 
@@ -145,9 +168,11 @@ def test_fractional_resampling_is_continuous_across_chunks():
     q.close()
 
 
+@pytest.mark.parametrize("composite", [False, True])
 @pytest.mark.parametrize("channel", ["r", "g", "b", "a", "luma"])
-def test_gpu_reduced_probe_matches_region_mean(channel):
+def test_gpu_reduced_probe_matches_region_mean(channel, composite):
     p = Patch(size=(37, 61))
+    p.composite_alpha = composite
     gradient().alpha(osc(4, 0, 0)).out(p.o0, patch=p)
     probe = Probe(p.o0, x=.72, y=.12, size=.78, channel=channel, patch=p)
     original = probe.update_mean
@@ -187,14 +212,15 @@ console.log(JSON.stringify({out,n}));
 
 
 def test_iterator_export_and_native_signal_round_trip():
-    p = Patch(size=(16, 16)); p.composite_alpha = False
+    p = Patch(size=(16, 16)); p.composite_alpha = True
     solid(Decay(.7), 0, 0).out(p.o0, patch=p)
     frames = iter_frames(p, seconds=.5, fps=12)
     assert iter(frames) is frames
     assert len(list(frames)) == 6
     code = patch_to_python(p)
-    assert "Decay(0.7)" in code and "composite_alpha = False" in code
-    assert build_spec(p)["compositeAlpha"] is False
+    assert "Decay(0.7)" in code and "set_composite_alpha(True)" in code
+    assert build_spec(p)["compositeAlpha"] is True
+    assert "composite" not in patch_to_python(Patch())          # Hydra's display is the default: nothing to write
 
 
 @pytest.mark.parametrize("backend,fps", [("numpy", 12), ("gl", 60)])
