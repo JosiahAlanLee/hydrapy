@@ -18,7 +18,7 @@ import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-from .controls import apply_controls
+from .controls import apply_controls, carry_controls
 from .inspect import catalog, capabilities
 
 
@@ -186,8 +186,7 @@ class Session:
             with ResourceStage() as stage:
                 patch = load_patch(str(path), strict=False)
                 if same and old:
-                    apply_controls(patch, {k: v.snapshot() for k, v in old.patch.controls.items()})
-                    patch.render(patch.outputs[old.patch.display.index])
+                    carry_controls(old.patch, patch)
                 new = self._make_renderer(patch)
                 if hasattr(new, '_compile'):
                     new._compile()

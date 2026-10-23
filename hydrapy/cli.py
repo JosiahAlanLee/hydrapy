@@ -66,6 +66,7 @@ def load_patch(path: str, strict: bool = True, source=None):
         sys.exit("the patch assigns nothing to an output: call .out() on a chain")
     import json
     from .controls import apply_controls
+    patch.declared_display = patch.display.index      # what render() in the file chose, for reloads
     apply_controls(patch, json.loads(os.environ.get("HYDRAPY_PARAMS", "{}")))
     return patch
 

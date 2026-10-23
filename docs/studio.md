@@ -84,6 +84,13 @@ A failed device activation attempts to reconnect the previous devices and report
 failure to do so. Successful reloads briefly reopen hardware; they are not gapless audio
 switches. Feedback history is copied; arbitrary external state is not.
 
+What you did in the session survives a reload unless the edit changed it. A control keeps its
+slider value if its default in the code is unchanged, and keeps its modulation (none/LFO/beat, or
+the depth of a declared `bind()`) if its `bind()` is unchanged; add, remove or change either in
+the code and the code wins. The output you chose stays on screen unless the edit changed the
+patch's `render()`. "Declared in patch" stays in a control's modulation menu, so a declared bind
+can be chosen again after switching to an LFO.
+
 Recording via a patch's own `VideoOut` or file-mode `CvOut` follows that object's lifecycle.
 A successful reload closes the previous recording and creates the replacement. Use
 unique recording destinations to avoid overwriting previous takes. Studio's separate

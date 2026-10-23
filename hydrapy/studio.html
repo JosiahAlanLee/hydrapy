@@ -245,7 +245,7 @@ function renderControls() {
       kind = el('select'),
       depth = el('input'),
       rate = el('input');
-    for (let k of ['none', 'lfo', 'beat', ...(p.modulation === 'patch' ? ['patch'] : [])]) kind.append(new Option({
+    for (let k of ['none', 'lfo', 'beat', ...(p.declared ? ['patch'] : [])]) kind.append(new Option({
       none: 'None',
       lfo: 'Sine LFO',
       beat: 'Beat envelope',

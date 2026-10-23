@@ -300,3 +300,99 @@ def test_recording_repeats_held_frames_at_wall_clock_rate(tmp_path, monkeypatch)
     recorder.close()
     assert len(received) in (3,4)
     assert all(np.array_equal(f,red) for f in received)
+
+
+# --- what survives an edit -------------------------------------------------------------------
+
+def _load_source(tmp_path, text, name='carry.py'):
+    from hydrapy.cli import load_patch
+    path = tmp_path / name
+    path.write_text("from hydrapy import *\n" + text)
+    with ResourceStage() as stage:
+        patch = load_patch(str(path))
+        stage.commit(False)
+    return patch
+
+
+def test_reload_carry_keeps_the_performance_but_lets_edits_win(tmp_path):
+    from hydrapy.controls import carry_controls
+    bound = "m = Param('m', .2, max=2).bind(Lfo(.5), .3)\nosc(10, m).out(o0)\nnoise(3).out(o1)\n"
+    plain = "m = Param('m', .2, max=2)\nosc(10, m).out(o0)\nnoise(3).out(o1)\n"
+    # removing a bind: the edit loads and the modulation goes
+    old = _load_source(tmp_path, bound)
+    old.controls['m'].set(1.5)
+    new = _load_source(tmp_path, plain)
+    carry_controls(old, new)
+    assert new.controls['m'].modulation is None and new.controls['m'].base == 1.5
+    # adding a bind: it takes effect even though the running patch had none
+    newer = _load_source(tmp_path, bound)
+    carry_controls(new, newer)
+    assert newer.controls['m'].mod_kind == 'patch' and newer.controls['m'].depth == .3
+    # same declaration: the performer's depth and their switch to an LFO survive
+    newer.controls['m'].depth = .9
+    again = _load_source(tmp_path, bound)
+    carry_controls(newer, again)
+    assert again.controls['m'].depth == .9
+    apply_controls(again, {'m': {'modulation': 'lfo', 'depth': .4, 'rate': 2}})
+    once_more = _load_source(tmp_path, bound)
+    carry_controls(again, once_more)
+    assert once_more.controls['m'].mod_kind == 'lfo' and once_more.controls['m'].mod_rate == 2
+    # and the declared bind can be chosen again afterwards
+    apply_controls(once_more, {'m': {'modulation': 'patch', 'depth': .3}})
+    assert once_more.controls['m'].mod_kind == 'patch' and once_more.controls['m'].modulation is once_more.controls['m']._bound[0]
+    # a changed default wins over the carried slider value; an unchanged one doesn't
+    moved = _load_source(tmp_path, plain.replace(".2, max=2", ".8, max=2"))
+    moved_from = _load_source(tmp_path, plain)
+    moved_from.controls['m'].set(1.5)
+    carry_controls(moved_from, moved)
+    assert moved.controls['m'].base == .8
+
+
+def test_reload_carry_keeps_the_chosen_output_unless_render_changed(tmp_path):
+    from hydrapy.controls import carry_controls
+    two = "osc(10).out(o0)\nnoise(3).out(o1)\nrender(o1)\n"
+    old = _load_source(tmp_path, two)
+    old.render(old.o0)                                   # the performer switched to o0 in the session
+    new = _load_source(tmp_path, two)
+    carry_controls(old, new)
+    assert new.display.index == 0
+    edited = _load_source(tmp_path, two.replace("render(o1)", "render(o1)\nrender(o0)").replace("noise(3)", "noise(4)"))
+    old.render(old.o1)
+    carry_controls(old, edited)
+    assert edited.display.index == 0                      # the edit's render() wins
+
+
+def test_studio_reload_accepts_removing_a_bind(tmp_path):
+    path = tmp_path / 'patch.py'
+    bound = "from hydrapy import *\nm = Param('m', .2, max=2).bind(Lfo(.5), .3)\nosc(10, m).out(o0)\n"
+    path.write_text(bound)
+    session = Session(tmp_path, path.name, backend='cpu', size=(32, 18), fps=12)
+    try:
+        plain = bound.replace(".bind(Lfo(.5), .3)", "")
+        session.call('save', path='patch.py', source=plain, version=digest(bound))
+        assert session.renderer.patch.controls['m'].modulation is None
+        session.call('save', path='patch.py', source=bound, version=digest(plain))
+        assert session.renderer.patch.controls['m'].mod_kind == 'patch'
+    finally:
+        session.close()
+
+
+def test_live_reload_applies_an_added_bind():
+    from hydrapy import Lfo
+    from hydrapy.backend_gl import GLRenderer, _create_context, _reload
+    try:
+        ctx = _create_context()
+    except Exception:
+        pytest.skip("no GL context")
+    def make(bind):
+        p = Patch(size=(16, 9))
+        m = Param('m', .2, max=2, patch=p)
+        if bind:
+            m.bind(Lfo(.5), .3)
+        osc(10, m).out(p.o0, patch=p)
+        p.declared_display = p.display.index
+        return p
+    r = GLRenderer(make(False), size=(16, 9), ctx=ctx, fps=24)
+    r2 = _reload(r, lambda: make(True), ctx, 24)
+    assert r2 is not r and r2.patch.controls['m'].mod_kind == 'patch'
+    r2.release()

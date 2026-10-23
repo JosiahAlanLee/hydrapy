@@ -80,7 +80,9 @@ raises prints the traceback and the old patch keeps playing. Managed devices are
 Only a validated replacement switches connections. If activation fails, the previous device
 objects are reopened; any reconnection error is reported. A successful reload can briefly
 interrupt hardware streams and restarts stateful sources such as NCA/Physarum. Arbitrary Python
-side effects cannot be rolled back. `close_resources()` closes the current connections from Python. `--no-watch` turns it off.
+side effects cannot be rolled back. `Param` values, modulation and the chosen output carry over
+unless the edit changed their declaration in the code ([details](studio.md#connections-and-reload)).
+`close_resources()` closes the current connections from Python. `--no-watch` turns it off.
 
 ```python
 VideoOut("virtualcam")               # a webcam other software can pick: OBS, Zoom, Resolume, TouchDesigner (needs pyvirtualcam)
