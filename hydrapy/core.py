@@ -39,6 +39,8 @@ class Op:
     iterations: bool = False       # texture op that may run several passes per frame
     doc: str = ""
     hydra: bool = False            # part of Hydra's own op set (exportable to Hydra JS)
+    glsl_helpers: str = ""         # optional op-specific functions before the body
+    python_source: Optional[Callable] = None  # (args, formatter) -> constructor expression
 
     @property
     def returns(self) -> str:

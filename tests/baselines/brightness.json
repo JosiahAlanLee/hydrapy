@@ -133,5 +133,25 @@
  },
  "31_living_curves": {
   "o0": 0.0451
+ },
+ "demoscene_fractal": {
+  "o0": 0.0583
+ },
+ "demoscene_materials": {
+  "o0": 0.6655,
+  "o1": 0.3808,
+  "o2": 0.4929,
+  "o3": 0.1284
+ },
+ "demoscene_metaballs": {
+  "o0": 0.1392,
+  "o1": 0.1755
+ },
+ "demoscene_sdf3d": {
+  "o0": 0.0799,
+  "o1": 0.0367
+ },
+ "demoscene_wire": {
+  "o0": 0.0445
  }
 }

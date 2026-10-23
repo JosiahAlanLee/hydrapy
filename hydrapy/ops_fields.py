@@ -152,3 +152,37 @@ register(Op("sdfBands", "color", [F("frequency", 20), F("width", .3), F("phase",
     glsl="""float f=max(abs(frequency),1.e-5), d=abs(fract(_c0.r*f-phase+.5)-.5);
   float aa=min(.25,.5*f/resolution.y), halfWidth=clamp(width,0.,1.)*.5;
   return vec4(vec3(1.-smoothstep(halfWidth-aa,halfWidth+aa,d)),1.);"""))
+
+
+def _np_metaballs(st, count, radius, spread, smoothness, speed, seed, env):
+    q = (st - .5) * np.array([env.res[0] / env.res[1], 1], np.float32)
+    d = np.full(st.shape[:2], 1e4, np.float32)
+    k = max(smoothness, 1e-8)
+    for i in range(int(np.clip(np.floor(count), 1, 16))):
+        a = np.float32(i * 2.39996323 + seed)
+        t = np.float32(env.time * speed)
+        center = spread * np.array([np.sin(t * (1 + i * .07) + a),
+                                     np.cos(t * (.83 + i * .05) + a * 1.37)], np.float32)
+        b = np.linalg.norm(q - center, axis=-1) - abs(radius)
+        h = np.clip(.5 + .5 * (b - d) / k, 0, 1)
+        d = b * (1 - h) + d * h - k * h * (1 - h)
+    return grey(d, st)
+
+
+register(Op("sdfMetaballs", "src",
+    [F("count", 5, scalar=True), F("radius", .12, scalar=True), F("spread", .28, scalar=True),
+     F("smoothness", .12, scalar=True), F("speed", .5, scalar=True), F("seed", 0, scalar=True)],
+    np=_np_metaballs,
+    doc="Smooth union of 1..16 animated circles, a negative-inside distance bound. Deterministic motion in seconds; radius/spread/smoothness use screen-height units. Finish with sdfMask/sdfBands or derive a normal map.",
+    glsl="""
+  vec2 q=(_st-.5)*vec2(resolution.x/resolution.y,1.);
+  float d=1.e4, k=max(smoothness,1.e-8);
+  for(int i=0;i<16;i++) {
+    if(float(i)>=clamp(floor(count),1.,16.)) break;
+    float a=float(i)*2.39996323+seed, t=time*speed;
+    vec2 p=spread*vec2(sin(t*(1.+float(i)*.07)+a),cos(t*(.83+float(i)*.05)+a*1.37));
+    float b=length(q-p)-abs(radius), h=clamp(.5+.5*(b-d)/k,0.,1.);
+    d=mix(b,d,h)-k*h*(1.-h);
+  }
+  return vec4(vec3(d),1.);
+"""))
