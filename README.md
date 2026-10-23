@@ -546,10 +546,11 @@ blobs coarsen, the state pins at its clamp) needs longer rollouts: fine-tune it 
 `--init lichen.npz --steps 64 128 --lr 3e-4 --iters 500`. Check one by stepping it for a thousand
 steps before you rely on it (`nca.step_np` in a loop).
 
-`patches/28_nca.py` uses the two rules shipped in `patches/models/`: `gravel` (scikit-image's CC0
-gravel photograph) and `painted` (a frame of `recipes.handpainted()`). A third, trained on
-scikit-image's immunohistochemistry slide, made convincing membranes and nuclei for ~100 steps and
-then drifted, so it isn't shipped.
+`patches/28_nca.py` uses the three rules shipped in `patches/models/`: `cells` (scikit-image's
+immunohistochemistry slide), `gravel` (scikit-image's CC0 gravel photograph) and `painted` (a frame
+of `recipes.handpainted()`). `cells` is the drift case above: trained with 24–40-step rollouts it
+held for ~100 steps and then wandered off-palette and pinned at the clamp; 500 iterations of
+fine-tuning at 64–128 steps fixed it (steady colour statistics over 2,500 steps).
 
 ## Vectors out: the oscilloscope, the laser, the plotter
 
