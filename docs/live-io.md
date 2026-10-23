@@ -68,11 +68,19 @@ and [audio timing](audio-timing.md) for sample-clock behavior and verification.
 
 ## Hot reload and video out
 
+[Studio](studio.md) adds a code editor, output thumbnails, controls, connection status and export jobs.
+The desktop window supports **1–4** for outputs, **Space** for pause, **S** for a screenshot and
+**F** for fullscreen. Its title shows playback, measured display rate, resolution, clock, connections
+and rejected edits. Studio starts with managed hardware connections disconnected.
+
+
 `hydrapy live patch.py` watches the file: save it and the patch re-runs in place. The outputs'
 current frames carry over, so feedback keeps its history and the clock keeps running; an edit that
-raises prints the traceback and the old patch keeps playing. Devices the patch opened (CV, OSC,
-MIDI, Link, `XY`, `VideoOut`) are closed first and reopened by the new run; `close_resources()` does
-the same from Python. `--no-watch` turns it off.
+raises prints the traceback and the old patch keeps playing. Managed devices are staged without opening them while the new patch is loaded and compiled.
+Only a validated replacement switches connections. If activation fails, the previous device
+objects are reopened; any reconnection error is reported. A successful reload can briefly
+interrupt hardware streams and restarts stateful sources such as NCA/Physarum. Arbitrary Python
+side effects cannot be rolled back. `close_resources()` closes the current connections from Python. `--no-watch` turns it off.
 
 ```python
 VideoOut("virtualcam")               # a webcam other software can pick: OBS, Zoom, Resolume, TouchDesigner (needs pyvirtualcam)

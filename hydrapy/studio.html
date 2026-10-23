@@ -1,0 +1,545 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HydraPy Studio</title>
+<style>
+:root{color-scheme:dark;--bg:#121615;--panel:#1a201e;--line:#303a35;--ink:#e8ede7;--muted:#9baaa1;--accent:#c2e2a4;--warning:#efbf79;--error:#ffa99b}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,sans-serif}button,input,select,textarea{font:inherit}button,select,input{background:#232c27;color:var(--ink);border:1px solid #48574d;border-radius:5px;min-height:36px;padding:6px 10px}button{cursor:pointer}button:hover{border-color:var(--accent);background:#2d3b31}button:disabled{opacity:.45;cursor:wait}button.primary{background:var(--accent);border-color:var(--accent);color:#172019;font-weight:650}button.active{border-color:var(--accent);color:var(--accent)}button.danger{border-color:var(--error);color:var(--error)}button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:2px solid var(--accent);outline-offset:2px}input[type=range]{accent-color:var(--accent);padding:0;min-height:30px;width:100%}input[type=checkbox]{min-height:auto}a{color:var(--accent)}header{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:16px 22px;border-bottom:1px solid var(--line)}.brand{font-size:20px;font-weight:650;letter-spacing:-.6px}.brand span{font-size:12px;font-weight:450;letter-spacing:1.4px;color:var(--muted);margin-left:12px;text-transform:uppercase}.transport{display:flex;align-items:center;gap:8px}.clock{font:14px ui-monospace,monospace;color:var(--accent);margin-right:8px}.layout{display:grid;grid-template-columns:240px minmax(380px,1fr) 340px;height:calc(100vh - 77px)}aside{min-height:0;overflow-y:auto}.library{border-right:1px solid var(--line);padding:18px 14px}.eyebrow{font-size:11px;letter-spacing:1.8px;text-transform:uppercase;color:var(--muted);margin-bottom:10px}.library input,.library select{width:100%;margin-bottom:8px}.library .count{font-size:12px;color:var(--muted);margin:10px 0}.patch-card{display:block;text-align:left;width:100%;margin-bottom:8px;padding:11px;background:var(--panel);border-color:var(--line)}.patch-card.current{border-color:var(--accent)}.patch-card img{display:block;width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:3px;margin-bottom:8px}.patch-card strong{display:block;font-size:13px;font-weight:550}.patch-card small{display:block;color:var(--muted);font-size:11px;margin-top:5px}.tag{color:var(--accent)!important}.main{overflow:auto;min-height:0;padding:18px 20px}.title-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;gap:12px}.title-row h1{font-size:16px;margin:0;font-weight:550;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.subtle{color:var(--muted);font-size:12px}.preview{background:#080a09;position:relative;aspect-ratio:16/9;display:flex;align-items:center;justify-content:center;border:1px solid var(--line);border-radius:6px;overflow:hidden}.preview>img{width:100%;height:100%;object-fit:contain}.preview>img:not([src]){display:none}.preview .empty{position:absolute;text-align:center;color:var(--muted);padding:24px}.preview .empty strong{display:block;color:var(--ink);font-weight:500;font-size:22px;margin-bottom:8px}.preview:fullscreen{width:100vw;height:100vh;background:#000}.status-strip{display:flex;gap:12px;flex-wrap:wrap;font-size:11px;color:var(--muted);padding:10px 0}.status-strip .on{color:var(--accent)}.status-strip .off{color:var(--warning)}.outputs{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.output{position:relative;padding:0;overflow:hidden;background:#080a09;border-color:var(--line)}.output img{display:block;width:100%;aspect-ratio:16/9;object-fit:contain;opacity:.65}.output.active img{opacity:1}.output span{display:block;font:11px ui-monospace,monospace;text-align:left;padding:5px 8px;color:var(--muted)}.output.active span{color:var(--accent)}.editor{margin-top:18px;border:1px solid var(--line);border-radius:6px;overflow:hidden}.editor-head{display:flex;justify-content:space-between;align-items:center;background:var(--panel);padding:9px 12px;gap:10px}.editor-head label{font-size:12px;color:var(--muted)}textarea{display:block;width:100%;height:270px;resize:vertical;background:#141a17;color:#dce9db;padding:16px;border:0;outline:none;tab-size:4;line-height:1.7;font:12px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre;overflow:auto}.editor-foot{font-size:11px;color:var(--muted);padding:7px 12px;border-top:1px solid var(--line)}.inspector{border-left:1px solid var(--line);padding:18px 16px;background:#171d19}.tabs{display:flex;gap:4px;margin-bottom:22px}.tabs button{flex:1;font-size:12px;padding:6px}.section{margin:18px 0}.section label{display:block;color:var(--muted);font-size:12px;margin:9px 0 5px}.section input:not([type=range]),.section select{width:100%}.row{display:flex;align-items:center;gap:8px}.row>*{min-width:0;flex:1}.control{padding:15px 0;border-bottom:1px solid var(--line)}.control-head{display:flex;justify-content:space-between;align-items:center;gap:8px}.control-name{font-size:14px}.control-number{width:88px;min-height:32px;text-align:right;font-family:ui-monospace,monospace}.unit{color:var(--muted);font-size:11px}.control details{margin-top:6px;color:var(--muted);font-size:11px}.control details input,.control details select{font-size:11px;min-height:30px;padding:3px 6px;width:100%}.control details .row{margin-top:7px}.control .description{font-size:11px;color:var(--muted);margin:6px 0}.empty-controls{color:var(--muted);font-size:13px;padding:12px 0}.empty-controls code{color:var(--accent);display:block;white-space:pre-wrap;margin:14px 0;font-size:12px}.connection,.finding,.job{border:1px solid var(--line);padding:11px;border-radius:5px;margin:8px 0;font-size:12px}.connection .state{float:right;color:var(--warning)}.connection .state.active{color:var(--accent)}.connection .state.error{color:var(--error)}.connection pre{font:11px/1.5 ui-monospace,monospace;white-space:pre-wrap;word-break:break-word;color:var(--muted)}.finding strong{display:block;color:var(--warning);font-size:11px;margin-bottom:4px}.finding p{margin:4px 0;color:var(--muted)}progress{width:100%;accent-color:var(--accent);height:8px}.error-box{margin:12px 0;padding:12px;border-left:3px solid var(--error);background:#2e201e;color:var(--error);white-space:pre-wrap;max-height:230px;overflow:auto;font:12px/1.6 ui-monospace,monospace}.notice{color:var(--muted);font-size:12px;margin-top:12px;min-height:20px}.hidden{display:none!important}.shortcut{font:10px ui-monospace,monospace;color:var(--muted);margin-left:5px}.small{font-size:12px}.busy{opacity:.6}#toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);max-width:min(700px,90vw);padding:12px 20px;background:#344738;border:1px solid var(--accent);box-shadow:0 4px 32px #0008;border-radius:6px;z-index:10}.library-toggle{display:none}@media(min-width:1600px){.layout{grid-template-columns:270px minmax(500px,1fr) 360px}.main{padding:24px 30px}textarea{height:330px}}@media(max-width:1050px){.layout{grid-template-columns:200px minmax(360px,1fr)}.inspector{grid-column:2;overflow:visible;border-top:1px solid var(--line)}.main{overflow:visible}.layout{height:auto}.library{grid-row:1/3;max-height:calc(100vh - 77px);position:sticky;top:0}.transport .shortcut{display:none}}@media(max-width:680px){header{padding:12px;flex-wrap:wrap;gap:8px}.brand span{display:none}.layout{display:block}.library{display:none;position:static;max-height:400px}.library.open{display:block}.library-toggle{display:block}.main{padding:12px}.inspector{border-left:0;padding:16px}.transport{gap:5px}.transport button{font-size:12px;padding:6px}.clock{font-size:12px}textarea{height:250px}}
+</style>
+</head>
+<body>
+<header><div class="brand">HydraPy <span>Studio</span></div><div class="transport"><span class="clock" id="time">00:00.0</span><button id="play" title="Space to pause">Pause <span class="shortcut">Space</span></button><button id="restart" title="Restart simulation and clear feedback">Restart</button><button id="snapshot" title="Save current frame">Snapshot <span class="shortcut">S</span></button><button id="record">Record video</button></div></header>
+<div class="layout">
+<aside class="library" id="library"><div class="eyebrow">Patch library</div><input id="search" aria-label="Search patches" placeholder="Search a technique or patch…"><select id="category" aria-label="Filter patches by task"><option value="">All tasks</option><option>Recent</option></select><div class="count" id="count"></div><div id="patches"></div></aside>
+<main class="main"><div class="title-row"><button class="library-toggle" id="browse">Patches</button><h1 id="patch-title">Choose a patch</h1><button id="fullscreen" class="small">Fullscreen <span class="shortcut">F</span></button></div>
+<div class="preview" id="preview-box"><div class="empty" id="empty"><strong>A patch, in motion.</strong>Open an example from the library.<br>Python stays the source. The controls stay within reach.</div><img id="preview" alt="Live patch output"></div>
+<div class="status-strip" id="status"><span>Waiting for a patch</span></div><div class="outputs" id="outputs"></div>
+<div class="notice" id="notice" role="status"></div><pre class="error-box hidden" id="error" role="alert"></pre>
+<section class="editor"><div class="editor-head"><label for="source">Patch source <span id="dirty"></span></label><div><button id="reopen" class="small">Reopen</button> <button id="save" class="primary small">Save & run <span class="shortcut">Ctrl ↵</span></button></div></div><textarea id="source" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Python patch source"></textarea><div class="editor-foot" id="editor-foot">Changes run when saved. Failed edits keep the previous patch.</div></section>
+</main>
+<aside class="inspector"><nav class="tabs" aria-label="Inspector"><button data-tab="perform" class="active">Perform</button><button data-tab="connections">Connections</button><button data-tab="export">Export</button></nav>
+<section id="perform" class="tab"><div class="eyebrow">Performance controls</div><div id="controls"></div><div class="section"><button id="reset-controls" class="small">Reset base values</button></div><div class="section"><div class="eyebrow">Presets</div><select id="presets" aria-label="Saved presets"><option value="">Choose a preset…</option></select><div class="row"><input id="preset-name" aria-label="Preset name" placeholder="Name this setting"><button id="preset-save">Save</button></div></div></section>
+<section id="connections" class="tab hidden"><div class="eyebrow">Connections</div><p class="subtle">Review the routes declared in your patch. Enable them when you are ready to connect.</p><button id="arm" class="primary">Enable connections</button><div id="routes"></div><div class="section"><button id="device-scan">List available devices</button><pre id="devices" class="subtle" style="white-space:pre-wrap"></pre></div></section>
+<section id="export" class="tab hidden"><div class="eyebrow">Export the patch</div><p class="subtle">Offline exports start at zero with the current controls. Video recording captures the performance in real time.</p><div class="section"><div class="row"><div><label for="format">Format</label><select id="format"><option value="mp4">MP4 video</option><option value="html">Standalone HTML</option><option value="png">PNG at current time</option><option value="gif">Animated GIF</option></select></div><div><label for="backend">Renderer</label><select id="backend"><option value="gl">GL</option><option value="cpu">CPU</option></select></div></div><div class="row"><div><label for="seconds">Seconds</label><input id="seconds" type="number" value="10" min="0.01" step="1"></div><div><label for="fps">Frames / second</label><input id="fps" type="number" value="30" min="1" max="120"></div></div><div class="row"><div><label for="width">Width</label><input id="width" type="number" value="1280" min="16" max="4096"></div><div><label for="height">Height</label><input id="height" type="number" value="720" min="16" max="4096"></div></div><label for="encoder">Video encoder</label><select id="encoder"><option value="auto">Auto · hardware when available</option><option value="software">Software</option><option value="nvenc">NVIDIA NVENC</option><option value="videotoolbox">Apple VideoToolbox</option></select><label for="audio">Audio file (optional, within workspace)</label><input id="audio" placeholder="media/track.flac"><p class="subtle">The selected audio file is muxed into MP4. Without one, a declared Soundtrack is used if present.</p></div><div class="row"><button id="check">Check compatibility</button><button id="export-run" class="primary">Export</button></div><div id="compatibility"></div><div class="section"><div class="eyebrow">Jobs</div><div id="jobs"><p class="subtle">Exports appear here.</p></div></div></section>
+</aside></div><div id="toast" role="status" class="hidden"></div>
+<script>
+'use strict';
+const $ = id => document.getElementById(id),
+  token = location.hash.slice(1);
+let state = {},
+  entries = [],
+  editorPath = null,
+  version = null,
+  dirty = false,
+  controlKey = '',
+  routeKey = '',
+  jobKey = '',
+  imgURL = null,
+  pollBusy = false,
+  lastOutput = '',
+  toastTimer;
+const headers = {
+  'X-Hydrapy-Token': token,
+  'Content-Type': 'application/json'
+};
+const el = (tag, text, cls) => {
+  let e = document.createElement(tag);
+  if (text !== undefined) e.textContent = text;
+  if (cls) e.className = cls;
+  return e
+};
+async function api(name, data) {
+  let r = await fetch('/api/' + name, {
+    method: data === undefined ? 'GET' : 'POST',
+    headers,
+    body: data === undefined ? undefined : JSON.stringify(data)
+  });
+  let result = await r.json();
+  if (!r.ok) throw new Error(result.error || r.statusText);
+  return result
+}
+
+function toast(text) {
+  $('toast').textContent = text;
+  $('toast').classList.remove('hidden');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $('toast').classList.add('hidden'), 5000)
+}
+async function act(name, data = {}) {
+  try {
+    return await api(name, data)
+  } catch (e) {
+    toast(e.message);
+    throw e
+  }
+}
+
+function markDirty(v) {
+  dirty = v;
+  $('dirty').textContent = v ? '· unsaved' : ''
+}
+
+function setSource(result) {
+  editorPath = result.path;
+  version = result.version;
+  $('source').value = result.source;
+  markDirty(false);
+  $('editor-foot').textContent = result.path + ' · Ctrl/Cmd + Enter to save and run'
+}
+async function openPatch(path) {
+  if (dirty && !confirm('Discard unsaved editor changes?')) return;
+  try {
+    let r = await act('source', {
+      path
+    });
+    setSource(r);
+    await act('load', {
+      path
+    });
+    $('library').classList.remove('open');
+    await presets()
+  } catch (e) {}
+}
+async function reopen() {
+  if (!editorPath) return;
+  if (dirty && !confirm('Discard unsaved editor changes?')) return;
+  try {
+    setSource(await act('source', {
+      path: editorPath
+    }))
+  } catch (e) {}
+}
+async function save() {
+  if (!editorPath) return;
+  let source = $('source').value;
+  $('save').disabled = true;
+  try {
+    setSource(await act('save', {
+      path: editorPath,
+      version,
+      source
+    }));
+    toast('Saved and running.')
+  } catch (e) {
+    try {
+      let disk = await api('source', {
+        path: editorPath
+      });
+      if (disk.source === source) {
+        version = disk.version;
+        markDirty(false)
+      }
+    } catch (_) {}
+  } finally {
+    $('save').disabled = false
+  }
+}
+
+function drawLibrary() {
+  let q = $('search').value.toLowerCase(),
+    category = $('category').value;
+  let rows = entries.filter(x => (x.title + ' ' + x.path + ' ' + x.description + ' ' + x.tags.join(' ')).toLowerCase().includes(q) && (!category || (category === 'Recent' ? (state.recent || []).includes(x.path) : x.tags.includes(category))));
+  $('count').textContent = rows.length + ' patches';
+  $('patches').replaceChildren();
+  for (let p of rows) {
+    let b = el('button', undefined, 'patch-card' + (p.path === state.path ? ' current' : ''));
+    b.title = p.description;
+    let img = p.preview ? el('img') : null;
+    if (img) {
+      img.alt = 'Preview of ' + p.title;
+      fetch('/api/preview?path=' + encodeURIComponent(p.preview), {
+        headers
+      }).then(r => r.ok ? r.blob() : null).then(blob => {
+        if (blob) {
+          let u = URL.createObjectURL(blob);
+          img.src = u;
+          img.onload = () => URL.revokeObjectURL(u)
+        }
+      });
+      b.append(img)
+    }
+    b.append(el('strong', p.title), el('small', p.tags.join(' · '), 'tag'), el('small', p.controls ? 'Performance controls' : 'Edit parameters in source'));
+    b.onclick = () => openPatch(p.path);
+    $('patches').append(b)
+  }
+}
+async function loadCatalog() {
+  let r = await api('catalog');
+  entries = r.patches;
+  let tags = [...new Set(entries.flatMap(x => x.tags))].sort();
+  for (let t of tags) $('category').append(new Option(t, t));
+  drawLibrary()
+}
+
+function renderControls() {
+  let key = JSON.stringify([state.path, (state.controls || []).map(p => [p.name, p.min, p.max, p.step, p.scale, p.unit, p.group, p.description])]);
+  if (key === controlKey) {
+    for (let p of state.controls || []) {
+      let box = [...$('controls').children].find(e => e.dataset.name === p.name);
+      if (!box || box.contains(document.activeElement)) continue;
+      box.querySelector('.control-number').value = p.value;
+      box.querySelector('[type=range]').value = p.scale === 'log' ? Math.log(Math.max(p.min, p.value)) : p.value;
+      let kind = box.querySelector('select');
+      if (p.modulation === 'patch' && ![...kind.options].some(o => o.value === 'patch')) kind.append(new Option('Declared in patch', 'patch'));
+      kind.value = p.modulation;
+      let nums = box.querySelectorAll('details input');
+      nums[0].value = p.depth;
+      nums[1].value = p.rate
+    }
+    return
+  }
+  controlKey = key;
+  $('controls').replaceChildren();
+  if (!(state.controls || []).length) {
+    let x = el('div', undefined, 'empty-controls');
+    x.append(el('div', 'This patch has no exposed controls.'), el('code', "motion = Param('motion', 0.2,\n    min=0, max=2, unit='Hz')"), el('div', 'Use the named value in your chain. Only the controls you declare appear here.'));
+    $('controls').append(x);
+    return
+  }
+  let group = '';
+  for (let p of state.controls) {
+    if (p.group !== group) {
+      $('controls').append(el('div', p.group, 'eyebrow'));
+      group = p.group
+    }
+    let box = el('div', undefined, 'control');
+    box.dataset.name = p.name;
+    let head = el('div', undefined, 'control-head'),
+      name = el('label', p.name, 'control-name'),
+      n = el('input', undefined, 'control-number');
+    n.type = 'number';
+    n.step = p.step;
+    n.value = p.value;
+    n.setAttribute('aria-label', p.name + ' value');
+    head.append(name, el('span', p.unit, 'unit'), n);
+    let slider = el('input');
+    slider.type = 'range';
+    slider.setAttribute('aria-label', p.name);
+    slider.min = p.scale === 'log' ? Math.log(p.min) : p.min;
+    slider.max = p.scale === 'log' ? Math.log(p.max) : p.max;
+    slider.step = p.scale === 'log' ? 'any' : p.step;
+    slider.value = p.scale === 'log' ? Math.log(Math.max(p.min, p.value)) : p.value;
+    let timer;
+
+    function send(v) {
+      n.value = v;
+      clearTimeout(timer);
+      timer = setTimeout(() => act('controls', {
+        values: {
+          [p.name]: {
+            value: Number(v)
+          }
+        }
+      }).catch(() => {}), 45)
+    }
+    slider.oninput = () => send(p.scale === 'log' ? Math.exp(Number(slider.value)) : Number(slider.value));
+    n.onchange = () => {
+      slider.value = p.scale === 'log' ? Math.log(Math.max(p.min, Number(n.value))) : n.value;
+      send(n.value)
+    };
+    box.append(head, slider);
+    if (p.description) box.append(el('div', p.description, 'description'));
+    let details = el('details'),
+      summary = el('summary', 'Modulation'),
+      row = el('div', undefined, 'row'),
+      kind = el('select'),
+      depth = el('input'),
+      rate = el('input');
+    for (let k of ['none', 'lfo', 'beat', ...(p.modulation === 'patch' ? ['patch'] : [])]) kind.append(new Option({
+      none: 'None',
+      lfo: 'Sine LFO',
+      beat: 'Beat envelope',
+      patch: 'Declared in patch'
+    } [k], k));
+    kind.value = p.modulation;
+    kind.setAttribute('aria-label', p.name + ' modulation');
+    depth.type = rate.type = 'number';
+    depth.step = '0.01';
+    rate.step = '0.01';
+    rate.min = '0.001';
+    depth.value = p.depth;
+    rate.value = p.rate;
+    depth.setAttribute('aria-label', p.name + ' modulation depth');
+    rate.setAttribute('aria-label', p.name + ' modulation rate');
+    depth.title = 'Depth in parameter units';
+    rate.title = 'LFO: Hz. Beat envelope: cycles per beat.';
+    for (let x of [kind, depth, rate]) x.onchange = () => act('controls', {
+      values: {
+        [p.name]: {
+          modulation: kind.value,
+          depth: Number(depth.value),
+          rate: Number(rate.value)
+        }
+      }
+    }).catch(() => {});
+    row.append(kind, depth, rate);
+    details.append(summary, row, el('p', 'Source · depth · rate. Slider bounds are suggestions.'));
+    box.append(details);
+    $('controls').append(box)
+  }
+}
+
+function renderConnections() {
+  let key = JSON.stringify(state.connections);
+  if (key === routeKey) return;
+  routeKey = key;
+  $('routes').replaceChildren();
+  for (let r of state.connections || []) {
+    let box = el('div', undefined, 'connection');
+    box.append(el('span', r.state, 'state ' + r.state), el('strong', r.kind), el('pre', r.description), el('div', r.channels.length ? 'Channels: ' + r.channels.join(', ') : ''));
+    if (r.routes.length) box.append(el('pre', r.routes.join('\n')));
+    if (r.error) box.append(el('div', r.error));
+    $('routes').append(box)
+  }
+  if (!(state.connections || []).length) $('routes').append(el('p', 'No hardware or stream routes declared.', 'subtle'))
+}
+
+function renderJobs() {
+  let key = JSON.stringify(state.jobs);
+  if (key === jobKey) return;
+  jobKey = key;
+  if (!(state.jobs || []).length) return;
+  $('jobs').replaceChildren();
+  for (let j of [...state.jobs].reverse()) {
+    let box = el('div', undefined, 'job');
+    box.append(el('strong', j.format.toUpperCase() + ' · ' + j.state));
+    if (j.state === 'running' || j.state === 'queued') {
+      let p = el('progress');
+      p.max = 1;
+      p.value = j.progress || 0;
+      box.append(p, el('div', Math.round((j.progress || 0) * 100) + '% ' + (j.encoder || '')))
+    }
+    if (j.state === 'error') box.append(el('p', j.error));
+    if (j.state === 'done') {
+      let b = el('button', 'Download');
+      b.onclick = () => download(j.file);
+      box.append(el('p', j.encoder || ''), b)
+    }
+    $('jobs').append(box)
+  }
+}
+async function download(path) {
+  try {
+    let r = await fetch('/api/file?path=' + encodeURIComponent(path), {
+      headers
+    });
+    if (!r.ok) throw new Error('Download unavailable');
+    let u = URL.createObjectURL(await r.blob()),
+      a = el('a');
+    a.href = u;
+    a.download = path.split('/').pop();
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(u), 10000)
+  } catch (e) {
+    toast(e.message)
+  }
+}
+async function presets() {
+  if (!state.path && !editorPath) return;
+  try {
+    let r = await api('presets', {});
+    $('presets').replaceChildren(new Option('Choose a preset…', ''));
+    for (let n of r.names) $('presets').append(new Option(n, n))
+  } catch (e) {}
+}
+async function poll() {
+  if (pollBusy) return;
+  pollBusy = true;
+  try {
+    let prevPath = state.path;
+    state = await api('state');
+    let t = state.time || 0;
+    $('time').textContent = String(Math.floor(t / 60)).padStart(2, '0') + ':' + (t % 60).toFixed(1).padStart(4, '0');
+    $('play').textContent = state.playing ? 'Pause' : 'Play';
+    $('record').textContent = state.recording ? 'Stop recording' : 'Record video';
+    $('record').classList.toggle('danger', !!state.recording);
+    $('arm').textContent = state.armed ? 'Disconnect' : 'Enable connections';
+    $('arm').classList.toggle('danger', !!state.armed);
+    $('patch-title').textContent = state.path ? state.path.split('/').pop() : 'Choose a patch';
+    $('empty').classList.toggle('hidden', !!state.path);
+    $('notice').textContent = state.notice || '';
+    $('error').textContent = state.error || '';
+    $('error').classList.toggle('hidden', !state.error);
+    $('status').replaceChildren(el('span', state.playing ? '● Playing' : 'Ⅱ Paused', state.playing ? 'on' : ''), el('span', (state.fps || 0).toFixed(1) + ' fps'), el('span', (state.size || []).join(' × ')), el('span', state.backend || ''), el('span', (state.clock || 'Internal') + ' · ' + (state.bpm || 0).toFixed(1) + ' BPM'), el('span', state.simulation_fps ? 'Image updates ' + state.simulation_fps + ' fps' : 'Continuous image'), el('span', state.armed ? 'Connections enabled' : 'Connections disconnected', state.armed ? 'on' : 'off'));
+    $('status').title = state.backend_note || '';
+    for (let b of $('outputs').children) {
+      let id = b.dataset.output;
+      b.classList.toggle('active', id === state.output);
+      let img = b.querySelector('img');
+      if (state.thumbnails && state.thumbnails[id]) img.src = 'data:image/jpeg;base64,' + state.thumbnails[id];
+      b.querySelector('span').textContent = id + ((state.outputs || []).includes(id) ? '' : ' · unassigned')
+    }
+    renderControls();
+    renderConnections();
+    renderJobs();
+    if (state.path) {
+      let r = await fetch('/api/frame?output=' + state.output, {
+        headers
+      });
+      if (r.ok) {
+        let url = URL.createObjectURL(await r.blob());
+        $('preview').src = url;
+        if (imgURL) URL.revokeObjectURL(imgURL);
+        imgURL = url
+      }
+    }
+    if (prevPath !== state.path) {
+      drawLibrary();
+      if (state.path && !editorPath) setSource(await api('source', {
+        path: state.path
+      }));
+      await presets()
+    }
+  } catch (e) {
+    $('notice').textContent = 'Waiting for the local workspace: ' + e.message
+  } finally {
+    pollBusy = false
+  }
+}
+for (let i = 0; i < 4; i++) {
+  let b = el('button', undefined, 'output');
+  b.dataset.output = 'o' + i;
+  b.setAttribute('aria-label', 'Show output ' + i);
+  let img = el('img');
+  img.alt = 'Output ' + i;
+  b.append(img, el('span', 'o' + i));
+  b.onclick = () => act('output', {
+    index: i
+  }).catch(() => {});
+  $('outputs').append(b)
+}
+for (let b of document.querySelectorAll('[data-tab]')) b.onclick = () => {
+  for (let t of document.querySelectorAll('.tab')) t.classList.toggle('hidden', t.id !== b.dataset.tab);
+  for (let x of document.querySelectorAll('[data-tab]')) x.classList.toggle('active', x === b)
+};
+$('source').oninput = () => markDirty(true);
+$('source').onkeydown = e => {
+  if (e.key === 'Tab') {
+    e.preventDefault();
+    let x = e.target,
+      a = x.selectionStart,
+      b = x.selectionEnd;
+    x.setRangeText('    ', a, b, 'end');
+    markDirty(true)
+  }
+};
+$('search').oninput = $('category').onchange = drawLibrary;
+$('browse').onclick = () => $('library').classList.toggle('open');
+$('save').onclick = save;
+$('reopen').onclick = reopen;
+$('play').onclick = () => act('pause', {}).catch(() => {});
+$('restart').onclick = () => act('restart', {}).catch(() => {});
+$('fullscreen').onclick = () => document.fullscreenElement ? document.exitFullscreen() : $('preview-box').requestFullscreen();
+$('snapshot').onclick = async () => {
+  try {
+    let r = await act('snapshot');
+    await download(r.file)
+  } catch (e) {}
+};
+$('record').onclick = async () => {
+  try {
+    let r = await act('record');
+    if (r.file) await download(r.file)
+  } catch (e) {}
+};
+$('arm').onclick = () => act('connections', {
+  armed: !state.armed
+}).catch(() => {});
+$('device-scan').onclick = async () => {
+  try {
+    $('devices').textContent = JSON.stringify(await act('devices'), null, 2)
+  } catch (e) {}
+};
+$('reset-controls').onclick = () => act('reset_controls').catch(() => {});
+$('preset-save').onclick = async () => {
+  try {
+    await act('preset_save', {
+      name: $('preset-name').value
+    });
+    await presets();
+    toast('Preset saved.')
+  } catch (e) {}
+};
+$('presets').onchange = async () => {
+  if (!$('presets').value) return;
+  try {
+    await act('preset_load', {
+      name: $('presets').value
+    });
+    controlKey = '';
+    toast('Preset loaded.')
+  } catch (e) {}
+};
+async function check() {
+  let target = $('format').value === 'html' ? 'html' : $('backend').value;
+  let r = await act('check', {
+    target
+  });
+  $('compatibility').replaceChildren(el('p', r.ready ? 'Ready for ' + target + '. Review the notes below.' : 'This export needs changes.', 'subtle'));
+  for (let f of r.findings) {
+    let box = el('div', undefined, 'finding');
+    box.append(el('strong', f.status + ' · ' + f.path), el('p', f.message));
+    $('compatibility').append(box)
+  }
+  return r
+}
+$('check').onclick = () => check().catch(() => {});
+$('export-run').onclick = async () => {
+  try {
+    let c = await check();
+    if (!c.ready) return;
+    await act('export', {
+      format: $('format').value,
+      backend: $('backend').value,
+      seconds: Number($('seconds').value),
+      fps: Number($('fps').value),
+      size: [Number($('width').value), Number($('height').value)],
+      encoder: $('encoder').value,
+      audio: $('audio').value
+    });
+    toast('Export started.')
+  } catch (e) {}
+};
+let mouseTimer = 0;
+$('preview-box').onpointermove = e => {
+  if (Date.now() - mouseTimer < 80) return;
+  mouseTimer = Date.now();
+  let r = e.currentTarget.getBoundingClientRect();
+  api('mouse', {
+    x: (e.clientX - r.left) / r.width,
+    y: 1 - (e.clientY - r.top) / r.height
+  }).catch(() => {})
+};
+window.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+    e.preventDefault();
+    save();
+    return
+  }
+  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) return;
+  if (e.key === ' ') {
+    e.preventDefault();
+    $('play').click()
+  } else if (/^[1-4]$/.test(e.key)) {
+    act('output', {
+      index: Number(e.key) - 1
+    }).catch(() => {})
+  } else if (e.key === 's') $('snapshot').click();
+  else if (e.key === 'f') $('fullscreen').click()
+});
+window.addEventListener('beforeunload', e => {
+  if (dirty) {
+    e.preventDefault();
+    e.returnValue = ''
+  }
+});
+if (!token) {
+  $('error').textContent = 'Open the complete local URL printed by hydrapy studio.';
+  $('error').classList.remove('hidden')
+} else {
+  loadCatalog().catch(e => toast(e.message));
+  poll();
+  setInterval(poll, 250)
+}
+</script>
+</body></html>

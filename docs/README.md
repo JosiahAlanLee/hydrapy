@@ -34,3 +34,6 @@ guide for the work you want to make. Run commands from the repository root.
 | Animated cellular and geometry sources | `python docs/generative_demo.py --out generative_demo.mp4` |
 
 See [rendering and export](rendering-and-export.md) for backend and encoder requirements.
+
+- [Studio workspace](studio.md) — editor, live output previews, performance controls, presets, connections and export checks.
+- [Bullfrog demo](bullfrog-demo.md) — seven scenes, audio response, and moving crossfades.

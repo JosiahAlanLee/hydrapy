@@ -26,6 +26,10 @@ class Input:
     default: Any = 0.0
     scalar: bool = False      # True: must be a per-frame scalar (no per-pixel chains)
     doc: str = ""
+    minimum: Optional[float] = None   # suggested UI range, never an evaluation clamp
+    maximum: Optional[float] = None
+    unit: str = ""
+    scale: str = "linear"
 
 
 @dataclass
@@ -463,6 +467,7 @@ class Patch:
         self.speed = 1.0
         self.frame_rate = None          # e.g. 18: update feedback and pixels at most 18 times a second
         self.composite_alpha = False   # Hydra's display: RGB, alpha is a fourth channel. True: show RGB x alpha over black
+        self.controls: dict = {}        # explicitly exposed Param signals
         self.probes: list = []          # live.Probe instances, updated after every frame
         self.transport = None           # live.Transport (Link, MidiClock) for `hydrapy live`; None = wall clock
 
@@ -489,6 +494,7 @@ class Patch:
 
 
 _default_patch: Optional[Patch] = None
+_isolate_patch_outputs = False  # CLI loads must not reuse a running patch's outputs.
 GLOBAL_OUTPUTS = [Output(i) for i in range(4)]   # the o0..o3 exported by hydrapy
 
 
@@ -502,7 +508,7 @@ def default_patch() -> Patch:
 def reset_patch(bpm: float = 30.0, size=(320, 180)) -> Patch:
     """Start a fresh default patch; the global o0..o3 are cleared and reused."""
     global _default_patch
-    _default_patch = Patch(bpm=bpm, size=size, outputs=GLOBAL_OUTPUTS)
+    _default_patch = Patch(bpm=bpm, size=size, outputs=None if _isolate_patch_outputs else GLOBAL_OUTPUTS)
     return _default_patch
 
 

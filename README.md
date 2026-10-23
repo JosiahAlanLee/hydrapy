@@ -44,7 +44,13 @@ hydrapy live patch.py
 hydrapy render patch.py -o out.mp4 --gpu --seconds 10
 ```
 
-[Installation and walkthrough](docs/getting-started.md) ·
+Open the local workspace with an editor, output previews and performance controls:
+
+```sh
+hydrapy studio patches/studio_feedback.py
+```
+
+[Studio guide](docs/studio.md) · [Installation and walkthrough](docs/getting-started.md) ·
 [Rendering and hardware encoding](docs/rendering-and-export.md)
 
 ## Explore

@@ -12,3 +12,11 @@ __pycache__/
 !patches/test.wav
 /patches/matter/
 /patches/texture.jpg
+
+# Local workspace state, exports, and private music
+.hydrapy/
+media/
+
+!hydrapy/studio.html
+!docs/studio/*.jpg
+!docs/studio/*.png
