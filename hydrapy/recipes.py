@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Optional, Sequence
 
-from . import (Chain, Clock, Drift, Env, Lfo, Output, SH, Seq, Signal, Time, arc, crackle, drops, dust, fbm, harmonograph, scratches,
+from . import (Chain, Clock, Decay, Drift, Env, Lfo, Output, SH, Seq, Signal, Time, arc, crackle, drops, dust, fbm, harmonograph, scratches,
                set_frame_rate, solid, src, veins, wave)
 from . import dropouts as _dropouts, gate as _gate
 
@@ -178,7 +178,8 @@ def super8(chain: Chain, stock: int = 0, fps: float = 18, grain: float = 0.15, w
 
 
 def studie(out: Output, beat: Optional[Signal] = None, comets: int = 6, waves: int = 2, trails: float = 0.8,
-           paper: float = 0.45, seed: float = 0.0) -> Chain:
+           paper: float = 0.45, seed: float = 0.0, *, decay_seconds: Optional[float] = None,
+           motion=1.0, surface=0.0, surface_rate=12.0) -> Chain:
     """Fischinger's *Studie* films: charcoal oscillators on black paper, dancing to a beat.
 
     A ring of comets breathing with the beat, one long comet sweeping round, `waves` sine strokes
@@ -187,23 +188,43 @@ def studie(out: Output, beat: Optional[Signal] = None, comets: int = 6, waves: i
     assigned to — it reads it back for the trails: ``studie(o1).out(o1)``.  ``beat`` is a phase
     0..1 per beat (default ``Clock(1)`` at the patch bpm; a record is ``Audio.from_file(...)`` with
     its flux as the beat).  Put ``film()`` after it for the print.
+    ``decay_seconds`` is the feedback half-life and overrides the old per-frame ``trails``.
+    ``motion`` scales the composition's movement/pulses; ``surface`` is independent line-boil
+    displacement, applied before the fixed paper tooth, at ``surface_rate`` redraws/second.
     """
     beat = beat if beat is not None else Clock(1)
-    hit = Env(beat, 0.06, 0.5, 2.0, 0.0, 1.0)
+    hit = Env(beat, 0.06, 0.5, 2.0, 0.0, 1.0) * motion
+    def material(c, k, scale=80):
+        if surface:
+            c = c.boil(surface, surface_rate, 8, seed + k)
+        return c.charcoal(paper, 1.0, scale, seed + k)
     sweep_per = 6.2832 / max(int(comets), 1) * 0.8
-    ring = arc(0.3, 0.0, sweep_per, 0.05, 1.0, 0.0).polarRepeat(comets, Time() * 0.2 + seed) \
-        .scale(0.75 + 0.45 * hit).charcoal(paper, 1.0, 80, seed + 1)
-    sweep = arc(0.44, Lfo(0.11, lo=0, hi=6.2832, phase=seed), 2.6, 0.035 + 0.04 * hit, 1.0, 0.0).charcoal(paper, 1.2, 60, seed + 2)
-    strokes = ring.layer(sweep)
+    ring = material(arc(0.3, 0.0, sweep_per, 0.05, 1.0, 0.0).polarRepeat(comets, Time() * 0.2 * motion + seed)
+                    .scale(0.75 + 0.45 * hit), 1)
+    sweep = material(arc(0.44, Lfo(0.11, lo=0, hi=6.2832, phase=seed) * motion,
+                         2.6, 0.035 + 0.04 * hit, 1.0, 0.0), 2, 60)
+    strokes = ring.over(sweep)
     for i in range(int(waves)):
-        speed = 0.6 * (1 + i) * (1 if i % 2 == 0 else -1)
-        strokes = strokes.layer(wave(2 + i, 0.14 + 0.14 * hit, 0.02, speed, i * 0.3, 0.92, 1.0)
-                                .rotate(0.25 * i - 0.12).charcoal(paper, 1.0, 90, seed + 3 + i))
-    strokes = strokes.layer(arc(0.025 + 0.06 * hit, 0, 6.2832, 0.03, 0, 0).charcoal(paper * 0.6, 1.0, 120, seed + 9))
+        speed = 0.6 * (1 + i) * (1 if i % 2 == 0 else -1) * motion
+        strokes = strokes.over(material(wave(2 + i, 0.14 + 0.14 * hit, 0.02, speed, i * 0.3, 0.92, 1.0)
+                                       .rotate(0.25 * i - 0.12), 3 + i, 90))
+    strokes = strokes.over(material(arc(0.025 + 0.06 * hit, 0, 6.2832, 0.03, 0, 0), 9, 120))
     strokes = strokes.contrast(1.25)
+    if decay_seconds is not None:
+        trails = Decay(decay_seconds)
     if trails:
-        return src(out).mult(solid(trails, trails, trails)).layer(strokes)
-    return solid(0, 0, 0).layer(strokes)
+        return solid(0, 0, 0).over(src(out).mult(solid(trails, trails, trails)).over(strokes))
+    return solid(0, 0, 0).over(strokes)
+
+
+def on_paper(pigment: Chain, paper_color=(0.94, 0.90, 0.81), tooth=0.35, texture=0.025, seed=0) -> Chain:
+    """Move/warp pigment upstream; the paper grain and tooth stay fixed in image space.
+
+    The pigment should carry its coverage in alpha (strokes do this by default).
+    This returns an opaque print; keep a separate pigment output for feedback.
+    """
+    paper = solid(*paper_color).grain(texture, 0, 2)
+    return paper.over(pigment.charcoal(tooth, 0, 80, seed))
 
 
 def cutout(chain: Chain, levels: float = 3, paper: float = 0.35, boil: float = 0.004, misregister: float = 0.003,

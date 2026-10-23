@@ -37,7 +37,7 @@ from .synth import Quilt, quilt
 from .drawing import Lines, Text, meadow, plant, to_svg
 from .live import (CvIn, CvOut, Link, LiveValue, Midi, MidiClock, OscIn, OscOut, Probe, Soundtrack, Transport, TrigPhase, audio_devices,
                    register_hook)
-from .signals import SH, Audio, Clock, Const, Drift, EntropyLock, Env, Expr, Fft, Fn, Fx, Lfo, Mouse, Seq, Signal, Time, as_signal
+from .signals import SH, Audio, Clock, Const, Decay, Drift, EntropyLock, Env, Expr, Fft, Fn, Fx, Lfo, Mouse, Seq, Signal, Time, as_signal
 
 __version__ = "0.1.0"
 
@@ -111,7 +111,7 @@ def speed(s: float):
 
 
 def set_frame_rate(fps: float | None):
-    """Hold time to ``fps`` steps a second for the whole patch: 18 for Super 8, 16 for Regular 8, None to release."""
+    """Hold pixels and feedback at ``fps`` updates/second; audio and presentation keep running."""
     default_patch().frame_rate = float(fps) if fps else None
 
 
@@ -123,7 +123,7 @@ def patch() -> Patch:
 # Rendering / export shortcuts
 # ---------------------------------------------------------------------------
 
-from .backend_np import Renderer, render_chain, render_frames  # noqa: E402
+from .backend_np import Renderer, iter_frames, render_chain, render_frames  # noqa: E402
 from .export import (chain_to_hydra, patch_to_hydra, save_gif, save_mp4, save_png, to_ansi, to_html,  # noqa: E402
                      to_image)
 from .glsl import compile_chain, compile_output, compile_patch  # noqa: E402
@@ -160,8 +160,8 @@ __all__ = (
         "o0", "o1", "o2", "o3", "render", "hush", "set_bpm", "set_resolution", "set_frame_rate", "speed", "patch",
         "Chain", "Patch", "Output", "Image", "Video", "Camera", "Bank", "Quilt", "quilt", "Text", "Lines", "plant", "meadow", "to_svg",
         "CvIn", "CvOut", "Link", "LiveValue", "Midi", "MidiClock", "OscIn", "OscOut", "Probe", "Soundtrack", "Transport", "TrigPhase", "audio_devices", "register_hook", "Ctx", "reset_patch", "default_patch",
-        "Signal", "Lfo", "Seq", "Clock", "Env", "SH", "Drift", "Mouse", "Time", "Fn", "Fx", "EntropyLock", "Fft", "Audio", "Const", "Expr", "External", "as_signal",
-        "Renderer", "render_chain", "render_frames", "save_gif", "save_mp4", "save_png", "to_image", "to_ansi",
+        "Signal", "Lfo", "Seq", "Clock", "Env", "SH", "Decay", "Drift", "Mouse", "Time", "Fn", "Fx", "EntropyLock", "Fft", "Audio", "Const", "Expr", "External", "as_signal",
+        "Renderer", "iter_frames", "render_chain", "render_frames", "save_gif", "save_mp4", "save_png", "to_image", "to_ansi",
         "to_html", "chain_to_hydra", "patch_to_hydra", "from_hydra",
         "compile_chain", "compile_output", "compile_patch", "ops", "describe", "REGISTRY", "add_op", "Op", "Input",
     ]

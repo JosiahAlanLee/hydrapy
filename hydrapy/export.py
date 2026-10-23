@@ -23,7 +23,8 @@ def to_image(arr: np.ndarray):
     """float (H, W, 4) or uint8 (H, W, 3) -> PIL image."""
     from PIL import Image as PILImage
     if arr.dtype != np.uint8:
-        arr = (np.clip(np.nan_to_num(arr[..., :3]), 0, 1) * 255 + 0.5).astype(np.uint8)
+        from .backend_np import to_uint8
+        arr = to_uint8(arr)
     return PILImage.fromarray(arr[..., :3], "RGB")
 
 
@@ -62,6 +63,8 @@ def save_mp4(frames, path: str, fps: float = 30.0, quality: int = 8, scale: int 
             w.append_data(f)
     finally:
         w.close()
+        if hasattr(frames, "close"):
+            frames.close()
     if audio is not None:
         _mux_audio(video, audio, path)
         os.remove(video)
@@ -112,7 +115,8 @@ def save_frames(frames, directory: str, prefix: str = "frame"):
 def to_ansi(frame: np.ndarray, cols: int = 80, rows: Optional[int] = None) -> str:
     """Render a uint8 RGB frame as 24-bit ANSI half-block art."""
     if frame.dtype != np.uint8:
-        frame = (np.clip(np.nan_to_num(frame[..., :3]), 0, 1) * 255 + 0.5).astype(np.uint8)
+        from .backend_np import to_uint8
+        frame = to_uint8(frame)
     H, W = frame.shape[:2]
     rows = rows or max(int(round(cols * H / W / 2)), 1)
     ys = (np.arange(rows * 2) * H / (rows * 2)).astype(int)
@@ -293,12 +297,14 @@ def _py_arg(a) -> str:
 
 def _py_native_signal(a):
     """hydrapy's own signals written back as their constructors (None for anything else)."""
-    from .signals import SH, Clock, Const, Drift, Env, Expr, Fn1, Lfo, Mouse, Time
+    from .signals import SH, Clock, Const, Decay, Drift, Env, Expr, Fn1, Lfo, Mouse, Time
     g = lambda v: f"{float(v):g}"
     if isinstance(a, Const):
         return g(a.v)
     if isinstance(a, Time):
         return "Time()"
+    if isinstance(a, Decay):
+        return f"Decay({g(a.half_life)})"
     if isinstance(a, Mouse):
         return f"Mouse({a.axis!r})"
     if isinstance(a, Lfo):
@@ -370,6 +376,8 @@ def patch_to_python(patch: Optional[Patch] = None) -> str:
         head.append(f"speed({patch.speed:g})")
     if patch.frame_rate:
         head.append(f"set_frame_rate({patch.frame_rate:g})")
+    if not patch.composite_alpha:
+        head.append("default_patch().composite_alpha = False")
     head.append("")
     tail = ["", f"render({patch.display.name})", ""]
     return "\n".join(head) + src + "\n".join(tail)
@@ -458,6 +466,7 @@ def build_spec(patch: Optional[Patch] = None, pixel_ratio: float = 1.0, size: Op
         "bpm": patch.bpm,
         "speed": patch.speed,
         "frameRate": patch.frame_rate,
+        "compositeAlpha": patch.composite_alpha,
         "soundtrack": next((pr.spec() for pr in patch.probes if hasattr(pr, "chunks")), None),
         "outputs": outs,
         "history": history,
@@ -527,7 +536,34 @@ __RUNTIME__
 
 
 # The WebGL runtime shared by to_html() and anything else that embeds a SPEC (expects #c, #err, #overlay in the page)
-RUNTIME_JS = r"""(function(){
+AUDIO_HELPERS_JS = r"""
+function hydrapySampleClock(sr, fps) {
+  var carry = 0;
+  return function() { carry += sr / fps; var n = Math.floor(carry + 1e-9); carry -= n; return n; };
+}
+function hydrapyAudioQueue(size) {
+  var fifo = [], last = new Float32Array(Math.max(size, 1)), pos = 0;
+  return {
+    length: function(){ return fifo.length; },
+    push: function(chunk){
+      if (!chunk.length) return;
+      fifo.push(chunk);
+      if (fifo.length > 6) { fifo.splice(0, fifo.length - 6); pos = 0; }
+    },
+    pull: function(out){
+      var i = 0;
+      while (i < out.length) {
+        if (!fifo.length) { fifo.push(last); pos = 0; }
+        var c = fifo[0], take = Math.min(out.length - i, c.length - pos);
+        out.set(c.subarray(pos, pos + take), i); i += take; pos += take;
+        if (pos === c.length) { last = fifo.shift(); pos = 0; }
+      }
+    }
+  };
+}
+"""
+
+RUNTIME_JS = AUDIO_HELPERS_JS + r"""(function(){
   var canvas = document.getElementById('c');
   var errEl = document.getElementById('err');
   function fail(msg){ errEl.style.display = 'block'; errEl.textContent += msg + "\n"; }
@@ -692,22 +728,23 @@ RUNTIME_JS = r"""(function(){
         return {target: p.target, prog: prog, locs: locs};
       }),
       floats: o.floats.map(function(f){
-        try { return {name: f.name, fn: new Function('time','bpm','__mx','__my','__fft','__vol','__flux', 'return (' + f.js + ');')}; }
+        try { return {name: f.name, fn: new Function('time','bpm','__mx','__my','__fft','__vol','__flux','dt', 'return (' + f.js + ');')}; }
         catch (e) { fail('signal ' + f.name + ': ' + e); return {name: f.name, fn: function(){ return 0; }}; }
       }),
       samplers: o.samplers
     };
   });
-  var copyProg = program('precision mediump float; uniform sampler2D tex; uniform vec2 resolution;\nvoid main(){ gl_FragColor = texture2D(tex, gl_FragCoord.xy / resolution); }');
+  var copyProg = program('precision mediump float; uniform sampler2D tex; uniform vec2 resolution;\nvoid main(){ vec4 c = texture2D(tex, gl_FragCoord.xy / resolution); gl_FragColor = vec4(c.rgb * ' + (SPEC.compositeAlpha ? 'clamp(c.a, 0.0, 1.0)' : '1.0') + ', 1.0); }');
   var copyLocs = {tex: gl.getUniformLocation(copyProg, 'tex'), resolution: gl.getUniformLocation(copyProg, 'resolution')};
 
-  var W = 0, H = 0, outs = {}, tmps = {};
+  var W = 0, H = 0, outs = {}, tmps = {}, lastRenderTime = null;
   function resize(){
     var pr = SPEC.pixelRatio || 1;
     var w = SPEC.size ? SPEC.size[0] : Math.floor(window.innerWidth * pr);
     var h = SPEC.size ? SPEC.size[1] : Math.floor(window.innerHeight * pr);
     if (w === W && h === H) return;
     W = w; H = h; canvas.width = W; canvas.height = H;
+    lastRenderTime = null;
     outs = {}; tmps = {};
     ['o0','o1','o2','o3'].forEach(function(n){
       var depth = (SPEC.history && SPEC.history[n]) || 0, ring = [];
@@ -752,7 +789,9 @@ RUNTIME_JS = r"""(function(){
     if (t0 === null) t0 = now;
     if (paused) return;
     var time = ((now - t0) / 1000) * SPEC.speed;
-    if (SPEC.frameRate) time = Math.floor(time * SPEC.frameRate) / SPEC.frameRate;
+    if (SPEC.frameRate) time = Math.floor(time * SPEC.frameRate + 1e-9) / SPEC.frameRate;
+    var draw = !SPEC.frameRate || time !== lastRenderTime;
+    var dt = lastRenderTime === null ? 1 / (SPEC.frameRate || 60) : Math.max(0, time - lastRenderTime);
     curTime = time;
     if (audio) audio.update();
     // only the displayed output and what it samples (transitively) need rendering this frame
@@ -760,9 +799,9 @@ RUNTIME_JS = r"""(function(){
     if (SPEC.soundtrack) stack.push(SPEC.soundtrack.output);
     while (stack.length) { var nm = stack.pop(); if (needed[nm]) continue; needed[nm] = true;
       outputs.forEach(function(o){ if (o.name === nm) o.samplers.forEach(function(s){ if (/^o[0-3]$/.test(s.ref) && !needed[s.ref]) stack.push(s.ref); }); }); }
-    outputs.forEach(function(o){
+    if (draw) outputs.forEach(function(o){
       if (!needed[o.name]) return;
-      var vals = o.floats.map(function(f){ var v = f.fn(time, SPEC.bpm, mx, my, fft, vol, flux); return isFinite(v) ? v : 0; });
+      var vals = o.floats.map(function(f){ var v = f.fn(time, SPEC.bpm, mx, my, fft, vol, flux, dt); return isFinite(v) ? v : 0; });
       o.passes.forEach(function(p){
         if (!p.prog) return;
         var target = p.target.indexOf('tmp') === 0 ? tmps[p.target] : outs[o.name].ring[outs[o.name].ring.length - 1];
@@ -783,7 +822,8 @@ RUNTIME_JS = r"""(function(){
       });
       outs[o.name].ring.unshift(outs[o.name].ring.pop());   // the frame just written becomes ring[0]
     });
-    if (track) track.read(now);
+    if (draw) lastRenderTime = time;
+    if (track) track.read(now, draw);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, W, H);
     gl.useProgram(copyProg);
@@ -800,44 +840,55 @@ RUNTIME_JS = r"""(function(){
     var cfg = SPEC.soundtrack; if (!cfg) return;
     var AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
     var actx = new AC();
-    var sr = actx.sampleRate, n = Math.round(sr / cfg.fps);
-    var fifo = [], last = new Float32Array(n), lastT = -1e9, hpx = 0, hpy = 0, hpa = Math.exp(-2 * Math.PI * 20 / sr);
-    var w = Math.max(Math.round(cfg.width * W), 1), x0 = Math.min(Math.max(Math.round(cfg.x * W - w / 2), 0), Math.max(W - w, 0));
+    var sr = actx.sampleRate, nextCount = hydrapySampleClock(sr, cfg.fps);
+    var queue = hydrapyAudioQueue(Math.round(sr / cfg.fps));
+    var nextT = null, lastCol = null, dirty = true, hpx = 0, hpy = 0, hpa = Math.exp(-2 * Math.PI * 20 / sr);
     var useFloat = isGL2 && floatOK;
-    var pix = useFloat ? new Float32Array(w * H * 4) : new Uint8Array(w * H * 4);
     var node = actx.createScriptProcessor(2048, 0, 1);
     node.onaudioprocess = function(e){
-      var out = e.outputBuffer.getChannelData(0);
-      var i = 0;
-      while (i < out.length) {
-        if (!fifo.length) fifo.push(last);            // nothing new drawn: hold the last frame's sound
-        var c = fifo[0], k = c.pos || 0;
-        while (i < out.length && k < c.length) out[i++] = c[k++];
-        if (k >= c.length) fifo.shift(); else c.pos = k;
-      }
+      queue.pull(e.outputBuffer.getChannelData(0));
     };
     node.connect(actx.destination);
-    var dbg = window.__hydrapySoundtrack = {chunks: 0, sr: sr, n: n, state: function(){ return actx.state; }};
-    track = { read: function(now){
-      if (now - lastT < 1000 / cfg.fps) return;
-      lastT = now;
-      if (fifo.length > 4) return;                     // the audio clock, not rAF, sets the pace
-      gl.bindFramebuffer(gl.FRAMEBUFFER, outs[cfg.output].ring[0].fb);
-      gl.readPixels(x0, 0, w, H, gl.RGBA, useFloat ? gl.FLOAT : gl.UNSIGNED_BYTE, pix);
-      var col = new Float64Array(H), scale = useFloat ? 1 : 1 / 255;
-      for (var y = 0; y < H; y++) {                    // rows come bottom-up; the track reads top to bottom
-        var s = 0;
-        for (var xx = 0; xx < w; xx++) { var o = ((y * w) + xx) * 4; s += pix[o] * 0.2125 + pix[o + 1] * 0.7154 + pix[o + 2] * 0.0721; }
-        col[H - 1 - y] = s / w * scale;
+    var dbg = window.__hydrapySoundtrack = {chunks: 0, samples: 0, sr: sr, state: function(){ return actx.state; }};
+    track = { read: function(now, changed){
+      dirty = dirty || changed;
+      if (nextT === null) nextT = now;
+      if (now < nextT - 1e-6) return;
+      var period = 1000 / cfg.fps;
+      // Bound catch-up after a suspended tab. Audio keeps holding the last complete strip.
+      if (now - nextT > period * 6) nextT = now - period * 5;
+      var col = lastCol;
+      if (dirty || !col || col.length !== H) {
+        var w = Math.min(Math.max(Math.round(cfg.width * W), 1), W);
+        var x0 = Math.min(Math.max(Math.floor(cfg.x * W - w / 2), 0), W - w);
+        var pix = useFloat ? new Float32Array(w * H * 4) : new Uint8Array(w * H * 4);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, outs[cfg.output].ring[0].fb);
+        gl.readPixels(x0, 0, w, H, gl.RGBA, useFloat ? gl.FLOAT : gl.UNSIGNED_BYTE, pix);
+        col = new Float64Array(H);
+        var scale = useFloat ? 1 : 1 / 255;
+        for (var y = 0; y < H; y++) {
+          var s = 0;
+          for (var xx = 0; xx < w; xx++) {
+            var o = ((y * w) + xx) * 4;
+            s += (pix[o] * 0.2125 + pix[o+1] * 0.7154 + pix[o+2] * 0.0721) * scale * (SPEC.compositeAlpha ? Math.max(0, Math.min(1, pix[o+3] * scale)) : 1);
+          }
+          col[H - 1 - y] = s / w;
+        }
+        dirty = false;
       }
-      var chunk = new Float32Array(n);
-      for (var j = 0; j < n; j++) {
-        var p = (j + 0.5) * H / n - 0.5, p0 = Math.max(0, Math.min(H - 1, Math.floor(p))), p1 = Math.min(H - 1, p0 + 1), f = Math.max(0, Math.min(1, p - p0));
-        var v = ((col[p0] * (1 - f) + col[p1] * f) - 0.5) * 2 * cfg.gain;
-        if (cfg.ac) { hpy = v - hpx + hpa * hpy; hpx = v; v = hpy; }
-        chunk[j] = Math.max(-1, Math.min(1, v));
+      while (nextT <= now + 1e-6) {
+        var n = nextCount(), chunk = new Float32Array(n);
+        var column = lastCol && nextT < now - 1e-6 ? lastCol : col, height = column.length;
+        for (var j = 0; j < n; j++) {
+          var p = (j + 0.5) * height / n - 0.5, p0 = Math.max(0, Math.min(height - 1, Math.floor(p)));
+          var p1 = Math.min(height - 1, p0 + 1), f = Math.max(0, Math.min(1, p - p0));
+          var v = ((column[p0] * (1-f) + column[p1] * f) - 0.5) * 2 * cfg.gain;
+          if (cfg.ac) { hpy = v - hpx + hpa * hpy; hpx = v; v = hpy; }
+          chunk[j] = Math.max(-1, Math.min(1, v));
+        }
+        queue.push(chunk); nextT += period; dbg.chunks++; dbg.samples += n;
       }
-      fifo.push(chunk); last = chunk; dbg.chunks++; dbg.peak = Math.max.apply(null, Array.prototype.slice.call(chunk, 0, 256).map(Math.abs));
+      lastCol = col;
     }};
   }
 

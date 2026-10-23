@@ -787,6 +787,20 @@ register(Op("layer", "combine", [Input("tex", "chain")], hydra=True, np=_np_laye
             glsl="return vec4(mix(_c0.rgb, _c1.rgb, _c1.a), clamp(_c0.a + _c1.a, 0.0, 1.0));"))
 
 
+def _np_over(c0, c1, env):
+    a0, a1 = np.clip(c0[..., 3:4], 0, 1), np.clip(c1[..., 3:4], 0, 1)
+    a = a1 + a0 * (1 - a1)
+    rgb = (c1[..., :3] * a1 + c0[..., :3] * a0 * (1 - a1)) / np.maximum(a, 1e-8)
+    return np.concatenate([rgb, a], axis=-1)
+
+
+register(Op("over", "combine", [Input("tex", "chain")], np=_np_over,
+            doc="Straight-alpha source-over, including transparent backgrounds. `layer` retains Hydra's original alpha-addition behavior.",
+            glsl="""float a0 = clamp(_c0.a, 0.0, 1.0), a1 = clamp(_c1.a, 0.0, 1.0);
+  float a = a1 + a0 * (1.0 - a1);
+  return vec4((_c1.rgb * a1 + _c0.rgb * a0 * (1.0 - a1)) / max(a, 1e-8), a);"""))
+
+
 def _np_blend(c0, c1, amount, env):
     am = _amt(amount)
     return c0 * (1.0 - am) + c1 * am

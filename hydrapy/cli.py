@@ -136,25 +136,33 @@ def main(argv=None):
         size = a.size or patch.size
         t0 = time.time()
         if a.gpu:
-            from .backend_gl import render_frames_gl
-            frames = render_frames_gl(patch, seconds=a.seconds, fps=a.fps, size=size, start=a.start, warmup=a.warmup)
+            from .backend_gl import iter_frames_gl
+            frames = iter_frames_gl(patch, seconds=a.seconds, fps=a.fps, size=size, start=a.start, warmup=a.warmup)
         else:
-            from .backend_np import render_frames
-            frames = render_frames(patch, seconds=a.seconds, fps=a.fps, size=size, start=a.start, warmup=a.warmup,
+            from .backend_np import iter_frames
+            frames = iter_frames(patch, seconds=a.seconds, fps=a.fps, size=size, start=a.start, warmup=a.warmup,
                                    filter="nearest" if a.nearest else "linear")
         from .export import save_frames, save_gif, save_mp4, save_png
         if ext == ".gif":
             save_gif(frames, a.out, fps=a.fps, scale=a.scale)
         elif ext in (".mp4", ".mov", ".webm", ".mkv"):
-            track = next((pr for pr in patch.probes if hasattr(pr, "chunks") and pr.chunks), None)   # a Soundtrack the patch drew
+            track = next((pr for pr in patch.probes if hasattr(pr, "chunks")), None)
+            if track is not None:
+                track.record = True
+                track.keep = max(track.keep, a.seconds + 1)
             save_mp4(frames, a.out, fps=a.fps, scale=a.scale, audio=track)
         elif ext == ".png":
-            save_png(frames[-1], a.out)
+            last = None
+            for last in frames:
+                pass
+            if last is None:
+                sys.exit("render duration must contain at least one frame")
+            save_png(last, a.out)
         elif ext == "":
             save_frames(frames, a.out)
         else:
             sys.exit(f"unknown output type {ext}")
-        print(f"wrote {a.out}: {len(frames)} frames at {size[0]}x{size[1]} in {time.time() - t0:.1f}s")
+        print(f"wrote {a.out}: {round(a.seconds * a.fps)} frames at {size[0]}x{size[1]} in {time.time() - t0:.1f}s")
 
     elif a.cmd == "html":
         from .export import to_html
@@ -192,6 +200,8 @@ def main(argv=None):
                 if a.seconds and t > a.seconds:
                     break
                 frame = r.step(t)
+                if not patch.composite_alpha:
+                    frame = frame[..., :3]
                 sys.stdout.write("\x1b[H" + to_ansi(frame, cols=cols, rows=rows) + "\n")
                 sys.stdout.flush()
                 time.sleep(max(0.0, 1.0 / a.fps - (time.time() - start - t)))

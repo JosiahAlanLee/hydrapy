@@ -12,7 +12,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from .core import Camera, Chain, Ctx, DelayRef, Image, Output, Patch, Texture, Transform, Video, default_patch
+from .core import Camera, Chain, Ctx, DelayRef, Image, Output, Patch, RenderClock, Texture, Transform, Video, default_patch
 from .signals import Signal
 
 
@@ -197,6 +197,7 @@ class Renderer:
         self.fps = float(fps)
         self.env = Env(self.size[0], self.size[1], bpm=self.patch.bpm, filter=filter)
         self.frame = 0
+        self.clock = RenderClock(self.fps)
         self._compiled: dict[Output, Callable] = {}
         self.depth = _history_depth(self.patch)
 
@@ -208,20 +209,27 @@ class Renderer:
     def step(self, t: Optional[float] = None) -> np.ndarray:
         """Render one frame at time ``t`` (default: frame / fps) and return the displayed output, row 0 = top."""
         self._compile()
-        ctx = self.env.ctx
-        ctx.time = (self.frame / self.fps if t is None else t) * self.patch.speed
-        if self.patch.frame_rate:
-            ctx.time = math.floor(ctx.time * self.patch.frame_rate) / self.patch.frame_rate
-        ctx.frame = self.frame
-        ctx.fps = self.fps
-        ctx.dt = 1.0 / self.fps
-        for o in self.patch.active_outputs():
-            self.env.current_output = o
-            self.env.push(o.index, self._compiled[o][1](self.env.base_st).astype(np.float32), self.depth.get(o.index, 0))
+        ctx, draw, wall_time = self.clock.next(self.patch, self.size, self.env.ctx.mouse, t)
+        self.env.ctx = ctx
+        if draw:
+            for o in self.patch.active_outputs():
+                self.env.current_output = o
+                self.env.push(o.index, self._compiled[o][1](self.env.base_st).astype(np.float32), self.depth.get(o.index, 0))
         self.frame += 1
         for pr in self.patch.probes:
+            if hasattr(pr, "advance"):
+                if not draw and pr.advance(wall_time, 1.0 / self.fps):
+                    continue
+                if not pr.needs_update(wall_time, 1.0 / self.fps):
+                    continue
+            elif not draw:
+                continue
             x0, y0, w, h = pr.region(self.env.w, self.env.h)
-            pr.update(self.env.texture(pr.output)[y0:y0 + h, x0:x0 + w], ctx.time)
+            rgba = self.env.texture(pr.output)[y0:y0 + h, x0:x0 + w]
+            if hasattr(pr, "advance"):
+                pr.update(rgba, wall_time, 1.0 / self.fps)
+            else:
+                pr.update(rgba, ctx.time)
         from .live import run_hooks
         run_hooks(ctx, self)
         return self.displayed()
@@ -233,7 +241,8 @@ class Renderer:
     def frames(self, n: int, start: float = 0.0):
         """Yield n uint8 RGB frames (H, W, 3), row 0 = top."""
         for i in range(n):
-            yield to_uint8(self.step(start + i / self.fps))
+            rgba = self.step(start + i / self.fps)
+            yield to_uint8(rgba if self.patch.composite_alpha else rgba[..., :3])
 
 
 def _history_depth(patch: Patch) -> dict:
@@ -254,7 +263,10 @@ def _history_depth(patch: Patch) -> dict:
 
 
 def to_uint8(rgba: np.ndarray) -> np.ndarray:
-    return (np.clip(np.nan_to_num(rgba[..., :3]), 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+    rgb = rgba[..., :3]
+    if rgba.shape[-1] == 4:
+        rgb = rgb * np.clip(rgba[..., 3:4], 0, 1)
+    return (np.clip(np.nan_to_num(rgb), 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
 
 
 def render_chain(chain: Chain, t: float = 0.0, size=(320, 180), bpm: float = 30.0, filter: str = "linear") -> np.ndarray:
@@ -267,13 +279,21 @@ def render_chain(chain: Chain, t: float = 0.0, size=(320, 180), bpm: float = 30.
     return np.asarray(out, dtype=np.float32)[::-1]
 
 
-def render_frames(patch: Optional[Patch] = None, seconds: float = 4.0, fps: float = 30.0, size=None,
-                  start: float = 0.0, warmup: int = 0, filter: str = "linear") -> list[np.ndarray]:
-    """Render ``seconds`` of a patch to a list of uint8 RGB frames (row 0 = top)."""
+def iter_frames(patch: Optional[Patch] = None, seconds: float = 4.0, fps: float = 30.0, size=None,
+                start: float = 0.0, warmup: int = 0, filter: str = "linear"):
+    """Yield RGB frames without retaining the movie in memory."""
     r = Renderer(patch, size=size, fps=fps, filter=filter)
     for i in range(warmup):
         r.step(start - (warmup - i) / fps)
+    from .live import clear_recordings
+    clear_recordings()
     for pr in r.patch.probes:
         if hasattr(pr, "clear"):
             pr.clear()                      # a Soundtrack starts at `start`, not at the warm-up
-    return list(r.frames(int(round(seconds * fps)), start=start))
+    yield from r.frames(int(round(seconds * fps)), start=start)
+
+
+def render_frames(patch: Optional[Patch] = None, seconds: float = 4.0, fps: float = 30.0, size=None,
+                  start: float = 0.0, warmup: int = 0, filter: str = "linear") -> list[np.ndarray]:
+    """Collect RGB frames. Use ``iter_frames`` for bounded-memory video exports."""
+    return list(iter_frames(patch, seconds, fps, size, start, warmup, filter))

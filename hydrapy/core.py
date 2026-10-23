@@ -421,7 +421,8 @@ class Patch:
         self.size = tuple(size)
         self.display: Output = self.o0
         self.speed = 1.0
-        self.frame_rate = None          # e.g. 18: hold time to 18 steps a second (small-gauge film judder)
+        self.frame_rate = None          # e.g. 18: update feedback and pixels at most 18 times a second
+        self.composite_alpha = True    # False: Hydra's final RGB display, alpha remains a signal channel
         self.probes: list = []          # live.Probe instances, updated after every frame
         self.transport = None           # live.Transport (Link, MidiClock) for `hydrapy live`; None = wall clock
 
@@ -487,3 +488,34 @@ class Ctx:
     # Hydra passes ({time, bpm, width, height, mouse}) to parameter functions
     def __getitem__(self, k):
         return getattr(self, k)
+
+
+class RenderClock:
+    """Presentation calls and simulation updates have separate counters."""
+
+    def __init__(self, fps):
+        if not math.isfinite(fps) or fps <= 0:
+            raise ValueError("fps must be positive and finite")
+        self.fps = float(fps)
+        self.calls = self.updates = 0
+        self.last_key = self.last_time = None
+
+    def next(self, patch, size, mouse, t):
+        wall_time = self.calls / self.fps if t is None else float(t)
+        time = wall_time * patch.speed
+        rate = patch.frame_rate
+        if rate is not None and (not math.isfinite(rate) or rate <= 0):
+            raise ValueError("frame_rate must be positive and finite, or None")
+        if rate:
+            time = math.floor(time * rate + 1e-9) / rate
+        key = (time, rate, size)
+        draw = not rate or key != self.last_key
+        dt = 1.0 / (rate or self.fps) if self.last_time is None else max(0.0, time - self.last_time)
+        ctx = Ctx(time=time, frame=self.updates, width=size[0], height=size[1],
+                  bpm=patch.bpm, mouse=mouse, dt=dt if draw else 0.0, fps=rate or self.fps)
+        ctx.presentation_time, ctx.presentation_dt = wall_time, 1.0 / self.fps
+        self.calls += 1
+        if draw:
+            self.last_key, self.last_time = key, time
+            self.updates += 1
+        return ctx, draw, wall_time
