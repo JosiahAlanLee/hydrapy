@@ -1,7 +1,7 @@
-"""Regenerate the "Op reference" section of README.md from the op registry.
+"""Regenerate docs/operators.md from the op registry.
 
-    python docs/optable.py            # rewrites README.md in place
-    python docs/optable.py --print    # prints the section
+    python docs/optable.py            # rewrites docs/operators.md
+    python docs/optable.py --print    # prints the reference without writing
 """
 from __future__ import annotations
 
@@ -42,9 +42,15 @@ def _args(op) -> str:
 
 
 def section() -> str:
-    out = ["## Op reference", ""]
+    out = ["# Operator reference", "",
+           "[Documentation](README.md) · [Project home](../README.md)", "",
+           "Generated from the operator registry with `python docs/optable.py`.",
+           "Edit operator declarations, then regenerate this page.", "",
+           "[Sources](#sources) · [Coordinates](#coordinate-ops) · [Colour](#colour-ops) ·",
+           "[Combining](#combine-ops-take-another-chain) · [Modulation](#modulate-ops-coordinates-driven-by-another-chain) ·",
+           "[Textures](#texture-ops-neighbourhood-multi-pass-on-the-gpu)", ""]
     for kind, title in SECTIONS:
-        out += [f"### {title}", "", "| op | args | | notes |", "|---|---|---|---|"]
+        out += [f"## {title}", "", "| op | args | origin | notes |", "|---|---|---|---|"]
         for name, op in REGISTRY.items():
             if op.kind != kind:
                 continue
@@ -62,12 +68,10 @@ def main():
     if "--print" in sys.argv:
         print(text)
         return
-    path = os.path.join(os.path.dirname(__file__), "..", "README.md")
-    readme = open(path, encoding="utf-8").read()
-    start = readme.index("## Op reference")
-    end = readme.index("## Backend notes")
-    open(path, "w", encoding="utf-8").write(readme[:start] + text + "\n" + readme[end:])
-    print(f"README.md: op reference regenerated ({sum(1 for _ in REGISTRY)} ops)")
+    path = os.path.join(os.path.dirname(__file__), "operators.md")
+    with open(path, "w", encoding="utf-8") as reference:
+        reference.write(text + "\n")
+    print(f"docs/operators.md: op reference regenerated ({len(REGISTRY)} ops)")
 
 
 if __name__ == "__main__":
