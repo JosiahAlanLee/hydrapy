@@ -1,9 +1,14 @@
 # hydrapy
 
+![tour](docs/tour.gif)
+
 [Hydra](https://hydra.ojack.xyz) — Olivia Jack's browser video synth — ported to Python, then pushed in a
 modular-synth direction: every parameter is a CV input, there's a wavefolder, Conway's Life and
 Gray–Scott reaction–diffusion run as feedback ops, and patches export back to Hydra, to standalone
 WebGL pages, or to video files.
+
+`docs/tour.mp4` (3 min 20 s) shows every primitive for a second and then the combination patches;
+`python docs/tour.py` re-renders it.
 
 ```python
 from hydrapy import *
