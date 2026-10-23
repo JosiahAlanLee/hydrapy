@@ -618,7 +618,7 @@ class CvOut:
         register_hook(self.tick)
 
     def send(self, k: int, signal) -> "CvOut":
-        if isinstance(signal, Soundtrack):
+        if isinstance(signal, Soundtrack) or (hasattr(signal, "listeners") and hasattr(signal, "sr")):   # audio-rate streams
             if k in self.audio_routes:
                 self.audio_routes[k].close()
             self.audio_routes[k] = AudioQueue(signal, self.samplerate)
@@ -1026,6 +1026,118 @@ def run_hooks(ctx, renderer=None):
 
 def clear_hooks():
     _HOOKS.clear()
+
+
+# -----------------------------------------------------------------------------
+# resources (devices, ports, streams), so a live reload can let go of them
+# -----------------------------------------------------------------------------
+
+_RESOURCES: list = []
+
+
+def _tracked(cls):
+    import functools
+    init = cls.__init__
+
+    @functools.wraps(init)
+    def __init__(self, *a, **k):
+        init(self, *a, **k)
+        if self not in _RESOURCES:
+            _RESOURCES.append(self)
+
+    cls.__init__ = __init__
+    return cls
+
+
+def close_resources():
+    """Close every device, port and stream the patch opened (CvIn/CvOut, OSC, MIDI, Link, VideoOut, XY)
+    and drop the per-frame hooks: what ``hydrapy live`` does before it re-runs an edited patch."""
+    for r in reversed(_RESOURCES):
+        try:
+            if hasattr(r, "close"):
+                r.close()
+        except Exception as e:  # pragma: no cover
+            import sys
+            print(f"hydrapy: closing {type(r).__name__} failed: {e}", file=sys.stderr)
+    _RESOURCES.clear()
+    clear_hooks()
+
+
+# -----------------------------------------------------------------------------
+# video out: the displayed output to OBS, Resolume, TouchDesigner, a stream, a file
+# -----------------------------------------------------------------------------
+
+class VideoOut:
+    """Send the displayed picture somewhere every frame.
+
+    ``target``: ``"virtualcam"`` (pyvirtualcam: the OBS Virtual Camera on macOS/Windows, v4l2loopback
+    on Linux — anything that takes a webcam, Resolume and TouchDesigner included, then sees hydrapy),
+    or an ffmpeg destination: a URL (``"udp://127.0.0.1:1234"``, ``"srt://..."``, ``"rtmp://..."``; open
+    it in OBS as a Media Source, or VLC) or a file (``"set.mkv"``, recorded as you play).  NDI, Syphon
+    and Spout: take either of these into OBS and publish from there (OBS's NDI plugin, Syphon/Spout
+    via OBS's own outputs).  Frames are read back from the GPU, so this costs one readback per frame.
+    """
+
+    def __init__(self, target: str = "virtualcam", fps: float = 30.0, size=None, crf: int = 20):
+        self.target, self.fps, self.size, self.crf = target, float(fps), size, int(crf)
+        self._sink = None
+        self._proc = None
+        self.frames = 0
+        register_hook(self.tick)
+
+    def _open(self, w, h):
+        if self.target == "virtualcam":
+            import pyvirtualcam
+            self._sink = pyvirtualcam.Camera(width=w, height=h, fps=self.fps)
+            return
+        import subprocess
+        try:
+            import imageio_ffmpeg
+            exe = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            exe = "ffmpeg"
+        t = self.target
+        fmt = []
+        if t.startswith(("udp://", "srt://", "rtp://", "tcp://")):
+            fmt = ["-f", "mpegts"]
+        elif t.startswith("rtmp://"):
+            fmt = ["-f", "flv"]
+        self._proc = subprocess.Popen(
+            [exe, "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}", "-r", str(self.fps),
+             "-i", "-", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", str(self.crf),
+             "-pix_fmt", "yuv420p", *fmt, t], stdin=subprocess.PIPE)
+
+    def tick(self, ctx, renderer=None):
+        if renderer is None:
+            return
+        if hasattr(renderer, "read") and not hasattr(renderer, "env"):
+            frame = renderer.read()                                         # GL: uint8 RGB, rows down
+        else:
+            from .backend_np import to_uint8
+            frame = to_uint8(renderer.displayed(), renderer.patch.composite_alpha)
+        h, w = frame.shape[:2]
+        if w % 2 or h % 2:
+            frame = frame[: h - h % 2, : w - w % 2]
+            h, w = frame.shape[:2]
+        if self._sink is None and self._proc is None:
+            self._open(w, h)
+        if self._sink is not None:
+            self._sink.send(frame)
+        elif self._proc is not None and self._proc.stdin:
+            self._proc.stdin.write(frame.tobytes())
+        self.frames += 1
+
+    def close(self):
+        if self.tick in _HOOKS:
+            _HOOKS.remove(self.tick)
+        if self._sink is not None:
+            self._sink.close(); self._sink = None
+        if self._proc is not None:
+            self._proc.stdin.close(); self._proc.wait(timeout=30); self._proc = None
+
+
+for _cls in (Link, OscIn, OscOut, Midi, MidiClock, CvIn, CvOut, VideoOut):
+    _tracked(_cls)
 
 
 def clear_recordings():

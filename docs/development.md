@@ -40,6 +40,13 @@ hydrapy/ops_3d.py      plane3d sphere3d cylinder3d
 hydrapy/ops_glitch.py  tear, shred (entropy-locked glitch feedback)
 hydrapy/ops_video.py   psort ruttetra contours sinefold bits shear · yiq linejitter headswitch dropouts ringing · filmstock gate
 hydrapy/ops_stroke.py  harmonograph wave arc dab charcoal smear · halftone boil polarRepeat
+hydrapy/nca.py         neural cellular automata: NCA texture, NumPy/GLSL steppers
+hydrapy/nca_train.py   train an NCA from one image (PyTorch)
+hydrapy/physarum.py    Physarum agents (NumPy, GL, WebGL2)
+hydrapy/ops_marble.py  inkdrop tine swirl ripple disc (mathematical marbling)
+hydrapy/vector.py      paths, Harmonograph/Rose/Contours, XY beam out, plotter SVG, streamlines
+hydrapy/analysis.py    Beats (beat tracking, onsets), Flow (optical flow)
+hydrapy/mint.py        Mint: per-mint draws, fx(params) and features replayed in the page; switch()
 hydrapy/drawing.py     Text, Lines (SVG flattener), plant()/meadow(), to_svg()
 hydrapy/cellular.py    MultiCA1D engine, Cellular animation/glyph source
 hydrapy/ops_fields.py  orbitVoronoi, SDF primitives/combinations/masks/contours
@@ -49,13 +56,13 @@ hydrapy/wire.py        spline, sweep and lathe wire geometry
 hydrapy/timeline.py    parameter tracks and cue timelines
 hydrapy/geometry.py    subdivision, coherent fuzzy paths, flora JSON projection
 hydrapy/recipes.py     handpainted(), mothlight(), film(), vhs(), super8(), studie(), cutout()
-hydrapy/live.py        CvIn/CvOut, OscIn/OscOut, Midi, Link, Probe, Soundtrack (drawn sound), per-frame hooks
+hydrapy/live.py        CvIn/CvOut, OscIn/OscOut, Midi, Link, Probe, Soundtrack (drawn sound), VideoOut, per-frame hooks
 hydrapy/synth.py       image quilting, Quilt frame bank
-hydrapy/export.py      GIF/MP4/PNG/ANSI, Hydra JS, Python, standalone HTML runtime
+hydrapy/export.py      GIF/MP4/PNG/ANSI, Hydra JS, Python, standalone HTML runtime, fxhash projects
 hydrapy/encoding.py    encoder discovery, selection and streaming video output
 hydrapy/hydra_import.py Hydra JS -> patch
 hydrapy/cli.py
-patches/               numbered examples and demoscene patches
+patches/               numbered examples and demoscene patches; patches/models/ holds trained NCA rules
 docs/tour.py           renders docs/tour.mp4, the feature tour
 docs/optable.py        regenerates docs/operators.md from the registry
 tests/                 tests including CPU/GPU parity, exports and audio timing

@@ -7,6 +7,7 @@ test_patch_brightness.py renders the same way and compares. A change that makes 
 """
 from __future__ import annotations
 
+import atexit
 import contextlib
 import io
 import json
@@ -35,6 +36,8 @@ def measure(name, ctx=None) -> dict:
     cwd = os.getcwd()
     with tempfile.TemporaryDirectory() as tmp:
         os.chdir(tmp)                                  # patches may write WAVs next to themselves
+        exits, register = [], atexit.register
+        atexit.register = lambda f, *a, **k: exits.append((f, a, k)) or f   # run patch exit handlers here, not at exit
         try:
             reset_patch(); clear_hooks()
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
@@ -52,6 +55,9 @@ def measure(name, ctx=None) -> dict:
             finally:
                 r.release()
         finally:
+            atexit.register = register
+            for f, a, k in exits:
+                f(*a, **k)
             clear_hooks()
             os.chdir(cwd)
 

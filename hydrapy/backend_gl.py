@@ -38,6 +38,7 @@ class GLRenderer:
         self.size = tuple(size or self.patch.size)
         self.fps = float(fps)
         self.ctx = ctx or _create_context()
+        self.precision = precision
         self.frame = 0
         self.clock = RenderClock(self.fps)
         self._reduce_targets = {}
@@ -62,6 +63,15 @@ class GLRenderer:
         self._copy_vao = self.ctx.vertex_array(self._copy, [(self.vbo, "2f", "position")])
         self._alloc()
         self.media: dict[str, object] = {}
+        from .nca import NCA
+        self._ncas: dict = {}
+        self._nca_refs, self._sims = [], []
+        for prog in self.programs:
+            for u in prog.sampler_uniforms:
+                if isinstance(u.source, NCA) and u.source not in self._nca_refs:
+                    self._nca_refs.append(u.source)
+                elif hasattr(u.source, "gl_step") and u.source not in self._sims:
+                    self._sims.append(u.source)
         self._blank = self.ctx.texture((1, 1), 4, data=bytes([0, 0, 0, 255]))
 
     # -- buffers -----------------------------------------------------------
@@ -94,6 +104,14 @@ class GLRenderer:
                 t.release()
         for _, _, gprog, vao, _, _ in self._passes:
             vao.release(); gprog.release()
+        for sim in getattr(self, "_sims", []):
+            sim.gl_release(self)
+        for n in getattr(self, "_ncas", {}).values():
+            for gp, vao in n["steps"] + [n["view_prog"]]:
+                vao.release(); gp.release()
+            for fb in [f for sset in n["sets"] for f in sset] + [n["view"]]:
+                fb["fbo"].release(); fb["tex"].release()
+        self._ncas = {}
         self._copy_vao.release(); self._copy.release(); self.vbo.release(); self._blank.release()
         self.outs, self.tmps, self.media, self._passes = {}, {}, {}, []
 
@@ -130,6 +148,18 @@ class GLRenderer:
 
     # -- media -------------------------------------------------------------
     def _media_texture(self, ref):
+        if hasattr(ref, "dynamic_array"):           # computed in Python every frame (vector.XY phosphor)
+            m = self.media.setdefault(ref.name, {"tex": None, "ref": ref, "cap": None, "frame": -1})
+            if m["frame"] != self.frame:
+                a = np.ascontiguousarray(ref.dynamic_array(self.ctx_time), dtype=np.float32)
+                if m["tex"] is None or m["tex"].size != (a.shape[1], a.shape[0]):
+                    if m["tex"] is not None:
+                        m["tex"].release()
+                    m["tex"] = self.ctx.texture((a.shape[1], a.shape[0]), 4, dtype="f4")
+                    m["tex"].filter = (self.gl.LINEAR, self.gl.LINEAR)
+                m["tex"].write(a.tobytes())
+                m["frame"] = self.frame
+            return m["tex"]
         if ref.name in self.media:
             m = self.media[ref.name]
         else:
@@ -186,7 +216,86 @@ class GLRenderer:
             return self.outs[ref.name]["ring"][0]["tex"]
         if isinstance(ref, TmpRef):
             return self.tmps[ref.name]["tex"]
+        from .nca import NCA
+        if isinstance(ref, NCA):
+            return self._nca(ref)["view"]["tex"]
+        if hasattr(ref, "gl_texture"):              # simulations that manage their own GPU state (Physarum)
+            return ref.gl_texture(self)
         return self._media_texture(ref)
+
+    # -- neural cellular automata --------------------------------------------
+    def _nca(self, ref):
+        if ref.name in self._ncas:
+            return self._ncas[ref.name]
+        from .nca import VIEW_GLSL, shader_header, step_glsl
+        head = shader_header(self.precision)
+
+        def prog(src):
+            try:
+                p = self.ctx.program(vertex_shader=VERTEX_DESKTOP, fragment_shader=to_desktop(head + src))
+            except Exception as e:
+                raise RuntimeError(f"NCA shader compile error: {e}")
+            return p, self.ctx.vertex_array(p, [(self.vbo, "2f", "position")])
+
+        def target(filt):
+            t = self.ctx.texture(ref.size, 4, dtype="f4")
+            t.filter = (filt, filt)
+            t.repeat_x = t.repeat_y = True
+            fb = self.ctx.framebuffer(color_attachments=[t])
+            fb.use(); self.ctx.clear(0.0, 0.0, 0.0, 0.0)
+            return {"tex": t, "fbo": fb}
+
+        T = ref.model.textures
+        view_filter = self.gl.NEAREST if ref.filter == "nearest" else self.gl.LINEAR
+        n = {"steps": [prog(step_glsl(ref.model, k)) for k in range(T)], "view_prog": prog(VIEW_GLSL),
+             "sets": [[target(self.gl.NEAREST) for _ in range(T)] for _ in range(2)], "cur": 0,
+             "view": target(view_filter)}
+        self._ncas[ref.name] = n
+        return n
+
+    def _step_ncas(self, ctx):
+        for ref in self._nca_refs:
+            n = self._nca(ref)
+            steps = ref.steps_due(ctx.time)
+            if ref.gpu_reset:
+                for sset in n["sets"]:
+                    for fb in sset:
+                        fb["fbo"].use(); self.ctx.clear(0.0, 0.0, 0.0, 0.0)
+                ref.gpu_reset = False
+            T = ref.model.textures
+            dmg = self.outs[ref.damage.name]["ring"][0]["tex"] if ref.damage is not None else self._blank
+            pnt = self.outs[ref.paint.name]["ring"][0]["tex"] if ref.paint is not None else self._blank
+            rate, perturb, amount = float(ref.rate(ctx)), float(ref.perturb(ctx)), float(ref.paint_amount(ctx))
+            for _ in range(steps):
+                cur, nxt = n["sets"][n["cur"]], n["sets"][1 - n["cur"]]
+                for k, (gp, vao) in enumerate(n["steps"]):
+                    nxt[k]["fbo"].use()
+                    for t in range(T):
+                        cur[t]["tex"].use(location=t)
+                        self._set(gp, f"s{t}", t)
+                    dmg.use(location=T); self._set(gp, "damage", T)
+                    pnt.use(location=T + 1); self._set(gp, "paint", T + 1)
+                    self._set(gp, "res", (float(ref.size[0]), float(ref.size[1])))
+                    self._set(gp, "stepIndex", float(ref.step_index))
+                    self._set(gp, "rate", rate); self._set(gp, "perturb", perturb); self._set(gp, "seed", ref.seed)
+                    self._set(gp, "paintAmount", amount)
+                    self._set(gp, "damageOn", 1.0 if ref.damage is not None else 0.0)
+                    self._set(gp, "paintOn", 1.0 if ref.paint is not None else 0.0)
+                    vao.render(self.gl.TRIANGLES)
+                n["cur"] = 1 - n["cur"]
+                ref.step_index += 1
+            vp, vvao = n["view_prog"]
+            n["view"]["fbo"].use()
+            n["sets"][n["cur"]][0]["tex"].use(location=0)
+            self._set(vp, "s0", 0)
+            self._set(vp, "res", (float(ref.size[0]), float(ref.size[1])))
+            vvao.render(self.gl.TRIANGLES)
+
+    def nca_state(self, ref) -> np.ndarray:
+        """The GPU copy of an NCA's state as (h, w, channels) float32, GL-oriented (row 0 = bottom)."""
+        n = self._nca(ref)
+        parts = [np.frombuffer(fb["tex"].read(), np.float32).reshape(ref.size[1], ref.size[0], 4) for fb in n["sets"][n["cur"]]]
+        return np.concatenate(parts, axis=-1)
 
     # -- frames --------------------------------------------------------------
     def step(self, t: Optional[float] = None):
@@ -198,6 +307,10 @@ class GLRenderer:
             from .live import run_hooks
             run_hooks(ctx, self)
             return
+        if self._nca_refs:
+            self._step_ncas(ctx)
+        for sim in self._sims:
+            sim.gl_step(self, ctx)
         current = None
         for output, target, gprog, vao, floats, samplers in self._passes:
             if output is not current and current is not None:
@@ -354,8 +467,13 @@ def render_frames_gl(patch: Optional[Patch] = None, seconds: float = 4.0, fps: f
 
 
 def live(patch: Optional[Patch] = None, size=(1280, 720), fps: float = 60.0, title: str = "hydrapy",
-         fullscreen: bool = False):
-    """Open a window and run the patch in real time (needs glfw). Esc quits, S saves a PNG, space pauses."""
+         fullscreen: bool = False, watch: Optional[str] = None, loader=None):
+    """Open a window and run the patch in real time (needs glfw). Esc quits, S saves a PNG, space pauses.
+
+    ``watch``: a file to watch; when it changes, ``loader()`` builds the new patch and it replaces the
+    running one without stopping the clock, the outputs' last frames carried over (feedback
+    continues), devices and ports closed and reopened. A patch that fails to load leaves the old one
+    running and prints the error — Hydra's ctrl-enter, on save."""
     import glfw
     import moderngl
     if not glfw.init():
@@ -398,8 +516,21 @@ def live(patch: Optional[Patch] = None, size=(1280, 720), fps: float = 60.0, tit
             print("saved", name)
 
     glfw.set_key_callback(window, on_key)
+    import os
+    mtime = os.path.getmtime(watch) if watch else None
+    last_check = glfw.get_time()
     while not glfw.window_should_close(window):
         glfw.poll_events()
+        if watch and glfw.get_time() - last_check > 0.25:
+            last_check = glfw.get_time()
+            try:
+                m = os.path.getmtime(watch)
+            except OSError:
+                m = mtime
+            if m != mtime:
+                mtime = m
+                r = _reload(r, loader, ctx, fps)
+                transport = r.patch.transport
         fb = glfw.get_framebuffer_size(window)
         if tuple(fb) != r.size:
             r.resize(fb)
@@ -417,3 +548,24 @@ def live(patch: Optional[Patch] = None, size=(1280, 720), fps: float = 60.0, tit
     glfw.terminate()
     if transport is not None:
         transport.close()
+
+
+def _reload(old: "GLRenderer", loader, ctx, fps):
+    """Build the edited patch; on success swap renderers, carrying each output's last frame over."""
+    import traceback
+    from .live import close_resources
+    close_resources()
+    try:
+        patch = loader()
+        new = GLRenderer(patch, size=old.size, ctx=ctx, fps=fps)
+    except Exception:
+        traceback.print_exc()
+        print("hydrapy: the edited patch failed; still running the previous one (its devices were closed)")
+        return old
+    for name, o in old.outs.items():
+        if name in new.outs:
+            ctx.copy_framebuffer(new.outs[name]["ring"][0]["fbo"], o["ring"][0]["fbo"])
+    new.clock.calls, new.frame, new.mouse = old.clock.calls, old.frame, old.mouse
+    old.release()
+    print("hydrapy: reloaded")
+    return new

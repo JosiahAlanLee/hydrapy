@@ -139,3 +139,44 @@ GPU brightness probes reduce their regions before readback; audio strips are rea
 
 See also the [CLI commands](getting-started.md#the-sixty-second-tour) and
 [audio timing regression notes](audio-timing.md).
+
+## fxhash: one patch, every mint
+
+`Fx` draws plain numbers, fixed when the patch is built: an exported page is one edition. A `Mint`
+records its draws instead, as signals; the exported page makes the same draws again, in the same
+order, from its own hash — `$fx.hash` on fxhash, `?fxhash=` in the URL, or the preview hash — with
+`Fx`'s generator ported to JavaScript, so a hash gives the same piece in Python, in the page and on
+fxhash.
+
+```python
+fx = Mint()                                      # preview hash: FXHASH / --fxhash, else a fixed development hash
+source = fx.pick(["waves", "noise", "cells"])    # labels: the draw is the index, the label a feature
+pattern = switch(source, osc(fx.rnd_btw(8, 40)), noise(fx.rnd_btw(2, 7)), voronoi(8))   # chosen per mint
+sides = fx.rnd_int(3, 9)
+glitch = EntropyLock(fx, rate=12, lock=fx.rnd_btw(0.005, 0.03))   # a locked table, drawn per mint too
+density = fx.number("density", default=0.6, min=0.1, max=1, update="sync")   # fx(params): fxlens sliders, live
+ink = fx.color("ink", default="#f2b04a")
+pattern.kaleid(sides).modulate(noise(2), density * 0.2).color(*ink).tear(glitch * 7 + 3).out()
+fx.features({"Source": source, "Sides": sides})
+```
+
+```
+hydrapy fxhash patch.py --sdk fxhash.min.js     # patch_fxhash/: index.html, fxhash.min.js, upload.zip
+hydrapy render patch.py --fxhash oo… -o mint.png --fxparam density=0.3   # look at any mint from Python
+```
+
+* A draw goes wherever a signal goes: op arguments, signal arithmetic, NCA and physarum
+  parameters, `EntropyLock(mint, …)`. Python control flow on one (`if`, `range`, `float()`) would
+  freeze it, so it raises; `.preview` is this hash's value when freezing is what you want.
+* `pick` over chains, or `switch(index, *chains)`, compiles every branch and crossfades them with
+  weights that are exactly 0 or 1 — the cost is all branches together. With a moving index
+  (`switch(Lfo(0.05, lo=0, hi=2), a, b, c)`) it morphs.
+* fx(params): `number`, `boolean`, `select` (the option's index), `color` (`.r .g .b .a`); `update="sync"`
+  follows fxlens without reloading. Python previews use the default (or `params=` / `--fxparam`).
+* The page calls `$fx.preview()` once it has run `preview` seconds (default 2). fxhash needs the
+  SDK file in the project: `npx fxhash create` writes one, or `npm pack @fxhash/project-sdk` and take
+  `package/dist/fxhash.min.js`. Without it the page uses a stand-in `$fx` that reads `?fxhash=`
+  — enough to look at, not for fxlens or uploading. Everything else is inlined.
+* `to_html` pages replay a Mint too: `?fxhash=` picks the mint, and the n key jumps to a fresh one.
+* A patch that waits for a click (audio, the drawn soundtrack, a camera) can't be captured by
+  fxhash; the export warns. [`patches/38_fxhash.py`](../patches/38_fxhash.py) is a complete piece.

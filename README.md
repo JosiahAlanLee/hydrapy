@@ -56,7 +56,10 @@ hydrapy render patch.py -o out.mp4 --gpu --seconds 10
 | A picture that plays the modular | [Painted oscillator](patches/26_painted_oscillator.py) · [Live I/O guide](docs/live-io.md) |
 | Animated cellular and distance fields | [Cellular](patches/28_cellular.py) · [Morphing fields](patches/30_distance_morph.py) · [thi.ng adaptations](docs/TOXI_ANIMATION_SOURCES.md) |
 | Lit surfaces and procedural 3D | [Materials](patches/demoscene_materials.py) · [Fractal folds](patches/demoscene_fractal.py) · [Demoscene guide](docs/DEMOSCENE.md) |
-| Linework and plotter geometry | [Text and SVGs](patches/14_text_and_lines.py) · [Spline wireframes and SVG export](docs/DEMOSCENE.md#splines-and-wireframes) |
+| Linework and plotter geometry | [Text and SVGs](patches/14_text_and_lines.py) · [Spline wireframes and SVG export](docs/DEMOSCENE.md#splines-and-wireframes) · [Plotter SVGs](patches/34_plotter.py) |
+| Textures that grow, heal and spread | [Neural cellular automata](patches/32_nca.py) · [Physarum](patches/36_physarum.py) · [Marbling](patches/35_marbling.py) · [Guide](docs/ecosystem.md) |
+| An oscilloscope, laser or the beat of a record | [XY beam out](patches/33_vector_out.py) · [Beats and optical flow](patches/37_beats_and_flow.py) · [Guide](docs/ecosystem.md#vectors-out-the-oscilloscope-the-laser-the-plotter) |
+| fxhash editions | [A patch that varies per mint](patches/38_fxhash.py) · [Guide](docs/rendering-and-export.md#fxhash-one-patch-every-mint) |
 
 Browse [all patches](patches/) or the [documentation index](docs/README.md) for
 film recipes, signals, timing, audio and export details.

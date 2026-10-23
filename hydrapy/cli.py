@@ -8,6 +8,8 @@
     hydrapy live   patch.py            # window (needs moderngl + glfw)
     hydrapy ansi   patch.py            # play it in the terminal
     hydrapy import sketch.js -o patch.py   # Hydra JS -> Python
+    hydrapy fxhash patch.py --sdk fxhash.min.js   # an fxhash project folder + upload.zip
+    hydrapy render patch.py --fxhash oo…  # any command: the hash (and --fxparam id=value) a Mint previews
     hydrapy ops                        # list every op
     hydrapy encoders                   # test hardware/software video encoders
 
@@ -23,7 +25,8 @@ import sys
 import time
 
 
-def load_patch(path: str):
+def load_patch(path: str, strict: bool = True):
+    """Run a patch file (or import a Hydra .js sketch) into a fresh default patch."""
     from . import default_patch, reset_patch
     patch = reset_patch()
     if path.endswith(".js"):
@@ -40,8 +43,26 @@ def load_patch(path: str):
                 if isinstance(v, Patch) and v.active_outputs():
                     return v
     if not patch.active_outputs():
+        if not strict:
+            raise ValueError("the patch assigns nothing to an output: call .out() on a chain")
         sys.exit("the patch assigns nothing to an output: call .out() on a chain")
     return patch
+
+
+def _mint_env(a):
+    """--fxhash / --fxparam become FXHASH / FXPARAMS, which a Mint reads when the patch runs."""
+    import json
+    if getattr(a, "fxhash", None):
+        os.environ["FXHASH"] = a.fxhash
+    params = {}
+    for kv in getattr(a, "fxparam", None) or []:
+        k, _, v = kv.partition("=")
+        try:
+            params[k] = json.loads(v)
+        except ValueError:
+            params[k] = v
+    if params:
+        os.environ["FXPARAMS"] = json.dumps(params)
 
 
 def parse_size(s: str):
@@ -90,6 +111,7 @@ def main(argv=None):
     lv.add_argument("patch")
     lv.add_argument("--size", type=parse_size, default=(1280, 720))
     lv.add_argument("--fullscreen", action="store_true")
+    lv.add_argument("--no-watch", action="store_true", help="don't reload the patch when the file changes")
 
     an = sub.add_parser("ansi", help="play in the terminal")
     an.add_argument("patch")
@@ -101,10 +123,44 @@ def main(argv=None):
     im.add_argument("sketch")
     im.add_argument("-o", "--out", default=None)
 
+    fh = sub.add_parser("fxhash", help="export an fxhash project folder (index.html, fxhash.min.js, upload.zip)")
+    fh.add_argument("patch")
+    fh.add_argument("-o", "--out", default=None, help="project folder (default: <patch>_fxhash)")
+    fh.add_argument("--sdk", default=None, help="the SDK's fxhash.min.js (npx fxhash create, or npm pack @fxhash/project-sdk)")
+    fh.add_argument("--preview", type=float, default=2.0, help="seconds of running before $fx.preview() (the capture)")
+    fh.add_argument("--size", type=parse_size, default=None, help="fixed canvas size (default: fills the window)")
+    fh.add_argument("--pixel-ratio", type=float, default=1.0)
+    fh.add_argument("--no-zip", action="store_true")
+
+    for sp in (r, h, lv, an, fh):
+        sp.add_argument("--fxhash", default=None, help="the hash a Mint previews (sets FXHASH)")
+        sp.add_argument("--fxparam", action="append", default=[], metavar="ID=VALUE",
+                        help="an fx(params) value for a Mint's preview (repeatable; sets FXPARAMS)")
+
     sub.add_parser("ops", help="list ops")
     sub.add_parser("devices", help="list audio devices and MIDI ports for CvIn/CvOut/Midi")
+    nc = sub.add_parser("nca", help="neural cellular automata: train a texture rule from one image (needs torch)")
+    nc.add_argument("action", choices=["train"])
+    nc.add_argument("image")
+    nc.add_argument("-o", "--out", default=None)
+    nc.add_argument("--scale", type=int, default=96, help="the image's shorter side in cells: feature size (default 96)")
+    nc.add_argument("--iters", type=int, default=2000)
+    nc.add_argument("--loss", default="gram", choices=["gram", "sw", "both"])
+    nc.add_argument("--hidden", type=int, default=96)
+    nc.add_argument("--seed", type=int, default=0)
+    nc.add_argument("--steps", type=int, nargs=2, default=(32, 64), metavar=("MIN", "MAX"), help="rollout length range")
+    nc.add_argument("--lr", type=float, default=1e-3)
+    nc.add_argument("--init", default=None, help="a trained .npz to fine-tune (e.g. with longer --steps 64 128 --lr 3e-4)")
 
     a = ap.parse_args(argv)
+
+    if a.cmd == "nca":
+        from .nca_train import train
+        out = a.out or os.path.splitext(os.path.basename(a.image))[0] + ".npz"
+        train(a.image, out, scale=a.scale, iters=a.iters, loss=a.loss, hidden=a.hidden, seed=a.seed,
+              steps=tuple(a.steps), lr=a.lr, init=a.init)
+        print("wrote", out)
+        return
 
     if a.cmd == "encoders":
         from .encoding import video_encoders
@@ -153,6 +209,7 @@ def main(argv=None):
             print(code)
         return
 
+    _mint_env(a)
     patch = load_patch(a.patch)
 
     if a.cmd == "render":
@@ -203,6 +260,16 @@ def main(argv=None):
         to_html(patch, out, title=os.path.basename(a.patch), size=a.size, pixel_ratio=a.pixel_ratio)
         print("wrote", out)
 
+    elif a.cmd == "fxhash":
+        from .export import to_fxhash
+        folder = a.out or os.path.splitext(os.path.basename(a.patch))[0] + "_fxhash"
+        out = to_fxhash(patch, folder, sdk=a.sdk, preview=a.preview, title=os.path.basename(a.patch),
+                        size=a.size, pixel_ratio=a.pixel_ratio, zip=not a.no_zip)
+        m = out["mint"]
+        print("wrote", out["index"] + (" and " + out["zip"] if out["zip"] else ""))
+        if m:
+            print(f"mint: {m['draws']} draws, {len(m['params'])} params, {len(m['features'])} features; preview hash {m['hash']}")
+
     elif a.cmd == "hydra":
         from .export import patch_to_hydra
         print(patch_to_hydra(patch, strict=not a.loose))
@@ -216,7 +283,8 @@ def main(argv=None):
 
     elif a.cmd == "live":
         from .backend_gl import live
-        live(patch, size=a.size, fullscreen=a.fullscreen)
+        live(patch, size=a.size, fullscreen=a.fullscreen, watch=None if a.no_watch else a.patch,
+             loader=lambda: load_patch(a.patch, strict=False))
 
     elif a.cmd == "ansi":
         from .backend_np import Renderer

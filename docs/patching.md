@@ -126,8 +126,9 @@ src(o0).diff(delay(o0, 2)).thresh(0.1)                                          
 
 **The p5 loop.** A Hydra + p5 practice often ran Hydra's canvas through p5's `plane()` and back
 in as `s0`. That round trip is `src(o0).plane3d(...)` fed back into `o0` here; `patches/17_p5_hydra_loop.py`
-is the `p5js-hydra-fxhash` template rebuilt that way, and `Fx("oo…")` is `fxrand()` with the
-`rnd_btw / rnd_btwexp / rnd_int` helpers, so a hash reproduces its edition. `hydrapy import file.js`
+is the `p5js-hydra-fxhash` template rebuilt that way, and `Fx("oo…", legacy=True)` is that
+template's `fxrand()` with the `rnd_btw / rnd_btwexp / rnd_int` helpers, so a hash reproduces its
+edition. `hydrapy import file.js`
 is lenient: it pulls the Hydra statements out of a p5 sketch, and a source it can't read offline
 (`s0.init({src: canvas})`) becomes an `External` placeholder to swap for an Image, Bank or the loop.
 
@@ -146,7 +147,7 @@ When that stream steers pixel feedback the same glitches recur, and recurrence o
 grows the fractal texture. CC0; ported here with thanks.
 
 ```python
-fx = Fx("ooYourFxhashHash")                      # fxhash's own sfc32, bit for bit: a hash gives the same numbers as the browser did
+fx = Fx("ooYourFxhashHash")                      # fxhash's $fx.rand(), bit for bit: a hash gives the same numbers as the browser did
 lock = EntropyLock("ooYourFxhashHash", rate=24, lock=0.01)   # 24 draws a second from a locked copy of the stream
 src(o0).shred(lock, 4, 0.25, 1.5)               # samples of the image copied onto itself (magnified)
        .tear(lock * 7, 3, 0.1, 0.3)              # bands torn sideways
@@ -154,6 +155,11 @@ src(o0).shred(lock, 4, 0.25, 1.5)               # samples of the image copied on
        .out(o0)
 ```
 
+`Fx(hash)` seeds the way `@fxhash/project-sdk` does (`oo…` base58 hashes, `0x…` hex hashes and
+tz addresses into `sfc32`), checked against the SDK's own `$fx.rand()`; `Fx(hash, legacy=True)`
+seeds `oo…` hashes the way the 2021 `fxrand()` snippet did, for pieces minted with it. (Before
+this release `Fx("oo…")` meant the legacy seeding.) Other strings and ints are hydrapy's own seeds.
+For a page that draws per mint, see [fxhash](rendering-and-export.md#fxhash-one-patch-every-mint).
 `Fx(hash, lock=p)` locks any draw sequence (`rand`, `rnd_btw`, `rnd_btwexp`, `rnd_int`, `pick`,
 `table`; `reseed()`, `save()`/`restore()` for bottlenecks by hand). `EntropyLock` precomputes its
 steps so the HTML export carries the same loops. `tear` and `shred` are coordinate ops, so they are

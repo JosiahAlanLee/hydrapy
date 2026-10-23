@@ -623,12 +623,17 @@ def _load_audio(path: str):
 
 # JS runtime helpers used by the expressions above (included in the HTML export)
 JS_HELPERS = r"""
+function __beatphase(T,period,div,t){var n=T.length,k;if(t<T[0])k=(t-T[0])/period;else if(t>=T[n-1])k=n-1+(t-T[n-1])/period;else{var lo=0,hi=n-1;while(hi-lo>1){var m=(lo+hi)>>1;if(T[m]<=t)lo=m;else hi=m;}k=lo+(t-T[lo])/(T[lo+1]-T[lo]);}k=k/div;return k-Math.floor(k);}
 function __fract(x){return x-Math.floor(x);}
 function __hash11(x){return __fract(Math.sin(x*12.9898+78.233)*43758.5453);}
 function __smoothstep(t){t=Math.min(Math.max(t,0),1);return t*t*(3-2*t);}
 function __drift(x,seed){var i=Math.floor(x),a=__hash11(i+seed),b=__hash11(i+1+seed);return a+(b-a)*__smoothstep(x-i);}
 function __env(p,a,d,c,lo,hi){var u=p<a?p/a:Math.pow(Math.max(0,1-(p-a)/d),c);return lo+(hi-lo)*u;}
 function __table(tbl,rate,t){var x=t*rate,n=tbl.length,i=Math.floor(x)%n,j=(i+1)%n,f=x-Math.floor(x);return tbl[i]+(tbl[j]-tbl[i])*f;}
+function __fxval(i,d){return (typeof __fxv!=='undefined'&&__fxv)?__fxv[i]:d;}
+function __fxtab(k){return (typeof __fxt!=='undefined'&&__fxt)?__fxt[k]:[0];}
+function __fxrgba(v,k,d){var s=(v&&v.hex)?v.hex.rgba:String(v);s=s.replace('#','');if(s.length===6)s+='ff';if(s.length===3)s=s[0]+s[0]+s[1]+s[1]+s[2]+s[2]+'ff';var x=parseInt(s.slice(2*k,2*k+2),16);return isFinite(x)?x/255:d;}
+function __fxparam(id,d,k){if(typeof $fx==='undefined'||!$fx||typeof $fx.getParam!=='function'||typeof __fxdefs==='undefined'||!__fxdefs[id])return d;var v;try{v=$fx.getParam(id);}catch(e){return d;}var df=__fxdefs[id];if(df.type==='select'){var i=df.options.options.indexOf(v);return i<0?d:i;}if(df.type==='color')return __fxrgba(v,k||0,d);if(typeof v==='boolean')return v?1:0;v=Number(v);return isFinite(v)?v:d;}
 function __steptable(tbl,rate,t){var n=tbl.length,i=((Math.floor(t*rate)%n)+n)%n;return tbl[i];}
 var __EASE={linear:function(t){return t;},easeInQuad:function(t){return t*t;},easeOutQuad:function(t){return t*(2-t);},
 easeInOutQuad:function(t){return t<0.5?2*t*t:-1+(4-2*t)*t;},easeInCubic:function(t){return t*t*t;},easeOutCubic:function(t){return Math.pow(t-1,3)+1;},
@@ -649,10 +654,12 @@ function __seq(arr,speed,smooth,offset,ease,time,bpm){var n=arr.length;var index
 class Fx:
     """fxhash-style determinism, with entropy locking.
 
-    ``Fx("oo…")`` reproduces fxhash's own generator bit for bit (the ``sfc32`` snippet seeded from
-    the hash), so a hash gives the same numbers here as in a browser; any other string or int seeds
-    it too.  The helper names are the usual ones: ``rand()``, ``rnd_btw``, ``rnd_btwexp``,
-    ``rnd_int``, ``pick``.
+    ``Fx(hash)`` reproduces fxhash's ``$fx.rand()`` bit for bit (the ``@fxhash/project-sdk`` seeding:
+    ``oo…`` base58 hashes, ``0x…`` hex hashes and tz addresses, into ``sfc32``), so a mint's hash gives
+    the same numbers here as in the browser.  ``legacy=True`` seeds ``oo…`` hashes the way the 2021
+    ``fxrand()`` snippet did instead (what older templates such as p5js-hydra-fxhash embed).  Any
+    other string or an int seeds it too (crc32 + splitmix32, hydrapy's own).  The helper names are the
+    usual ones: ``rand()``, ``rnd_btw``, ``rnd_btwexp``, ``rnd_int``, ``pick``.
 
     ``lock`` is aebrer's entropy locking (CC0): with that probability, each draw first pulls the
     generator back to its seed state, so the stream keeps falling into earlier sequences — loops of
@@ -660,37 +667,70 @@ class Fx:
     its own, as in the original ``if (random_int(1,1000) > 997) fxrand = sfc32(...hashes)``.
     ``reseed()`` locks by hand; ``save()``/``restore()`` make bottlenecks anywhere.
 
-        fx = Fx("ooHydrapy", lock=0.003)
+    The draws are plain Python numbers, fixed for the hash; for a page that draws them per mint, use
+    ``Mint`` (hydrapy.mint) and ``to_fxhash``.
+
+        fx = Fx("ooHydrapy…", lock=0.003)
         osc(fx.rnd_btw(5, 40)).kaleid(fx.rnd_int(3, 8)).out()
     """
 
-    ALPHABET = "123456789abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ"
+    ALPHABET = "123456789abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ"      # the 2021 snippet's order
+    SDK_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"  # the SDK's (bitcoin base58)
 
-    def __init__(self, hash_or_seed="hydrapy", lock: float = 0.0):
+    def __init__(self, hash_or_seed="hydrapy", lock: float = 0.0, legacy: bool = False):
         self.hash = hash_or_seed
         self.lock = float(lock)
-        self._seed_state = self._seed_from(hash_or_seed)
+        self.legacy = bool(legacy)
+        self._seed_state = self._seed_from(hash_or_seed, legacy)
         self._state = list(self._seed_state)
         self.locks = 0
 
     # -- seeding ----------------------------------------------------------
     @classmethod
     def _b58dec(cls, s: str) -> float:
+        """The 2021 snippet's decoder: float64 sum of exactly-rounded powers (what V8 computed)."""
         p = 0.0
-        for i, c in enumerate(s):      # float64 accumulation with exactly-rounded powers: what V8 computes
+        for i, c in enumerate(s):
             p = p + cls.ALPHABET.index(c) * float(len(cls.ALPHABET) ** (len(s) - i - 1))
         return p
 
     @classmethod
-    def _seed_from(cls, h) -> list[int]:
+    def _b58int(cls, s: str) -> int:
+        """The SDK's decoder: ``(r * 58 + indexOf(c)) | 0`` per character (int32 wraparound)."""
+        r = 0
+        for c in s:
+            r = (r * 58 + cls.SDK_ALPHABET.find(c)) & 0xFFFFFFFF
+        return r
+
+    @staticmethod
+    def _chunks(t: str, skip: int, decode) -> list[int]:
+        """``t.slice(skip).match(/.{n}/g).map(decode)`` with ``n = (len - skip) >> 2``, as the SDK does."""
+        s, n = t[skip:], (len(t) - skip) >> 2
+        out = [decode(s[i:i + n]) & 0xFFFFFFFF for i in range(0, len(s) - n + 1, n)] if n > 0 else [0]
+        return (out + [0, 0, 0, 0])[:4]
+
+    @classmethod
+    def _is_oo(cls, h) -> bool:
+        return isinstance(h, str) and h.startswith("oo") and len(h) > 10 and all(c in cls.ALPHABET for c in h[2:])
+
+    @classmethod
+    def _seed_from(cls, h, legacy: bool = False) -> list[int]:
+        import re
         M = 0xFFFFFFFF
-        if isinstance(h, str) and h.startswith("oo") and len(h) > 10 and all(c in cls.ALPHABET for c in h[2:]):
-            n = len(h) // 4
-            trunc = h[2:]
-            chunks = [trunc[i:i + n] for i in range(0, len(trunc) - len(trunc) % n, n)][:4]
-            while len(chunks) < 4:
-                chunks.append(chunks[-1])
-            return [int(cls._b58dec(c)) & M for c in chunks]
+        if isinstance(h, str):
+            if legacy and cls._is_oo(h):
+                n = len(h) // 4
+                trunc = h[2:]
+                chunks = [trunc[i:i + n] for i in range(0, len(trunc) - len(trunc) % n, n)][:4]
+                while len(chunks) < 4:
+                    chunks.append(chunks[-1])
+                return [int(cls._b58dec(c)) & M for c in chunks]
+            if re.fullmatch(r"(0x)?[A-Fa-f0-9]{64}", h) or re.fullmatch(r"(0x)?[0-9a-fA-F]{40}", h):
+                return cls._chunks(h, 2, lambda r: int(r, 16) % 4294967295)
+            if len(h) == 36 and re.match(r"(tz|KT)[1-4]", h) and all(c in cls.ALPHABET for c in h):
+                return cls._chunks(h, 3, cls._b58int)
+            if cls._is_oo(h):
+                return cls._chunks(h, 2, cls._b58int)
         import zlib
         base = h if isinstance(h, int) else zlib.crc32(str(h).encode("utf-8"))
         x = base & M
@@ -740,7 +780,8 @@ class Fx:
         return self.rand() * (hi - lo) + lo
 
     def rnd_btwexp(self, lo: float, hi: float) -> float:
-        return self.rand() ** 2 * (hi - lo) + lo
+        r = self.rand()
+        return r * r * (hi - lo) + lo
 
     def rnd_int(self, lo: int, hi: int) -> int:
         import math
@@ -764,8 +805,16 @@ class EntropyLock(Signal):
 
     def __init__(self, hash_or_seed="hydrapy", rate: float = 12.0, lock: float = 0.003, lo: float = 0.0,
                  hi: float = 1.0, steps: int = 2048):
+        self.rate = float(rate)
+        self.mint, self.table_index = None, None
+        if hasattr(hash_or_seed, "_entropy_table"):     # a Mint: the table is drawn again from the page's hash
+            self.mint = hash_or_seed
+            self.table_index, self.values = hash_or_seed._entropy_table(lock, steps, lo, hi)
+            self.fx = None
+            self.lo = self.hi = None
+            return
         self.fx = Fx(hash_or_seed, lock=lock)
-        self.rate, self.lo, self.hi = float(rate), float(lo), float(hi)
+        self.lo, self.hi = float(lo), float(hi)
         self.values = self.fx.table(int(steps), lo, hi)
 
     def value(self, ctx):
@@ -773,6 +822,8 @@ class EntropyLock(Signal):
         return self.values[i]
 
     def js(self):
+        if self.mint is not None:
+            return f"__steptable(__fxtab({self.table_index}),{_num(self.rate)},time)"
         tbl = "[" + ",".join(f"{v:.5g}" for v in self.values) + "]"
         return f"__steptable({tbl},{_num(self.rate)},time)"
 

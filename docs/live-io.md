@@ -65,3 +65,21 @@ at what they were when exported); the GL window is the live venue.
 
 See [rendering and export](rendering-and-export.md) for recording and frame holds,
 and [audio timing](audio-timing.md) for sample-clock behavior and verification.
+
+## Hot reload and video out
+
+`hydrapy live patch.py` watches the file: save it and the patch re-runs in place. The outputs'
+current frames carry over, so feedback keeps its history and the clock keeps running; an edit that
+raises prints the traceback and the old patch keeps playing. Devices the patch opened (CV, OSC,
+MIDI, Link, `XY`, `VideoOut`) are closed first and reopened by the new run; `close_resources()` does
+the same from Python. `--no-watch` turns it off.
+
+```python
+VideoOut("virtualcam")               # a webcam other software can pick: OBS, Zoom, Resolume, TouchDesigner (needs pyvirtualcam)
+VideoOut("udp://127.0.0.1:1234")     # an MPEG-TS stream (also srt://, rtp://, tcp://; rtmp:// as FLV) — an OBS Media Source, VLC
+VideoOut("set.mkv")                  # record the set as you play it
+```
+
+`VideoOut` reads the displayed picture back each frame and pipes it to pyvirtualcam (the OBS
+Virtual Camera on macOS/Windows, v4l2loopback on Linux) or ffmpeg. NDI, Syphon and Spout aren't
+built in: bring either route into OBS and publish from there.
