@@ -422,7 +422,7 @@ class Patch:
         self.display: Output = self.o0
         self.speed = 1.0
         self.frame_rate = None          # e.g. 18: update feedback and pixels at most 18 times a second
-        self.composite_alpha = True    # False: Hydra's final RGB display, alpha remains a signal channel
+        self.composite_alpha = False   # Hydra's display: RGB, alpha is a fourth channel. True: show RGB x alpha over black
         self.probes: list = []          # live.Probe instances, updated after every frame
         self.transport = None           # live.Transport (Link, MidiClock) for `hydrapy live`; None = wall clock
 

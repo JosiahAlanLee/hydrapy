@@ -11,6 +11,7 @@ from hydrapy.recipes import on_paper, studie
 
 set_bpm(140)
 set_frame_rate(18)
+set_composite_alpha(True)     # o0 and o3 are transparent pigment: show RGB x alpha over black
 
 decay = Decay(0.7)  # halve accumulated pigment coverage every 0.7 seconds
 old = src(o0).alpha(src(o0).a().mult(solid(decay, decay, decay)))

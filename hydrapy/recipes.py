@@ -247,6 +247,6 @@ def cutout(chain: Chain, levels: float = 3, paper: float = 0.35, boil: float = 0
     if screen:
         out = out.halftone(screen, 0.7854, 0.7)
     if paper:
-        out = out.charcoal(paper, 1.0, 60, seed + 1)
+        out = solid(0, 0, 0).over(out.charcoal(paper, 1.0, 60, seed + 1))   # the tooth lives in alpha: flatten it
     out = out.filmstock(stock, 0.6)
     return out.grain(0.035, fps, 2).vignette(0.25, 0.7)

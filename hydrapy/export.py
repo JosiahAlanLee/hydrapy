@@ -19,12 +19,12 @@ from .signals import JS_HELPERS, Audio, Fn, Seq, Signal, as_signal
 # Images and movies
 # ---------------------------------------------------------------------------
 
-def to_image(arr: np.ndarray):
-    """float (H, W, 4) or uint8 (H, W, 3) -> PIL image."""
+def to_image(arr: np.ndarray, composite: bool = False):
+    """float (H, W, 4) or uint8 (H, W, 3) -> PIL image (``composite``: RGB x alpha over black)."""
     from PIL import Image as PILImage
     if arr.dtype != np.uint8:
         from .backend_np import to_uint8
-        arr = to_uint8(arr)
+        arr = to_uint8(arr, composite)
     return PILImage.fromarray(arr[..., :3], "RGB")
 
 
@@ -112,11 +112,11 @@ def save_frames(frames, directory: str, prefix: str = "frame"):
 # Terminal
 # ---------------------------------------------------------------------------
 
-def to_ansi(frame: np.ndarray, cols: int = 80, rows: Optional[int] = None) -> str:
+def to_ansi(frame: np.ndarray, cols: int = 80, rows: Optional[int] = None, composite: bool = False) -> str:
     """Render a uint8 RGB frame as 24-bit ANSI half-block art."""
     if frame.dtype != np.uint8:
         from .backend_np import to_uint8
-        frame = to_uint8(frame)
+        frame = to_uint8(frame, composite)
     H, W = frame.shape[:2]
     rows = rows or max(int(round(cols * H / W / 2)), 1)
     ys = (np.arange(rows * 2) * H / (rows * 2)).astype(int)
@@ -376,8 +376,8 @@ def patch_to_python(patch: Optional[Patch] = None) -> str:
         head.append(f"speed({patch.speed:g})")
     if patch.frame_rate:
         head.append(f"set_frame_rate({patch.frame_rate:g})")
-    if not patch.composite_alpha:
-        head.append("default_patch().composite_alpha = False")
+    if patch.composite_alpha:
+        head.append("set_composite_alpha(True)")
     head.append("")
     tail = ["", f"render({patch.display.name})", ""]
     return "\n".join(head) + src + "\n".join(tail)
@@ -609,7 +609,7 @@ RUNTIME_JS = AUDIO_HELPERS_JS + r"""(function(){
     var tex = makeTex(w, h), fb = gl.createFramebuffer();
     gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
-    gl.clearColor(0,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.clearColor(0,0,0,0); gl.clear(gl.COLOR_BUFFER_BIT);   // transparent black, as the GL and NumPy backends
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     return {tex: tex, fb: fb};
   }

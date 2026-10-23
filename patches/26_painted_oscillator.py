@@ -27,18 +27,18 @@ except Exception:                                       # no interface: stand-in
 
 # voice A: a sine stroke, upright. `frequency` is cycles across the frame, so 1 V/oct from 2.
 voiceA = wave(2 ** pitch * 2, wobble * 0.04, 0.02, 0, 0, 1.0, 0).rotate(1.5708).charcoal(grit * 0.12, 1.0, 100)
-voiceA.out(o0)
+solid(0, 0, 0).layer(voiceA).out(o0)                # strokes are white with coverage in alpha: show them on black
 trackA = Soundtrack(o0, x=0.5, width=0.004, fps=24, gain=0.5)      # ±5 V
 
 # voice B: a damped harmonograph turning slowly; the column through it is an irregular pulse train
 voiceB = harmonograph(3, 2 ** pitch, 3.01, 0, 0, 0.5, 2, 0.45, 0.015, 0.3, 0.15).charcoal(grit * 0.1, 1.0, 90)
-voiceB.out(o2)
+solid(0, 0, 0).layer(voiceB).out(o2)
 trackB = Soundtrack(o2, x=0.5, width=0.004, fps=24, gain=0.5)
 
 # the picture: both voices with trails, the read column marked, through the print
 src(o1).mult(solid(0.82, 0.82, 0.82)) \
-    .over(src(o0).color(0.9, 0.95, 1.0)).over(src(o2).color(1.0, 0.75, 0.4)) \
-    .over(gate(0.004, 1.0, 0.0, 0.002).color(1, 0.2, 0.1, 0.35)) \
+    .layer(voiceA.color(0.9, 0.95, 1.0)).layer(voiceB.color(1.0, 0.75, 0.4)) \
+    .layer(gate(0.004, 1.0, 0.0, 0.002).color(1, 0.2, 0.1, 0.35)) \
     .out(o1)
 
 try:
