@@ -93,6 +93,59 @@ hydrapy ops                                    # list every op
 
 `hydrapy render sketch.js` works too — Hydra sketches are imported on the fly.
 
+### Hardware video encoding
+
+MP4/MOV/MKV export now defaults to `--encoder auto`: test a real frame at the output size
+and frame rate, choose a working hardware H.264 encoder, or fall back to software `libx264`.
+The CLI prints which encoder and FFmpeg executable it selected. Rendering (`--gpu`) and
+encoding (`--encoder`) are independent; hardware encoding also works with the NumPy renderer.
+
+```sh
+hydrapy encoders --size 1920x1080 --fps 30
+hydrapy render patch.py -o out.mp4 --seconds 60 --size 1920x1080 --gpu
+hydrapy render patch.py -o out.mp4 --gpu --encoder nvenc --bitrate 16M
+hydrapy render patch.py -o out.mp4 --gpu --encoder videotoolbox --bitrate 16M
+hydrapy render patch.py -o out.mp4 --encoder software --quality 8
+```
+
+| Choice | FFmpeg encoder | Hardware |
+|---|---|---|
+| `nvenc` | `h264_nvenc` | NVIDIA, including RTX 4090 |
+| `videotoolbox` | `h264_videotoolbox` | macOS VideoToolbox |
+| `qsv` | `h264_qsv` | Intel Quick Sync |
+| `amf` | `h264_amf` | AMD AMF |
+| `vaapi` | `h264_vaapi` | Linux VAAPI (`--device /dev/dri/renderD128` to choose a node) |
+| `software` | `libx264` | CPU |
+
+An explicit encoder fails with the FFmpeg error if unavailable; only `auto` falls back.
+Auto tries NVIDIA, VideoToolbox, Quick Sync, AMF, then VAAPI (VideoToolbox first on macOS),
+across system and imageio-provided FFmpeg builds, before trying software. Drivers, device
+access, and an FFmpeg build containing the encoder are required; appearing in FFmpeg's
+encoder list alone is insufficient. Use `--ffmpeg /path/to/ffmpeg` (Python: `ffmpeg=...`)
+or `IMAGEIO_FFMPEG_EXE` to restrict probing and export to one executable.
+
+```python
+from hydrapy import iter_frames, save_mp4, video_encoders
+
+for candidate in video_encoders(size=(1920, 1080), fps=30):
+    print(candidate.name, candidate.available, candidate.ffmpeg, candidate.reason)
+
+save_mp4(iter_frames(seconds=60, fps=30), "minute.mp4", fps=30,
+         encoder="auto", bitrate="16M")
+```
+
+`quality`/`--quality` is 1–10 (default 8). Software retains the previous x264 CRF mapping;
+hardware quality settings are codec-specific. VideoToolbox and AMF use a bitrate estimate
+based on size, frame rate, and quality. `bitrate`/`--bitrate` overrides quality control for
+any encoder and requests a target bitrate, not a fixed output size or identical visual quality.
+Output remains H.264 with 4:2:0 chroma; WebM is not supported by this export path.
+
+Frames stream once; the first is buffered while encoders are tested. If encoding fails
+mid-stream, export stops without retrying the stateful renderer, removes temporary files,
+and preserves any existing destination. Soundtrack audio is muxed as AAC without re-encoding
+the video. Hardware encoding offloads compression; frames still pass through CPU memory,
+so this does not yet eliminate GPU readback or RGB conversion costs.
+
 ## What's different from Hydra
 
 | Hydra | hydrapy |

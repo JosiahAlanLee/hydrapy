@@ -134,6 +134,7 @@ def patch() -> Patch:
 # ---------------------------------------------------------------------------
 
 from .backend_np import Renderer, iter_frames, render_chain, render_frames  # noqa: E402
+from .encoding import VideoEncoder, video_encoders  # noqa: E402
 from .export import (chain_to_hydra, patch_to_hydra, save_gif, save_mp4, save_png, to_ansi, to_html,  # noqa: E402
                      to_image)
 from .glsl import compile_chain, compile_output, compile_patch  # noqa: E402
@@ -172,6 +173,7 @@ __all__ = (
         "CvIn", "CvOut", "Link", "LiveValue", "Midi", "MidiClock", "OscIn", "OscOut", "Probe", "Soundtrack", "Transport", "TrigPhase", "audio_devices", "register_hook", "Ctx", "reset_patch", "default_patch",
         "Signal", "Lfo", "Seq", "Clock", "Env", "SH", "Decay", "Drift", "Mouse", "Time", "Fn", "Fx", "EntropyLock", "Fft", "Audio", "Const", "Expr", "External", "as_signal",
         "Renderer", "iter_frames", "render_chain", "render_frames", "save_gif", "save_mp4", "save_png", "to_image", "to_ansi",
+        "VideoEncoder", "video_encoders",
         "to_html", "chain_to_hydra", "patch_to_hydra", "from_hydra",
         "compile_chain", "compile_output", "compile_patch", "ops", "describe", "REGISTRY", "add_op", "Op", "Input",
     ]
