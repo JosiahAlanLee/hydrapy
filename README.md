@@ -35,6 +35,31 @@ Every op is defined once, with a GLSL body *and* a NumPy twin; the test suite re
 both and asserts they agree to within 8-bit tolerance (they do, except for per-pixel hash noise,
 where float32 `sin` of huge arguments isn't portable even between GPUs).
 
+## Animated generative sources
+
+`Cellular` adapts the public thi.ng engine that powers C-SCAPE, including
+interacting rules, short-term memory and optional glyph rendering.
+`orbitVoronoi` adapts thi.ng's open rotating-rings example into a native shader.
+These use verified open components; they do not bundle the FXhash editions.
+
+```python
+cells = Cellular(width=384, height=216, rate=48, seed=17)
+src(cells).palette(.04, .23, .53).out(o0)
+orbitVoronoi(11, 4, speed=.22).palette().out(o1)
+
+field = sdfCircle(.22, .42).sdfUnion(sdfBox(.35, .4, .06, .58), .12)
+field.sdfSubtract(sdfCircle(.1)).sdfBands(18, .25, Time() * .2).out(o2)
+```
+
+Also included: `FrameSource(draw)` for Python animation textures, `subdivide`
+and `fuzzy_paths` for moving linework, and `flora_lines` for your
+Generative_Art plant JSON. Existing `dither` and `halftone` work on these sources.
+Python textures run in NumPy/desktop GL and require baking into a `Bank` for
+HTML. The Voronoi and SDF ops export directly to HTML.
+
+See [sources, provenance and examples](docs/TOXI_ANIMATION_SOURCES.md), patches
+28–31, and `python docs/generative_demo.py --out generative_demo.mp4`.
+
 ## Install
 
 ```
@@ -767,13 +792,16 @@ hydrapy/ops_glitch.py  tear, shred (entropy-locked glitch feedback)
 hydrapy/ops_video.py   psort ruttetra contours sinefold bits shear · yiq linejitter headswitch dropouts ringing · filmstock gate
 hydrapy/ops_stroke.py  harmonograph wave arc dab charcoal smear · halftone boil polarRepeat
 hydrapy/drawing.py     Text, Lines (SVG flattener), plant()/meadow(), to_svg()
+hydrapy/cellular.py    MultiCA1D engine, Cellular animation/glyph source
+hydrapy/ops_fields.py  orbitVoronoi, SDF primitives/combinations/masks/contours
+hydrapy/geometry.py    subdivision, coherent fuzzy paths, flora JSON projection
 hydrapy/recipes.py     handpainted(), mothlight(), film(), vhs(), super8(), studie(), cutout()
 hydrapy/live.py        CvIn/CvOut, OscIn/OscOut, Midi, Link, Probe, Soundtrack (drawn sound), per-frame hooks
 hydrapy/synth.py       image quilting, Quilt frame bank
 hydrapy/export.py      GIF/MP4/PNG/ANSI, Hydra JS, Python, standalone HTML runtime
 hydrapy/hydra_import.py Hydra JS -> patch
 hydrapy/cli.py
-patches/               examples (00–25)
+patches/               examples (00–31)
 docs/tour.py           renders docs/tour.mp4, the feature tour
 docs/optable.py        regenerates the op reference below from the registry
 tests/                 ~400 tests incl. CPU/GPU parity for every op
@@ -782,3 +810,5 @@ tests/                 ~400 tests incl. CPU/GPU parity for every op
 ## License
 
 AGPL-3.0-or-later, because Hydra is. See LICENSE.
+Adapted thi.ng components retain their Apache-2.0 notices; see [NOTICE](NOTICE)
+and [LICENSE-THI-NG-APACHE-2.0.txt](LICENSE-THI-NG-APACHE-2.0.txt).

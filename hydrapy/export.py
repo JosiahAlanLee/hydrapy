@@ -10,7 +10,7 @@ from typing import Optional
 
 import numpy as np
 
-from .core import Camera, Chain, DelayRef, Image, Output, Patch, Texture, Video, default_patch
+from .core import Camera, Chain, DelayRef, FrameSource, Image, Output, Patch, Texture, Video, default_patch
 from .glsl import TmpRef, compile_patch
 from .signals import JS_HELPERS, Audio, Fn, Seq, Signal, as_signal
 
@@ -222,6 +222,8 @@ def _hydra_signal(sig) -> str:
 
 
 def _hydra_arg(a, strict: bool) -> str:
+    if isinstance(a, FrameSource):
+        raise ValueError("Python FrameSource animations cannot run in Hydra JS; render a video or bake frames into a Bank")
     if isinstance(a, bool):
         return "1" if a else "0"
     if isinstance(a, (int, float)):
@@ -327,6 +329,12 @@ _PY_NOTES: list = []
 def _py_arg(a) -> str:
     from .signals import Fft, Seq, Fn
     from .hydra_import import js_expr_to_python
+    from .cellular import Cellular
+    if isinstance(a, Cellular):
+        names = ("rules", "width", "height", "rate", "seed", "stripes", "density", "perturb", "wrap", "chars", "cell")
+        return "Cellular(" + ", ".join(f"{name}={getattr(a, name)!r}" for name in names) + ")"
+    if isinstance(a, FrameSource):
+        raise ValueError("FrameSource Python export needs the original draw callable; keep its source patch")
     if isinstance(a, bool):
         return repr(a)
     if isinstance(a, (int, float)):
@@ -489,6 +497,8 @@ def _collect_media(programs):
         for u in prog.uniforms:
             if u.type == "sampler2D":
                 ref = u.source
+                if isinstance(ref, FrameSource):
+                    raise ValueError("Python FrameSource animations cannot run in HTML; render a video or bake frames into a Bank")
                 if isinstance(ref, Image):
                     images[ref.name] = _data_url(ref.path)
                 elif hasattr(ref, "render") and not hasattr(ref, "array_at"):      # Text, Lines

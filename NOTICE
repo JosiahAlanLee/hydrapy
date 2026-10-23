@@ -1,0 +1,33 @@
+hydrapy includes adaptations of Apache-2.0 thi.ng components.
+
+Upstream: https://github.com/thi-ng/umbrella
+Pinned source revision: 5c5e334241a88fbd3ea31b906a091746539e682b
+License text: LICENSE-THI-NG-APACHE-2.0.txt
+
+hydrapy/cellular.py:
+  Adapted from packages/cellular/src/1d.ts and its API/kernel definitions.
+  Copyright 2022-2026 Karsten Schmidt.
+  Changes: Python/NumPy implementation, bounded row history, fixed-time
+  advancement and replay, deterministic initialization/perturbation, glyph
+  rendering, and a hydrapy frame-source adapter. Only the public cellular
+  engine and its README's two example rules are used. No C-SCAPE or
+  ASCII-SCAPE artwork source, curated rule catalog, palette or typeface is
+  included.
+
+hydrapy/ops_fields.py, orbitVoronoi source:
+  Ring arrangement and alternating rotation adapted from
+  examples/rotating-voronoi/src/index.ts (SPDX-License-Identifier: Apache-2.0).
+  Copyright 2019-2025 Alberto Massa (as stated in the example README).
+  The upstream example credits Mike Bostock's rotating-voronoi sketch:
+    https://observablehq.com/@mbostock/rotating-voronoi
+  and the original ornament by Mario Klingemann:
+    https://www.flickr.com/photos/quasimondo/8254540763/
+  Changes: analytic NumPy/GLSL nearest-site rasterizer, time-based movement,
+  fixed configurable ring counts, cell/edge/distance modes. No upstream
+  Delaunay mesh, polygon inset or cubic subdivision implementation is copied.
+  This is not the De/Frag renderer.
+
+The new SDF operations, curve helpers and flora adapter are hydrapy code
+under the repository's AGPL-3.0-or-later license. They do not bundle source
+from FXhash editions. The flora adapter reads the user-owned Generative_Art
+wisconsin-flora-1 interchange schema.
