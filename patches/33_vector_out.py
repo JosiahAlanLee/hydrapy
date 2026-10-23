@@ -9,7 +9,7 @@ Out of the ES-3: channels 1/2 = beam A x/y, 3 = beam A blanking (z), 4/5 = beam 
 scope in XY mode they draw; into a mixer they are oscilloscope music (x left, y right). Without an
 interface the five channels go to vector_out.wav to play from a DAW into the ES-3.
 
-    hydrapy render patches/29_vector_out.py --gpu --seconds 12 --out vector.mp4     # beam B as the soundtrack
+    hydrapy render patches/33_vector_out.py --gpu --seconds 12 --out vector.mp4     # beam B as the soundtrack
 """
 import atexit
 

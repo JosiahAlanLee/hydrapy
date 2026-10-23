@@ -11,6 +11,7 @@
     hydrapy fxhash patch.py --sdk fxhash.min.js   # an fxhash project folder + upload.zip
     hydrapy render patch.py --fxhash oo…  # any command: the hash (and --fxparam id=value) a Mint previews
     hydrapy ops                        # list every op
+    hydrapy encoders                   # test hardware/software video encoders
 
 A patch file is ordinary Python that uses ``from hydrapy import *`` and calls
 ``.out()``; it may also be a Hydra ``.js`` sketch, which is imported first.
@@ -84,6 +85,16 @@ def main(argv=None):
     r.add_argument("--scale", type=int, default=1, help="nearest-neighbour upscale factor")
     r.add_argument("--gpu", action="store_true", help="render with moderngl instead of NumPy")
     r.add_argument("--nearest", action="store_true", help="nearest-neighbour texture sampling (CPU)")
+    r.add_argument("--encoder", default="auto", help="H.264 encoder: auto, software, nvenc, videotoolbox, qsv, amf, vaapi (or FFmpeg name)")
+
+    e = sub.add_parser("encoders", help="test H.264 encoders on this machine with a real frame")
+    e.add_argument("--size", type=parse_size, default=(1280, 720))
+    e.add_argument("--fps", type=float, default=30.0)
+    for parser in (r, e):
+        parser.add_argument("--quality", type=int, default=8, help="video quality 1..10, higher is better (default: 8)")
+        parser.add_argument("--bitrate", help="target video bitrate, e.g. 8M; overrides quality control")
+        parser.add_argument("--ffmpeg", help="FFmpeg executable (otherwise checks system and imageio FFmpeg)")
+        parser.add_argument("--device", help="VAAPI render node, e.g. /dev/dri/renderD128")
 
     h = sub.add_parser("html", help="export a standalone WebGL page")
     h.add_argument("patch")
@@ -151,6 +162,19 @@ def main(argv=None):
         print("wrote", out)
         return
 
+    if a.cmd == "encoders":
+        from .encoding import video_encoders
+        try:
+            results = video_encoders(a.size, a.fps, a.quality, a.bitrate, ffmpeg=a.ffmpeg, device=a.device)
+        except (ValueError, RuntimeError, OSError) as exc:
+            ap.exit(1, f"encoder check failed: {exc}\n")
+        for result in results:
+            node = f" ({result.device})" if result.device else ""
+            print(f"{'OK' if result.available else '--'} {result.name}: {result.ffmpeg}{node}")
+            if result.reason:
+                print("   " + " ".join(result.reason.split()))
+        return
+
     if a.cmd == "devices":
         try:
             from .live import audio_devices
@@ -207,7 +231,16 @@ def main(argv=None):
             if track is not None:
                 track.record = True
                 track.keep = max(track.keep, a.seconds + 1)
-            save_mp4(frames, a.out, fps=a.fps, scale=a.scale, audio=track)
+            def report_encoder(selected):
+                kind = "hardware" if selected.hardware else "software"
+                print(f"encoding with {selected.name} ({kind}): {selected.ffmpeg}", flush=True)
+
+            try:
+                save_mp4(frames, a.out, fps=a.fps, scale=a.scale, audio=track, encoder=a.encoder,
+                         quality=a.quality, bitrate=a.bitrate, ffmpeg=a.ffmpeg, device=a.device,
+                         on_encoder=report_encoder)
+            except (ValueError, RuntimeError, OSError) as exc:
+                ap.exit(1, f"video export failed: {exc}\n")
         elif ext == ".png":
             last = None
             for last in frames:

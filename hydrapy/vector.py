@@ -265,6 +265,7 @@ class _Channel:
         self.parent, self.k = parent, k
         self.listeners: list[Callable] = []
         self.chunks: list[np.ndarray] = []
+        self._generation = 0          # bumped on clear(): an AudioQueue drops what it had queued
 
     @property
     def sr(self):
@@ -416,6 +417,7 @@ class XY(Texture):
     def clear(self):
         for ch in (self.x, self.y, self.z):
             ch.chunks = []
+            ch._generation += 1
         self.phase, self._carry, self._last_t = 0.0, 0.0, None
         self.phosphor[:] = 0.0
 

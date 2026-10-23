@@ -3,7 +3,7 @@
 Run it as a script to write three SVGs (millimetres, A4 landscape, paths ordered to cut pen-up
 travel; vpype and the AxiDraw software both read them):
 
-    python patches/30_plotter.py
+    python patches/34_plotter.py
 
     plot_contours.svg      isolines of a noise field (topography)
     plot_flow.svg          streamlines through the same field read as angles (the flow-field plot)

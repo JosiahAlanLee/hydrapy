@@ -39,6 +39,8 @@ class Op:
     iterations: bool = False       # texture op that may run several passes per frame
     doc: str = ""
     hydra: bool = False            # part of Hydra's own op set (exportable to Hydra JS)
+    glsl_helpers: str = ""         # optional op-specific functions before the body
+    python_source: Optional[Callable] = None  # (args, formatter) -> constructor expression
 
     @property
     def returns(self) -> str:
@@ -72,6 +74,44 @@ class Texture:
 
     def __repr__(self):
         return f"<{self.__class__.__name__} {self.name}>"
+
+
+class FrameSource(Texture):
+    """A Python ``draw(seconds) -> uint8 RGB/RGBA`` animation, with a one-frame cache.
+
+    Works in the NumPy and desktop GL renderers. Unlike Bank, GL updates one
+    texture instead of keeping every past frame. The callable must produce a
+    deterministic result for the requested time, including a backwards seek.
+    Live HTML/Hydra JS export requires baking a finite sequence into a Bank.
+    """
+    _counter = 0
+
+    def __init__(self, draw):
+        FrameSource._counter += 1
+        self.name = f"dynamic{FrameSource._counter}"
+        self.draw = draw
+        self._time = None
+        self._frame = self._array = None
+
+    def frame_at(self, t):
+        t = float(t)
+        if not math.isfinite(t):
+            raise ValueError("frame time must be finite")
+        if self._time != t:
+            frame = np.asarray(self.draw(t))
+            if frame.dtype != np.uint8 or frame.ndim != 3 or frame.shape[2] not in (3, 4) or min(frame.shape[:2]) < 1:
+                raise ValueError("FrameSource.draw must return a nonempty uint8 RGB/RGBA image")
+            if frame.shape[2] == 3:
+                frame = np.concatenate([frame, np.full(frame.shape[:2] + (1,), 255, np.uint8)], axis=-1)
+            self._frame = np.array(frame, copy=True, order="C")
+            self._time, self._array = t, None
+        return self._frame
+
+    def array_at(self, t):
+        frame = self.frame_at(t)
+        if self._array is None:
+            self._array = (frame[::-1].astype(np.float32) / 255).copy()
+        return self._array
 
 
 class Output(Texture):

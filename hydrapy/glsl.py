@@ -65,7 +65,9 @@ class Program:
                  "uniform vec2 mouse;"]
         for u in self.uniforms:
             lines.append(f"uniform {u.type} {u.name};")
-        return "\n".join(lines) + "\n" + GLSL_NOISE + "\n" + "\n".join(function_source(op) for op in self.functions)
+        helpers = list(dict.fromkeys(op.glsl_helpers for op in self.functions if op.glsl_helpers))
+        return ("\n".join(lines) + "\n" + GLSL_NOISE + "\n" + "\n".join(helpers)
+                + "\n" + "\n".join(function_source(op) for op in self.functions))
 
     def finish(self):
         head = self.header()

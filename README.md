@@ -35,6 +35,31 @@ Every op is defined once, with a GLSL body *and* a NumPy twin; the test suite re
 both and asserts they agree to within 8-bit tolerance (they do, except for per-pixel hash noise,
 where float32 `sin` of huge arguments isn't portable even between GPUs).
 
+## Animated generative sources
+
+`Cellular` adapts the public thi.ng engine that powers C-SCAPE, including
+interacting rules, short-term memory and optional glyph rendering.
+`orbitVoronoi` adapts thi.ng's open rotating-rings example into a native shader.
+These use verified open components; they do not bundle the FXhash editions.
+
+```python
+cells = Cellular(width=384, height=216, rate=48, seed=17)
+src(cells).palette(.04, .23, .53).out(o0)
+orbitVoronoi(11, 4, speed=.22).palette().out(o1)
+
+field = sdfCircle(.22, .42).sdfUnion(sdfBox(.35, .4, .06, .58), .12)
+field.sdfSubtract(sdfCircle(.1)).sdfBands(18, .25, Time() * .2).out(o2)
+```
+
+Also included: `FrameSource(draw)` for Python animation textures, `subdivide`
+and `fuzzy_paths` for moving linework, and `flora_lines` for your
+Generative_Art plant JSON. Existing `dither` and `halftone` work on these sources.
+Python textures run in NumPy/desktop GL and require baking into a `Bank` for
+HTML. The Voronoi and SDF ops export directly to HTML.
+
+See [sources, provenance and examples](docs/TOXI_ANIMATION_SOURCES.md), patches
+28–31, and `python docs/generative_demo.py --out generative_demo.mp4`.
+
 ## Install
 
 ```
@@ -92,6 +117,59 @@ hydrapy ops                                    # list every op
 ```
 
 `hydrapy render sketch.js` works too — Hydra sketches are imported on the fly.
+
+### Hardware video encoding
+
+MP4/MOV/MKV export now defaults to `--encoder auto`: test a real frame at the output size
+and frame rate, choose a working hardware H.264 encoder, or fall back to software `libx264`.
+The CLI prints which encoder and FFmpeg executable it selected. Rendering (`--gpu`) and
+encoding (`--encoder`) are independent; hardware encoding also works with the NumPy renderer.
+
+```sh
+hydrapy encoders --size 1920x1080 --fps 30
+hydrapy render patch.py -o out.mp4 --seconds 60 --size 1920x1080 --gpu
+hydrapy render patch.py -o out.mp4 --gpu --encoder nvenc --bitrate 16M
+hydrapy render patch.py -o out.mp4 --gpu --encoder videotoolbox --bitrate 16M
+hydrapy render patch.py -o out.mp4 --encoder software --quality 8
+```
+
+| Choice | FFmpeg encoder | Hardware |
+|---|---|---|
+| `nvenc` | `h264_nvenc` | NVIDIA, including RTX 4090 |
+| `videotoolbox` | `h264_videotoolbox` | macOS VideoToolbox |
+| `qsv` | `h264_qsv` | Intel Quick Sync |
+| `amf` | `h264_amf` | AMD AMF |
+| `vaapi` | `h264_vaapi` | Linux VAAPI (`--device /dev/dri/renderD128` to choose a node) |
+| `software` | `libx264` | CPU |
+
+An explicit encoder fails with the FFmpeg error if unavailable; only `auto` falls back.
+Auto tries NVIDIA, VideoToolbox, Quick Sync, AMF, then VAAPI (VideoToolbox first on macOS),
+across system and imageio-provided FFmpeg builds, before trying software. Drivers, device
+access, and an FFmpeg build containing the encoder are required; appearing in FFmpeg's
+encoder list alone is insufficient. Use `--ffmpeg /path/to/ffmpeg` (Python: `ffmpeg=...`)
+or `IMAGEIO_FFMPEG_EXE` to restrict probing and export to one executable.
+
+```python
+from hydrapy import iter_frames, save_mp4, video_encoders
+
+for candidate in video_encoders(size=(1920, 1080), fps=30):
+    print(candidate.name, candidate.available, candidate.ffmpeg, candidate.reason)
+
+save_mp4(iter_frames(seconds=60, fps=30), "minute.mp4", fps=30,
+         encoder="auto", bitrate="16M")
+```
+
+`quality`/`--quality` is 1–10 (default 8). Software retains the previous x264 CRF mapping;
+hardware quality settings are codec-specific. VideoToolbox and AMF use a bitrate estimate
+based on size, frame rate, and quality. `bitrate`/`--bitrate` overrides quality control for
+any encoder and requests a target bitrate, not a fixed output size or identical visual quality.
+Output remains H.264 with 4:2:0 chroma; WebM is not supported by this export path.
+
+Frames stream once; the first is buffered while encoders are tested. If encoding fails
+mid-stream, export stops without retrying the stateful renderer, removes temporary files,
+and preserves any existing destination. Soundtrack audio is muxed as AAC without re-encoding
+the video. Hardware encoding offloads compression; frames still pass through CPU memory,
+so this does not yet eliminate GPU readback or RGB conversion costs.
 
 ## What's different from Hydra
 
@@ -546,7 +624,7 @@ blobs coarsen, the state pins at its clamp) needs longer rollouts: fine-tune it 
 `--init lichen.npz --steps 64 128 --lr 3e-4 --iters 500`. Check one by stepping it for a thousand
 steps before you rely on it (`nca.step_np` in a loop).
 
-`patches/28_nca.py` uses the three rules shipped in `patches/models/`: `cells` (scikit-image's
+`patches/32_nca.py` uses the three rules shipped in `patches/models/`: `cells` (scikit-image's
 immunohistochemistry slide), `gravel` (scikit-image's CC0 gravel photograph) and `painted` (a frame
 of `recipes.handpainted()`). `cells` is the drift case above: trained with 24–40-step rollouts it
 held for ~100 steps and then wandered off-palette and pinned at the clamp; 500 iterations of
@@ -576,13 +654,13 @@ src(beam).out(o1)                                      # a phosphor preview of w
 
 `xy.stereo()` / `xy.wav(path)` give the audio; `save_mp4(frames, path, audio=(xy.stereo(), xy.sr))`
 muxes it (or just `audio=xy`). The phosphor preview works on the NumPy and GL backends (it's computed in Python, so not
-in the HTML export). `patches/29_vector_out.py` is the full rig.
+in the HTML export). `patches/33_vector_out.py` is the full rig.
 
 **Plotter.** `to_plotter_svg(paths, "plot.svg", size_mm=(297, 210))` writes millimetres, fits the
 paths inside the margins, orders them to cut pen-up travel, and puts each `layers=[...]` list on its
 own Inkscape layer (one pen each) — vpype and the AxiDraw software read it. `chain_contours(chain)`
 gives isolines of any field and `streamlines(chain)` flow-field lines through it (red as an angle,
-or red/green as a direction). `python patches/30_plotter.py` writes a topography, a flow field and
+or red/green as a direction). `python patches/34_plotter.py` writes a topography, a flow field and
 a harmonograph.
 
 ## Marbling
@@ -605,7 +683,7 @@ radius, sharpness)` (a circular stroke), `ripple(angle, amplitude, wavelength, p
 comb), and `disc` (a round drop of ink to `layer` into the hole). No feedback, every parameter a
 signal: the comb can be drawn through and back again, and the pattern un-marbles. Recipes:
 `suminagashi(rings, radius, inks)`, `ebru_stones(n, seed, palette)`, `bands(colours)`,
-`floating_drops(base, [(x, y, r, colour), ...])` (colour `None` is clear water). `patches/31_marbling.py`.
+`floating_drops(base, [(x, y, r, colour), ...])` (colour `None` is clear water). `patches/35_marbling.py`.
 
 ## Physarum
 
@@ -622,7 +700,7 @@ Physarum(sensor_angle=cv.cv[0] * 0.1 + 0.6)                         # small angl
 
 `sensor_angle`, `sensor_distance` (cells), `turn`, `step`, `deposit`, `decay`, `diffuse`,
 `food_weight` and `exposure` take signals. On the GPU the agents live in a float texture and
-deposit as points with additive blending; the HTML export runs it too (WebGL2). `patches/32_physarum.py`.
+deposit as points with additive blending; the HTML export runs it too (WebGL2). `patches/36_physarum.py`.
 
 ## Listening and watching: beats, onsets, optical flow
 
@@ -645,7 +723,16 @@ the HTML page (the beat times and the envelope are embedded); play the record th
 `Flow(Video("footage.mp4"))` is the footage's optical flow (OpenCV Farneback) as a texture:
 red/green = 0.5 + each pixel's motion per frame, blue = speed. `src(o0).displace(src(flow), -1)`
 carries whatever is in `o0` along the real motion — painted texture over landscape, datamosh.
-Flow is computed in Python: NumPy and GL backends, not the HTML export. `patches/33_beats_and_flow.py`.
+Flow is computed in Python: NumPy and GL backends, not the HTML export. `patches/37_beats_and_flow.py`.
+
+## Demoscene tools
+
+Height-field normals, relief lighting, environment reflections, animated metaballs,
+retained spline wireframes, composable 3D distance fields, recursive fractal folds,
+and music-directed keyframe tracks. Shader features run on NumPy, desktop GL, and
+standalone HTML; wire geometry retains its paths for SVG export.
+
+[Guide and examples](docs/DEMOSCENE.md) · [18-second preview](docs/demoscene_preview.mp4)
 
 ## Op reference
 
@@ -677,6 +764,10 @@ Flow is computed in Python: NumPy and GL backends, not the HTML export. `patches
 | `wave` | `frequency=3, amplitude=0.15, width=0.012, speed=1, phase=0, length=1, taper=0` | **new** | An oscillator drawn as a stroke: a sine across the frame, `frequency` cycles per width, travelling at `speed`. `length` is the stroke's extent (fraction of the width); `taper` thins both ends. |
 | `arc` | `radius=0.3, start=0, sweep=3.1416, width=0.012, taper=0, speed=0` | **new** | An arc stroke about the centre from angle `start` through `sweep` radians (a full circle: 6.2832), turning at `speed`. `taper` thins the tail; the head is the end of the arc. |
 | `dab` | `size=0.15, aspect=0.5, angle=0, bristles=0.5, softness=0.3, seed=0` | **new** | One touch of a bristle brush: an ellipse `size` tall (fraction of the height) and `aspect` as wide, turned by `angle`, streaked along its length by `bristles`. White, alpha = paint. Feed it back for accretive painting: src(o0).layer(dab(...).color(...)). |
+| `orbitVoronoi` | `points=9, rings=4, radius=0.42, speed=0.18, phase=0, width=0.004, mode=0` | **new** | Alternating rotating rings of Voronoi sites. points=3..20 per ring, rings=1..4; speed in radians/second. mode=0 shaded cells, 1 edges, 2 nearest distance. width uses the nearest/second-nearest distance gap (not a geometric polygon inset). |
+| `sdfCircle` | `radius=0.25, x=0.5, y=0.5` | **new** | Signed distance to a circle; negative inside. radius is in screen-height units, x/y in normalized screen coordinates. Finish with sdfMask or sdfBands. |
+| `sdfBox` | `width=0.45, height=0.35, radius=0.04, x=0.5, y=0.5` | **new** | Signed distance to a rounded box. Full width/height and corner radius are screen-height units; center x/y is normalized. Finish with sdfMask or sdfBands. |
+| `sdfMetaballs` | `count=5, radius=0.12, spread=0.28, smoothness=0.12, speed=0.5, seed=0` | **new** | Smooth union of 1..16 animated circles, a negative-inside distance bound. Deterministic motion in seconds; radius/spread/smoothness use screen-height units. Finish with sdfMask/sdfBands or derive a normal map. |
 
 ### Coordinate ops
 
@@ -739,6 +830,9 @@ Flow is computed in Python: NumPy and GL backends, not the HTML export. `patches
 | `sinefold` | `stages=2, phase=0` | **new** | Sine staircase shaper: each channel through `stages` cycles of a sine; ramps become rainbows, gradients become bands. |
 | `filmstock` | `stock=0, amount=1` | **new** | Film stock tone: 0 Kodachrome (warm, dense), 1 Ektachrome (cool shadows), 2 faded (lifted blacks, yellowed), 3 Tri-X (B&W S-curve), 4 Orwo / Sovcolor (muted, green mids, magenta shadows). |
 | `halftone` | `size=6, angle=0.7854, sharpness=0.7` | **new** | Screen print: each channel becomes a grid of ink dots `size` pixels apart, sized by how dark the channel is, the three screens turned 0, 60 and 15 degrees from `angle` so they moiré like a cheap colour print. |
+| `sdfMask` | `offset=0, softness=0` | **new** | Finish an SDF as an opaque black/white mask. Positive offset expands; softness has a half-pixel minimum. Apply palettes/texture masks afterwards. |
+| `sdfBands` | `frequency=20, width=0.3, phase=0` | **new** | Finish an SDF as repeated contour bands; frequency per height unit, width is the filled fraction, phase shifts the bands. Animate the field before this op for continuous morphs. |
+| `relight` | `azimuth=0.8, elevation=0.7, ambient=0.18, diffuse=0.65, specular=0.35, shininess=32` | **new** | Light an encoded normal map with Lambert diffuse + Blinn specular. Angles in radians; elevation=pi/2 faces the viewer. Returns HDR grayscale lighting with the input alpha; multiply by pigment separately. |
 
 ### Combine ops (take another chain)
 
@@ -760,6 +854,9 @@ Flow is computed in Python: NumPy and GL backends, not the HTML export. `patches
 | `stain` | `density=1` | **new** | Shine the chain through a layer of transparent dye: rgb of the layer is what the dye lets through, alpha its thickness. Multiplicative, like ink; start from solid(1,1,1) as clear leader. |
 | `alpha` | `` | **new** | Set alpha from another chain's luminance without premultiplying (mask() premultiplies). Use it to build dye layers: solid(1,0.2,0.1).alpha(shape(4)). |
 | `bits` | `mode=0, depth=4` | **new** | Bitwise logic between two chains quantised to `depth` bits: mode 0 XOR, 1 AND, 2 OR. Two ramps XORed are the oldest video-synth texture there is. |
+| `sdfUnion` | `smoothness=0` | **new** | Union of signed distance fields; smoothness > 0 rounds the join with a polynomial smooth minimum. |
+| `sdfIntersect` | `` | **new** | Intersection of signed distance fields (maximum). |
+| `sdfSubtract` | `` | **new** | Cut the other signed distance field out of this field. |
 
 ### Modulate ops (coordinates driven by another chain)
 
@@ -777,6 +874,8 @@ Flow is computed in Python: NumPy and GL backends, not the HTML export. `patches
 | `modulateRotate` | `multiple=1, offset=0` | Hydra |  |
 | `modulateHue` | `amount=1` | Hydra |  |
 | `displace` | `amount=0.1` | **new** | Like modulate but centred: 0.5 in the modulator means no displacement. |
+| `envMap` | `rotation=0` | **new** | Sample this chain as a latitude/longitude environment reflected by encoded normals. rotation is turns. A view-facing normal samples (0.75,0.5). Set coverage separately with alpha(normals.a()). |
+| `refractMap` | `amount=0.05` | **new** | Screen-space glass distortion from encoded normals; amount in screen-height units. This is a normal-driven UV offset, not physical ray refraction. Zero amount is identity. |
 
 ### Texture ops (neighbourhood; multi-pass on the GPU)
 
@@ -803,6 +902,7 @@ Flow is computed in Python: NumPy and GL backends, not the HTML export. `patches
 | `ringing` | `amount=0.5, offset=2` | **new** | Edge ringing: overshoot and a second ripple to the right of every vertical edge, `offset` pixels apart. The sharpening of a worn tape deck. |
 | `charcoal` | `tooth=0.5, rough=1.5, scale=90, seed=0` | **new** | Paper tooth removes coverage from alpha while preserving straight RGB colour. Edges jitter by `rough` pixels; grain at `scale` stays fixed in image space. Composite over paper with `over` or `recipes.on_paper`. |
 | `smear` | `angle=0, length=0.02` | **new** | Paint dragged: 12 taps behind each pixel along `angle` (radians; a chain makes it a flow field), `length` of the height. Paint on glass, smudged charcoal, motion blur. |
+| `normalMap` | `strength=0.03, radius=1` | **new** | Red channel as height; central-difference normals encoded in RGB as 0.5+0.5*n, +Y up. strength is height per screen height; radius is the sampling distance in pixels (minimum 0.5). Preserves alpha; sampling wraps. |
 
 ## Backend notes
 
@@ -902,7 +1002,7 @@ hydrapy render patch.py --fxhash oo… -o mint.png --fxparam density=0.3   # loo
   — enough to look at, not for fxlens or uploading. Everything else is inlined.
 * `to_html` pages replay a Mint too: `?fxhash=` picks the mint, and the n key jumps to a fresh one.
 * A patch that waits for a click (audio, the drawn soundtrack, a camera) can't be captured by
-  fxhash; the export warns. `patches/34_fxhash.py` is a complete piece.
+  fxhash; the export warns. `patches/38_fxhash.py` is a complete piece.
 
 ## Layout
 
@@ -927,13 +1027,16 @@ hydrapy/physarum.py    Physarum agents (NumPy, GL, WebGL2)
 hydrapy/analysis.py    Beats (beat tracking, onsets), Flow (optical flow)
 hydrapy/mint.py        Mint: per-mint draws, fx(params) and features replayed in the page; switch()
 hydrapy/drawing.py     Text, Lines (SVG flattener), plant()/meadow(), to_svg()
+hydrapy/cellular.py    MultiCA1D engine, Cellular animation/glyph source
+hydrapy/ops_fields.py  orbitVoronoi, SDF primitives/combinations/masks/contours
+hydrapy/geometry.py    subdivision, coherent fuzzy paths, flora JSON projection
 hydrapy/recipes.py     handpainted(), mothlight(), film(), vhs(), super8(), studie(), cutout()
 hydrapy/live.py        CvIn/CvOut, OscIn/OscOut, Midi, Link, Probe, Soundtrack (drawn sound), per-frame hooks
 hydrapy/synth.py       image quilting, Quilt frame bank
 hydrapy/export.py      GIF/MP4/PNG/ANSI, Hydra JS, Python, standalone HTML runtime, fxhash projects
 hydrapy/hydra_import.py Hydra JS -> patch
 hydrapy/cli.py
-patches/               examples (00–34); patches/models/ holds trained NCA rules
+patches/               examples (00–38, demoscene_*); patches/models/ holds trained NCA rules
 docs/tour.py           renders docs/tour.mp4, the feature tour
 docs/optable.py        regenerates the op reference below from the registry
 tests/                 ~400 tests incl. CPU/GPU parity for every op
@@ -942,3 +1045,5 @@ tests/                 ~400 tests incl. CPU/GPU parity for every op
 ## License
 
 AGPL-3.0-or-later, because Hydra is. See LICENSE.
+Adapted thi.ng components retain their Apache-2.0 notices; see [NOTICE](NOTICE)
+and [LICENSE-THI-NG-APACHE-2.0.txt](LICENSE-THI-NG-APACHE-2.0.txt).

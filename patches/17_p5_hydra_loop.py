@@ -9,7 +9,7 @@ is a little smaller than the window; Hydra reads that p5 canvas back as s0 and l
 Here the p5 half is src(o0).plane3d(): the output on a plane in perspective, fed back. Nudge the
 rotations and the plane becomes a tumbling window into its own past. Fx("oo...", legacy=True) is
 the template's fxrand() (plain Fx("oo...") is today's $fx.rand()): the same hash gives the same
-parameters every time, as it did on fxhash. For a page that draws them per mint, see 34_fxhash.py.
+parameters every time, as it did on fxhash. For a page that draws them per mint, see 38_fxhash.py.
 """
 from hydrapy import *
 

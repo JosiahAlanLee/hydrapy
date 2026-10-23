@@ -1,9 +1,9 @@
 """An fxhash edition: every number here is drawn per mint, in the page, from the page's hash.
 
-`Mint()` records the draws; `to_fxhash` (or `hydrapy fxhash 34_fxhash.py --sdk fxhash.min.js`)
+`Mint()` records the draws; `to_fxhash` (or `hydrapy fxhash 38_fxhash.py --sdk fxhash.min.js`)
 writes a project whose page makes the same draws again from `$fx.hash`, declares the fx(params)
 and sets the features, then calls `$fx.preview()` after two seconds.  In Python the draws take the
-preview hash's values: `hydrapy render 34_fxhash.py --fxhash oo… -o mint.png` shows another mint,
+preview hash's values: `hydrapy render 38_fxhash.py --fxhash oo… -o mint.png` shows another mint,
 and the exported page's n key jumps to a fresh one.
 
 Choices between chains (`switch`) compile every branch, crossfaded with 0/1 weights.

@@ -15,7 +15,7 @@ from typing import Optional
 
 import numpy as np
 
-from .core import Camera, Ctx, DelayRef, Image, Output, Patch, RenderClock, Video, default_patch
+from .core import Camera, Ctx, DelayRef, FrameSource, Image, Output, Patch, RenderClock, Video, default_patch
 from .glsl import VERTEX_DESKTOP, TmpRef, compile_patch, to_desktop
 from .signals import as_signal
 
@@ -174,6 +174,17 @@ class GLRenderer:
                     m["cap"] = cv2.VideoCapture(ref.device)
                 except ImportError:
                     raise RuntimeError("Camera sources in the GL backend need opencv-python (pip install opencv-python)")
+        if isinstance(ref, FrameSource):
+            if m.get("time") != self.ctx_time:
+                frame = np.ascontiguousarray(ref.frame_at(self.ctx_time)[::-1])
+                size = (frame.shape[1], frame.shape[0])
+                if m["tex"] is None or m["tex"].size != size:
+                    if m["tex"] is not None:
+                        m["tex"].release()
+                    m["tex"] = self.ctx.texture(size, 4)
+                m["tex"].write(frame.tobytes())
+                m["time"] = self.ctx_time
+            return m["tex"]
         if hasattr(ref, "array_at"):          # Bank, Quilt: one texture per frame, bound by index
             i = ref.index_at(self.ctx_time)
             texs = m.setdefault("texs", {})

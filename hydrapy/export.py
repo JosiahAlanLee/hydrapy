@@ -10,7 +10,7 @@ from typing import Optional
 
 import numpy as np
 
-from .core import Camera, Chain, DelayRef, Image, Output, Patch, Texture, Video, default_patch
+from .core import Camera, Chain, DelayRef, FrameSource, Image, Output, Patch, Texture, Video, default_patch
 from .glsl import TmpRef, compile_patch
 from .signals import JS_HELPERS, Audio, Fn, Seq, Signal, as_signal
 
@@ -41,62 +41,133 @@ def save_gif(frames, path: str, fps: float = 30.0, scale: int = 1):
     return path
 
 
-def save_mp4(frames, path: str, fps: float = 30.0, quality: int = 8, scale: int = 1, audio=None):
-    """Write uint8 RGB frames to an H.264 MP4 (needs imageio-ffmpeg or a system ffmpeg).
+def save_mp4(frames, path: str, fps: float = 30.0, quality: int = 8, scale: int = 1, audio=None,
+             *, encoder="auto", bitrate=None, ffmpeg=None, device=None, on_encoder=None):
+    """Stream uint8 RGB/RGBA frames to H.264 in MP4, MOV, or MKV (alpha is discarded).
 
-    ``audio``: a ``Soundtrack`` (rendered along with the frames), a WAV path, or ``(samples, sr)``;
-    it is muxed in as AAC.
+    ``encoder='auto'`` tries hardware with an actual one-frame encode, then libx264.
+    Explicit choices (``nvenc``, ``videotoolbox``, ``qsv``, ``amf``, ``vaapi``, ``software``)
+    fail if unavailable. ``quality`` is 1..10; ``bitrate='8M'`` overrides quality control.
+    ``ffmpeg`` selects an executable; ``device`` selects a VAAPI render node.
+    ``on_encoder``, if supplied, receives the selected ``VideoEncoder`` before streaming.
+
+    Frames are consumed once and closed on success or failure. Odd dimensions are cropped
+    to even after upscaling. The destination is replaced only after a successful export.
+    ``audio`` may be a ``Soundtrack`` rendered along with the frames, a WAV path, or
+    ``(samples, sr)``; it is muxed in as AAC without re-encoding the video.
     """
-    import imageio.v2 as iio
-    video = path
-    if audio is not None:
-        video = path + ".video.mp4"
-    w = iio.get_writer(video, fps=fps, codec="libx264", quality=quality, macro_block_size=None,
-                       pixelformat="yuv420p")
+    import tempfile
+    from .encoding import _select_encoder, _validate, _write_video
+
+    iterator = None
+    temporary = []
+    closed = False
+
+    def close_frames():
+        nonlocal closed
+        if closed:
+            return
+        closed = True
+        try:
+            if iterator is not None and iterator is not frames and hasattr(iterator, "close"):
+                iterator.close()
+        finally:
+            if hasattr(frames, "close"):
+                frames.close()
+
     try:
-        for f in frames:
+        destination = os.fspath(path)
+        suffix = os.path.splitext(destination)[1].lower()
+        if suffix not in (".mp4", ".mov", ".mkv"):
+            raise ValueError("H.264 export requires .mp4, .mov, or .mkv; WebM requires a different codec")
+        if not isinstance(scale, (int, np.integer)) or scale < 1:
+            raise ValueError("scale must be a positive integer")
+        _validate((2, 2), fps, quality, bitrate)
+
+        def prepare(frame):
+            frame = np.asarray(frame)
+            if frame.dtype != np.uint8 or frame.ndim != 3 or frame.shape[2] not in (3, 4):
+                raise ValueError("video frames must be uint8 RGB or RGBA arrays")
+            frame = frame[..., :3]
             if scale > 1:
-                f = np.repeat(np.repeat(f, scale, 0), scale, 1)
-            h, wd = f.shape[:2]
-            if h % 2 or wd % 2:  # yuv420p needs even dimensions
-                f = f[: h - h % 2, : wd - wd % 2]
-            w.append_data(f)
+                frame = np.repeat(np.repeat(frame, scale, 0), scale, 1)
+            h, w = frame.shape[:2]
+            return frame[:h-h % 2, :w-w % 2]
+
+        iterator = iter(frames)
+        try:
+            first = prepare(next(iterator))
+        except StopIteration:
+            raise ValueError("video requires at least one frame") from None
+        size = (first.shape[1], first.shape[0])
+        selected = _select_encoder(encoder, size, fps, quality, bitrate, ffmpeg, device)
+        if on_encoder is not None:
+            on_encoder(selected)
+
+        def prepared_frames():
+            yield first
+            for frame in iterator:
+                frame = prepare(frame)
+                if frame.shape != first.shape:
+                    raise ValueError("all video frames must have the same dimensions after scaling/cropping")
+                yield frame
+
+        def temporary_video():
+            fd, name = tempfile.mkstemp(prefix=".hydrapy-", suffix=suffix,
+                                        dir=os.path.dirname(os.path.abspath(destination)))
+            os.close(fd)
+            temporary.append(name)
+            return name
+
+        video = temporary_video()
+        _write_video(prepared_frames(), video, size, fps, selected)
+        close_frames()
+        if audio is not None:
+            muxed = temporary_video()
+            _mux_audio(video, audio, muxed, ffmpeg=selected.ffmpeg)
+            video = muxed
+        os.replace(video, destination)
+        temporary.remove(video)
+        return path
     finally:
-        w.close()
-        if hasattr(frames, "close"):
-            frames.close()
-    if audio is not None:
-        _mux_audio(video, audio, path)
-        os.remove(video)
-    return path
+        try:
+            for name in temporary:
+                try:
+                    os.remove(name)
+                except FileNotFoundError:
+                    pass
+        finally:
+            close_frames()
 
 
-def _mux_audio(video: str, audio, path: str):
+def _mux_audio(video: str, audio, path: str, *, ffmpeg=None):
     import subprocess
     import tempfile
     import wave
-    wav = audio if isinstance(audio, str) else None
+    from .encoding import _ffmpeg_candidates
+    wav = os.fspath(audio) if isinstance(audio, (str, os.PathLike)) else None
     tmp = None
-    if wav is None:
-        if hasattr(audio, "wav"):
-            tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False); tmp.close()
-            audio.wav(tmp.name)
-        else:
-            samples, sr = audio
-            samples = np.asarray(samples, dtype=np.float64)
-            tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False); tmp.close()
-            with wave.open(tmp.name, "wb") as wf:                     # (n,) mono or (n, k) interleaved
-                wf.setnchannels(1 if samples.ndim == 1 else samples.shape[1]); wf.setsampwidth(2); wf.setframerate(int(sr))
-                wf.writeframes((np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes())
-        wav = tmp.name
     try:
-        import imageio_ffmpeg
-        exe = imageio_ffmpeg.get_ffmpeg_exe()
-    except Exception:
-        exe = "ffmpeg"
-    try:
-        subprocess.run([exe, "-y", "-loglevel", "error", "-i", video, "-i", wav, "-c:v", "copy", "-c:a", "aac", "-b:a", "160k",
-                        "-shortest", "-movflags", "+faststart", path], check=True)
+        if wav is None:
+            tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False); tmp.close()
+            if hasattr(audio, "wav"):
+                audio.wav(tmp.name)
+            else:
+                samples, sr = audio
+                samples = np.asarray(samples, dtype=np.float64)
+                with wave.open(tmp.name, "wb") as wf:                     # (n,) mono or (n, k) interleaved
+                    wf.setnchannels(1 if samples.ndim == 1 else samples.shape[1]); wf.setsampwidth(2); wf.setframerate(int(sr))
+                    wf.writeframes((np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes())
+            wav = tmp.name
+        exe = ffmpeg or _ffmpeg_candidates()[0]
+        cmd = [exe, "-y", "-loglevel", "error", "-i", video, "-i", wav, "-map", "0:v:0", "-map", "1:a:0",
+               "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-shortest"]
+        if os.path.splitext(path)[1].lower() in (".mp4", ".mov"):
+            cmd += ["-movflags", "+faststart"]
+        result = subprocess.run([*cmd, path], capture_output=True)
+        if result.returncode:
+            detail = result.stderr.decode("utf-8", "replace")[-4000:]
+            raise RuntimeError(f"FFmpeg audio mux failed (exit {result.returncode}):\n{detail}")
     finally:
         if tmp is not None:
             os.remove(tmp.name)
@@ -152,6 +223,8 @@ def _hydra_signal(sig) -> str:
 
 
 def _hydra_arg(a, strict: bool) -> str:
+    if isinstance(a, FrameSource):
+        raise ValueError("Python FrameSource animations cannot run in Hydra JS; render a video or bake frames into a Bank")
     if isinstance(a, bool):
         return "1" if a else "0"
     if isinstance(a, (int, float)):
@@ -257,6 +330,12 @@ _PY_NOTES: list = []
 def _py_arg(a) -> str:
     from .signals import Fft, Seq, Fn
     from .hydra_import import js_expr_to_python
+    from .cellular import Cellular
+    if isinstance(a, Cellular):
+        names = ("rules", "width", "height", "rate", "seed", "stripes", "density", "perturb", "wrap", "chars", "cell")
+        return "Cellular(" + ", ".join(f"{name}={getattr(a, name)!r}" for name in names) + ")"
+    if isinstance(a, FrameSource):
+        raise ValueError("FrameSource Python export needs the original draw callable; keep its source patch")
     if isinstance(a, bool):
         return repr(a)
     if isinstance(a, (int, float)):
@@ -299,9 +378,12 @@ def _py_arg(a) -> str:
 def _py_native_signal(a):
     """hydrapy's own signals written back as their constructors (None for anything else)."""
     from .signals import SH, Clock, Const, Decay, Drift, Env, Expr, Fn1, Lfo, Mouse, Time
+    from .timeline import Track
     g = lambda v: f"{float(v):g}"
     if type(a).__name__ in ("FxDraw", "FxParam"):           # a Mint draw: this hash's value
         return g(a.preview)
+    if isinstance(a, Track):
+        return repr(a)
     if isinstance(a, Const):
         return g(a.v)
     if isinstance(a, Time):
@@ -333,6 +415,9 @@ def chain_to_python(chain: Chain) -> str:
     parts = []
     for tr in chain.transforms:
         op = tr.op
+        if op.python_source is not None:
+            parts.append(op.python_source(tr.args, _py_arg))
+            continue
         pairs = list(zip(tr.args, op.inputs))
         keep = 1 if op.kind in ("combine", "combineCoord") else 0
         while len(pairs) > keep:
@@ -440,6 +525,8 @@ def _collect_media(programs):
         for u in prog.uniforms:
             if u.type == "sampler2D":
                 ref = u.source
+                if isinstance(ref, FrameSource):
+                    raise ValueError("Python FrameSource animations cannot run in HTML; render a video or bake frames into a Bank")
                 if isinstance(ref, Image):
                     images[ref.name] = _data_url(ref.path)
                 elif hasattr(ref, "render") and not hasattr(ref, "array_at"):      # Text, Lines
