@@ -265,8 +265,9 @@ src(o0).diff(delay(o0, 2)).thresh(0.1)                                          
 
 **The p5 loop.** A Hydra + p5 practice often ran Hydra's canvas through p5's `plane()` and back
 in as `s0`. That round trip is `src(o0).plane3d(...)` fed back into `o0` here; `patches/17_p5_hydra_loop.py`
-is the `p5js-hydra-fxhash` template rebuilt that way, and `Fx("oo…")` is `fxrand()` with the
-`rnd_btw / rnd_btwexp / rnd_int` helpers, so a hash reproduces its edition. `hydrapy import file.js`
+is the `p5js-hydra-fxhash` template rebuilt that way, and `Fx("oo…", legacy=True)` is that
+template's `fxrand()` with the `rnd_btw / rnd_btwexp / rnd_int` helpers, so a hash reproduces its
+edition. `hydrapy import file.js`
 is lenient: it pulls the Hydra statements out of a p5 sketch, and a source it can't read offline
 (`s0.init({src: canvas})`) becomes an `External` placeholder to swap for an Image, Bank or the loop.
 
@@ -346,7 +347,7 @@ When that stream steers pixel feedback the same glitches recur, and recurrence o
 grows the fractal texture. CC0; ported here with thanks.
 
 ```python
-fx = Fx("ooYourFxhashHash")                      # fxhash's own sfc32, bit for bit: a hash gives the same numbers as the browser did
+fx = Fx("ooYourFxhashHash")                      # fxhash's $fx.rand(), bit for bit: a hash gives the same numbers as the browser did
 lock = EntropyLock("ooYourFxhashHash", rate=24, lock=0.01)   # 24 draws a second from a locked copy of the stream
 src(o0).shred(lock, 4, 0.25, 1.5)               # samples of the image copied onto itself (magnified)
        .tear(lock * 7, 3, 0.1, 0.3)              # bands torn sideways
@@ -354,6 +355,10 @@ src(o0).shred(lock, 4, 0.25, 1.5)               # samples of the image copied on
        .out(o0)
 ```
 
+`Fx(hash)` seeds the way `@fxhash/project-sdk` does (`oo…` base58 hashes, `0x…` hex hashes and
+tz addresses into `sfc32`), checked against the SDK's own `$fx.rand()`; `Fx(hash, legacy=True)`
+seeds `oo…` hashes the way the 2021 `fxrand()` snippet did, for pieces minted with it. (Before
+this release `Fx("oo…")` meant the legacy seeding.) Other strings and ints are hydrapy's own seeds.
 `Fx(hash, lock=p)` locks any draw sequence (`rand`, `rnd_btw`, `rnd_btwexp`, `rnd_int`, `pick`,
 `table`; `reseed()`, `save()`/`restore()` for bottlenecks by hand). `EntropyLock` precomputes its
 steps so the HTML export carries the same loops. `tear` and `shred` are coordinate ops, so they are
@@ -499,6 +504,147 @@ audio routes using cumulative sample counts. CV files use presentation timestamp
 the synthesis hold rate; render warm-up is excluded. Set `record=True` and a sufficiently long
 `keep` when exporting audio through the Python API. The CLI does this for its selected soundtrack.
 GPU brightness probes reduce their regions before readback; audio strips are read only when due.
+
+## Neural cellular automata: textures that grow and heal
+
+The honest version of "GAN textures". A neural cellular automaton (after Mordvintsev, Niklasson,
+Randazzo and Levin, *Self-Organising Textures*, Distill 2021) is a grid of cells, each holding 12
+numbers (the first three its colour). Every step a cell looks at its 3×3 neighbourhood through
+four fixed filters, runs that through a two-layer network of about six thousand weights, and adds
+the result to itself — at a random half of the cells. Trained on one photograph, the rule grows
+that texture from nothing, keeps it alive, and repairs it when it's damaged.
+
+```python
+moss = NCA("moss.npz", size=(160, 90), speed=40)       # 40 steps a second on a 160x90 grid
+src(moss).out(o0)
+
+shape(4, 0.5).scale(1, 0.1, 4).scroll(Lfo(0.07, "tri", -0.6, 0.6), 0).out(o1)
+src(NCA("moss.npz", damage=o1)).out(o2)                # wiped wherever o1 is bright; it regrows
+
+NCA("moss.npz", perturb=cv.cv[0] * 0.05)               # the modular pushing noise into its hidden channels
+NCA("moss.npz", paint=o3, paint_amount=0.5)            # colour written into the cells, then integrated
+```
+
+`rate` (fraction of cells updating per step), `perturb` and `paint_amount` take signals; `damage`
+and `paint` take outputs. The rule runs on the NumPy and GL backends and in the HTML export (its
+weights are compiled into the shaders; WebGL2 float targets).
+
+**Training your own** (`pip install torch`; CPU is fine — tens of minutes on a laptop, a few on a GPU or Apple MPS):
+
+```
+hydrapy nca train lichen.jpg --scale 128 --iters 2000      # -> lichen.npz
+```
+
+The loss compares texture statistics without a pretrained network: Gram matrices of fixed *random*
+filters at four scales (random multi-scale filters capture texture surprisingly well) plus a
+sliced-Wasserstein match of the colour distribution. Nothing is downloaded and no one else's
+images are involved; the rule has only ever seen your photograph. `--scale` is the photograph's
+shorter side in cells: features 4–16 cells across work best. The rule trains on a pool of states it
+keeps running, so it learns to sustain the texture, not just to make it once — over the rollout
+lengths it trains on. A rule that holds for a few hundred steps and then drifts (colours shift,
+blobs coarsen, the state pins at its clamp) needs longer rollouts: fine-tune it with
+`--init lichen.npz --steps 64 128 --lr 3e-4 --iters 500`. Check one by stepping it for a thousand
+steps before you rely on it (`nca.step_np` in a loop).
+
+`patches/28_nca.py` uses the two rules shipped in `patches/models/`: `gravel` (scikit-image's CC0
+gravel photograph) and `painted` (a frame of `recipes.handpainted()`). A third, trained on
+scikit-image's immunohistochemistry slide, made convincing membranes and nuclei for ~100 steps and
+then drifted, so it isn't shipped.
+
+## Vectors out: the oscilloscope, the laser, the plotter
+
+One set of paths, three destinations. A path is an `(N, 2)` array in -1..1; a frame is a list of
+them. They come from parametric curves (`Harmonograph`, `Lissajous`, `Rose`, all CV-able), from
+drawings (`Paths.svg("drawing.svg")`, `Paths.lines(meadow())`), or from the picture itself:
+`Contours(o0, levels=4)` traces isolines of an output every frame, the way a scan converter or a
+Vectrex would show it.
+
+**XY.** `XY(source, rate=80, gain=0.5)` turns a frame of paths into an audio-rate beam: it traces
+the frame `rate` times a second, travels between paths blanked (`xy.z`), and keeps its phase across
+frames, so a changing shape doesn't click. Out of the ES-3 into a scope's X/Y inputs (or a laser
+DAC) it draws; into a mixer it's oscilloscope music — the beam's path *is* the waveform, `x` left,
+`y` right.
+
+```python
+beam = XY(Harmonograph(3, 3 * ratio, 3.01, 0, 1.5708, 0.4, 4), rate=55, gain=0.5)
+traced = XY(Contours(o0, levels=3), rate=60)
+CvOut(channels=(0, 1, 2, 3, 4)).send(0, traced.x).send(1, traced.y).send(2, traced.z) \
+                               .send(3, beam.x).send(4, beam.y)
+src(beam).out(o1)                                      # a phosphor preview of what the scope shows
+```
+
+`xy.stereo()` / `xy.wav(path)` give the audio; `save_mp4(frames, path, audio=(xy.stereo(), xy.sr))`
+muxes it (or just `audio=xy`). The phosphor preview works on the NumPy and GL backends (it's computed in Python, so not
+in the HTML export). `patches/29_vector_out.py` is the full rig.
+
+**Plotter.** `to_plotter_svg(paths, "plot.svg", size_mm=(297, 210))` writes millimetres, fits the
+paths inside the margins, orders them to cut pen-up travel, and puts each `layers=[...]` list on its
+own Inkscape layer (one pen each) — vpype and the AxiDraw software read it. `chain_contours(chain)`
+gives isolines of any field and `streamlines(chain)` flow-field lines through it (red as an angle,
+or red/green as a direction). `python patches/30_plotter.py` writes a topography, a flow field and
+a harmonograph.
+
+## Marbling
+
+Suminagashi and ebru are ink floating on water, pushed by drops and drawn through by styluses and
+combs. After Lu, Jaffer, Jin, Zhao and Mao (*Mathematical Marbling*, IEEE CG&A 2012), each of those
+moves is a closed-form, area-preserving, exactly invertible map — so each is a coordinate op, and a
+chain is the bath's history in the order it happened:
+
+```python
+water = solid(0.93, 0.9, 0.82)
+water.layer(disc(0.4, 0.5, 0.15).color(0.1, 0.1, 0.3)) \                    # a drop of indigo
+     .inkdrop(0.6, 0.5, 0.12).layer(disc(0.6, 0.5, 0.12).color(0.6, 0.1, 0.1)) \   # a second drop pushes it aside
+     .tine(1.5708, 0, Lfo(0.05, lo=-0.3, hi=0.3), 0.03, 0.12)               # a comb drawn through both, back and forth
+```
+
+`inkdrop(x, y, radius)` (drops compose: two of radius *a*, *b* are one of √(a²+b²)), `tine(angle,
+offset, amount, sharpness, period)` (a stylus, or a comb with `period` > 0), `swirl(x, y, amount,
+radius, sharpness)` (a circular stroke), `ripple(angle, amplitude, wavelength, phase)` (the wavy
+comb), and `disc` (a round drop of ink to `layer` into the hole). No feedback, every parameter a
+signal: the comb can be drawn through and back again, and the pattern un-marbles. Recipes:
+`suminagashi(rings, radius, inks)`, `ebru_stones(n, seed, palette)`, `bands(colours)`,
+`floating_drops(base, [(x, y, r, colour), ...])` (colour `None` is clear water). `patches/31_marbling.py`.
+
+## Physarum
+
+Slime-mould agents (Jeff Jones, 2010): tens of thousands of them wander a grid, smell the trail at
+three points ahead (left, centre, right), turn towards the strongest, step, and deposit; the trail
+spreads and fades. Transport networks form, thicken where traffic is heavy, and re-route.
+
+```python
+src(Physarum(size=(320, 180), agents=(256, 128))).out(o0)          # 32,768 agents
+voronoi(5, 0.15).out(o1)
+src(Physarum(food=o1, food_weight=0.6)).out(o2)                   # they follow the picture too
+Physarum(sensor_angle=cv.cv[0] * 0.1 + 0.6)                         # small angles: long veins; large: fine mesh
+```
+
+`sensor_angle`, `sensor_distance` (cells), `turn`, `step`, `deposit`, `decay`, `diffuse`,
+`food_weight` and `exposure` take signals. On the GPU the agents live in a float texture and
+deposit as points with additive blending; the HTML export runs it too (WebGL2). `patches/32_physarum.py`.
+
+## Listening and watching: beats, onsets, optical flow
+
+`Beats.from_file("record.wav")` finds the beats of a recording — Ellis's dynamic-programming beat
+tracker, in NumPy (or librosa's, if installed) — and hands them back as signals:
+
+```python
+beats = Beats.from_file("brahms.wav")            # or bpm=96 if you know the tempo
+studie(o0, beat=beats.phase).out(o0)             # Fischinger on the record's actual downbeats
+shape(4, beats.pulse(0.02, 0.4) * 0.3)           # an envelope on every beat
+osc(10, 0.1, beats.bar(4))                       # a phase across each four-beat bar
+noise(beats.onset * 20 + 3)                      # the onset-strength envelope
+```
+
+Tempo estimates can land an octave off (accents every other beat, busy hi-hats): give `bpm=` or
+use `.half()` / `.double()`. With the tempo right, beats land within ~10 ms. Everything exports to
+the HTML page (the beat times and the envelope are embedded); play the record there with
+`Audio.from_file` and the page stays in step.
+
+`Flow(Video("footage.mp4"))` is the footage's optical flow (OpenCV Farneback) as a texture:
+red/green = 0.5 + each pixel's motion per frame, blue = speed. `src(o0).displace(src(flow), -1)`
+carries whatever is in `o0` along the real motion — painted texture over landscape, datamosh.
+Flow is computed in Python: NumPy and GL backends, not the HTML export. `patches/33_beats_and_flow.py`.
 
 ## Op reference
 
@@ -698,6 +844,65 @@ are Hydra's (`_st`, `_c0`, `_c1`, plus `_tex` for texture ops). GLSL bodies may 
 `resolution`, `gl_FragCoord` and the helpers (`_noise`, `_luminance`, `_rgbToHsv`, `_hsvToRgb`,
 `_hash11/21/22/31` (Hydra's sin hashes), `_h11/21/22/31` (sin-free, bit-exact with NumPy), `_bayer4`, `_segd`, `_rot3`).
 
+## Live plumbing: hot reload, and the picture into other software
+
+`hydrapy live patch.py` watches the file: save it and the patch re-runs in place. The outputs'
+current frames carry over, so feedback keeps its history and the clock keeps running; an edit that
+raises prints the traceback and the old patch keeps playing. Devices the patch opened (CV, OSC,
+MIDI, Link, `XY`, `VideoOut`) are closed first and reopened by the new run; `close_resources()` does
+the same from Python. `--no-watch` turns it off.
+
+```python
+VideoOut("virtualcam")               # a webcam other software can pick: OBS, Zoom, Resolume, TouchDesigner (needs pyvirtualcam)
+VideoOut("udp://127.0.0.1:1234")     # an MPEG-TS stream (also srt://, rtp://, tcp://; rtmp:// as FLV) — an OBS Media Source, VLC
+VideoOut("set.mkv")                  # record the set as you play it
+```
+
+`VideoOut` reads the displayed picture back each frame and pipes it to pyvirtualcam (the OBS
+Virtual Camera on macOS/Windows, v4l2loopback on Linux) or ffmpeg. NDI, Syphon and Spout aren't
+built in: bring either route into OBS and publish from there.
+
+## fxhash: one patch, every mint
+
+`Fx` draws plain numbers, fixed when the patch is built: an exported page is one edition. A `Mint`
+records its draws instead, as signals; the exported page makes the same draws again, in the same
+order, from its own hash — `$fx.hash` on fxhash, `?fxhash=` in the URL, or the preview hash — with
+`Fx`'s generator ported to JavaScript, so a hash gives the same piece in Python, in the page and on
+fxhash.
+
+```python
+fx = Mint()                                      # preview hash: FXHASH / --fxhash, else a fixed development hash
+source = fx.pick(["waves", "noise", "cells"])    # labels: the draw is the index, the label a feature
+pattern = switch(source, osc(fx.rnd_btw(8, 40)), noise(fx.rnd_btw(2, 7)), voronoi(8))   # chosen per mint
+sides = fx.rnd_int(3, 9)
+glitch = EntropyLock(fx, rate=12, lock=fx.rnd_btw(0.005, 0.03))   # a locked table, drawn per mint too
+density = fx.number("density", default=0.6, min=0.1, max=1, update="sync")   # fx(params): fxlens sliders, live
+ink = fx.color("ink", default="#f2b04a")
+pattern.kaleid(sides).modulate(noise(2), density * 0.2).color(*ink).tear(glitch * 7 + 3).out()
+fx.features({"Source": source, "Sides": sides})
+```
+
+```
+hydrapy fxhash patch.py --sdk fxhash.min.js     # patch_fxhash/: index.html, fxhash.min.js, upload.zip
+hydrapy render patch.py --fxhash oo… -o mint.png --fxparam density=0.3   # look at any mint from Python
+```
+
+* A draw goes wherever a signal goes: op arguments, signal arithmetic, NCA and physarum
+  parameters, `EntropyLock(mint, …)`. Python control flow on one (`if`, `range`, `float()`) would
+  freeze it, so it raises; `.preview` is this hash's value when freezing is what you want.
+* `pick` over chains, or `switch(index, *chains)`, compiles every branch and crossfades them with
+  weights that are exactly 0 or 1 — the cost is all branches together. With a moving index
+  (`switch(Lfo(0.05, lo=0, hi=2), a, b, c)`) it morphs.
+* fx(params): `number`, `boolean`, `select` (the option's index), `color` (`.r .g .b .a`); `update="sync"`
+  follows fxlens without reloading. Python previews use the default (or `params=` / `--fxparam`).
+* The page calls `$fx.preview()` once it has run `preview` seconds (default 2). fxhash needs the
+  SDK file in the project: `npx fxhash create` writes one, or `npm pack @fxhash/project-sdk` and take
+  `package/dist/fxhash.min.js`. Without it the page uses a stand-in `$fx` that reads `?fxhash=`
+  — enough to look at, not for fxlens or uploading. Everything else is inlined.
+* `to_html` pages replay a Mint too: `?fxhash=` picks the mint, and the n key jumps to a fresh one.
+* A patch that waits for a click (audio, the drawn soundtrack, a camera) can't be captured by
+  fxhash; the export warns. `patches/34_fxhash.py` is a complete piece.
+
 ## Layout
 
 ```
@@ -713,14 +918,21 @@ hydrapy/ops_3d.py      plane3d sphere3d cylinder3d
 hydrapy/ops_glitch.py  tear, shred (entropy-locked glitch feedback)
 hydrapy/ops_video.py   psort ruttetra contours sinefold bits shear · yiq linejitter headswitch dropouts ringing · filmstock gate
 hydrapy/ops_stroke.py  harmonograph wave arc dab charcoal smear · halftone boil polarRepeat
+hydrapy/nca.py         neural cellular automata: NCA texture, NumPy/GLSL steppers
+hydrapy/nca_train.py   train an NCA from one image (PyTorch)
+hydrapy/vector.py      paths, Harmonograph/Rose/Contours, XY beam out, plotter SVG, streamlines
+hydrapy/ops_marble.py  inkdrop tine swirl ripple disc (mathematical marbling)
+hydrapy/physarum.py    Physarum agents (NumPy, GL, WebGL2)
+hydrapy/analysis.py    Beats (beat tracking, onsets), Flow (optical flow)
+hydrapy/mint.py        Mint: per-mint draws, fx(params) and features replayed in the page; switch()
 hydrapy/drawing.py     Text, Lines (SVG flattener), plant()/meadow(), to_svg()
 hydrapy/recipes.py     handpainted(), mothlight(), film(), vhs(), super8(), studie(), cutout()
 hydrapy/live.py        CvIn/CvOut, OscIn/OscOut, Midi, Link, Probe, Soundtrack (drawn sound), per-frame hooks
 hydrapy/synth.py       image quilting, Quilt frame bank
-hydrapy/export.py      GIF/MP4/PNG/ANSI, Hydra JS, Python, standalone HTML runtime
+hydrapy/export.py      GIF/MP4/PNG/ANSI, Hydra JS, Python, standalone HTML runtime, fxhash projects
 hydrapy/hydra_import.py Hydra JS -> patch
 hydrapy/cli.py
-patches/               examples (00–25)
+patches/               examples (00–34); patches/models/ holds trained NCA rules
 docs/tour.py           renders docs/tour.mp4, the feature tour
 docs/optable.py        regenerates the op reference below from the registry
 tests/                 ~400 tests incl. CPU/GPU parity for every op

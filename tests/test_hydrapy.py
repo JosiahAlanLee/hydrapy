@@ -391,11 +391,28 @@ def test_cvfile_and_cvout_roundtrip(tmp_path):
 # --- entropy locking -------------------------------------------------------------------------
 
 def test_fx_matches_fxhash_sfc32_bit_for_bit():
-    # expected values come from the fxhash snippet run in node for this hash
-    fx = Fx("ooQ2j7x9KmN3pRtVwYz5AbCdEfGhJkLmNpQrStUvWxYz1234567")
+    # expected values come from the 2021 fxrand() snippet run in node for this hash
+    fx = Fx("ooQ2j7x9KmN3pRtVwYz5AbCdEfGhJkLmNpQrStUvWxYz1234567", legacy=True)
     expected = [0.66925048828125, 0.01876902603544295, 0.2789015178568661, 0.4374880369286984,
                 0.4301606831140816, 0.6958099333569407, 0.3829852268099785, 0.7686102406587452]
     assert [fx.rand() for _ in range(8)] == expected
+
+
+def test_fx_matches_the_fxhash_project_sdk():
+    # $fx.rand() from @fxhash/project-sdk 0.0.17 (dist/fxhash.min.js) with ?fxhash=<hash>, run in node
+    expected = {
+        "ooQ2j7x9KmN3pRtVwYz5AbCdEfGhJkLmNpQrStUvWxYz1234567":
+            [0.048488462110981345, 0.7305173503700644, 0.6664658468216658, 0.490762609988451],
+        "0x3f1a5c0e0d6b2a99887766554433221100ffeeddccbbaa998877665544332211":
+            [0.8978666930925101, 0.8322722127195448, 0.7598719340749085, 0.7777691385708749],
+        "3f1a5c0e0d6b2a99887766554433221100ffeeddccbbaa998877665544332211":
+            [0.5148867010138929, 0.4338844979647547, 0.5572817819193006, 0.6722511269617826],
+        "tz1VSUr8wwNhLAzempoch5d6hLRiTh8Cjcjb":
+            [0.7786013532895595, 0.962840897962451, 0.017749151913449168, 0.9952561378013343],
+    }
+    for h, vals in expected.items():
+        fx = Fx(h)
+        assert [fx.rand() for _ in range(4)] == vals, h
 
 
 def test_entropy_lock_recurs():

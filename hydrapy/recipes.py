@@ -22,6 +22,7 @@ from typing import Optional, Sequence
 from . import (Chain, Clock, Decay, Drift, Env, Lfo, Output, SH, Seq, Signal, Time, arc, crackle, drops, dust, fbm, harmonograph, scratches,
                set_frame_rate, solid, src, veins, wave)
 from . import dropouts as _dropouts, gate as _gate
+from . import disc as _disc
 
 
 def _offset(seed, k: float):
@@ -250,3 +251,54 @@ def cutout(chain: Chain, levels: float = 3, paper: float = 0.35, boil: float = 0
         out = solid(0, 0, 0).over(out.charcoal(paper, 1.0, 60, seed + 1))   # the tooth lives in alpha: flatten it
     out = out.filmstock(stock, 0.6)
     return out.grain(0.035, fps, 2).vignette(0.25, 0.7)
+
+
+# -----------------------------------------------------------------------------
+# marbling: a chain is the history of the bath (see hydrapy/ops_marble.py)
+# -----------------------------------------------------------------------------
+
+def floating_drops(base: Chain, drops) -> Chain:
+    """Drop ink onto a floating pattern, in order: ``drops`` is a sequence of ``(x, y, radius, colour)``;
+    each drop pushes everything before it aside.  ``colour`` None is a drop of clear water (in
+    suminagashi, water with a little surfactant: it opens a pale ring)."""
+    out = base
+    for x, y, r, col in drops:
+        out = out.inkdrop(x, y, r)
+        d = _disc(x, y, r, 0.0015)
+        out = out.layer(d.color(*col) if col is not None else base.alpha(d.a()))   # water: the bare bath shows
+    return out
+
+
+def suminagashi(base: Optional[Chain] = None, centres=((0.42, 0.5), (0.6, 0.56)), rings: int = 9, radius: float = 0.045,
+                inks=((0.07, 0.07, 0.1), None, (0.16, 0.2, 0.42), None)) -> Chain:
+    """Concentric rings of sumi ink from pipettes at ``centres``, touched in turn; each pipette
+    cycles through ``inks`` (None = clear water)."""
+    base = base if base is not None else solid(0.93, 0.9, 0.82)
+    drops = []
+    for i in range(int(rings)):
+        for j, (x, y) in enumerate(centres):
+            drops.append((x, y, radius, inks[(i + j) % len(inks)]))
+    return floating_drops(base, drops)
+
+
+def bands(colours=((0.13, 0.2, 0.42), (0.9, 0.85, 0.72), (0.65, 0.16, 0.12), (0.85, 0.65, 0.22), (0.9, 0.85, 0.72)),
+          repeats: int = 3) -> Chain:
+    """Horizontal bands of colour laid on the bath (the start of gel-git and other combed patterns)."""
+    from . import gradient
+    n = len(colours)
+    out = solid(*colours[0])
+    for k in range(1, n):
+        out = out.layer(solid(*colours[k]).alpha(gradient().g().thresh(k / n, 0.0005)))
+    return out.repeatY(repeats) if repeats > 1 else out
+
+
+def ebru_stones(base: Optional[Chain] = None, n: int = 28, seed: int = 0, sizes=(0.05, 0.13),
+                palette=((0.62, 0.12, 0.1), (0.12, 0.22, 0.45), (0.85, 0.66, 0.2), (0.12, 0.35, 0.25), (0.9, 0.85, 0.75))) -> Chain:
+    """Battal ebru: ``n`` drops of ``palette`` scattered over the bath, each squeezing the ones
+    before it into stones."""
+    import numpy as _np
+    rng = _np.random.default_rng(seed)
+    base = base if base is not None else solid(0.9, 0.86, 0.78)
+    drops = [(float(rng.uniform(0.05, 0.95)), float(rng.uniform(0.05, 0.95)), float(rng.uniform(*sizes)),
+              palette[int(rng.integers(len(palette)))]) for _ in range(int(n))]
+    return floating_drops(base, drops)

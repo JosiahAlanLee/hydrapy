@@ -83,10 +83,11 @@ def _mux_audio(video: str, audio, path: str):
             audio.wav(tmp.name)
         else:
             samples, sr = audio
+            samples = np.asarray(samples, dtype=np.float64)
             tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False); tmp.close()
-            with wave.open(tmp.name, "wb") as wf:
-                wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(int(sr))
-                wf.writeframes((np.clip(np.asarray(samples), -1, 1) * 32767).astype("<i2").tobytes())
+            with wave.open(tmp.name, "wb") as wf:                     # (n,) mono or (n, k) interleaved
+                wf.setnchannels(1 if samples.ndim == 1 else samples.shape[1]); wf.setsampwidth(2); wf.setframerate(int(sr))
+                wf.writeframes((np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes())
         wav = tmp.name
     try:
         import imageio_ffmpeg
@@ -239,7 +240,7 @@ def _needs_helpers(chain: Chain) -> bool:
             if isinstance(a, Chain) and _needs_helpers(a):
                 return True
             if isinstance(a, Signal) and not isinstance(a, Seq):
-                if any(h in a.js() for h in ("__fract", "__hash11", "__smoothstep", "__drift", "__env", "__table", "__seq")):
+                if any(h in a.js() for h in ("__fract", "__hash11", "__smoothstep", "__drift", "__env", "__table", "__seq", "__fx")):
                     return True
             elif callable(a) and not isinstance(a, (Signal, Chain, Texture)):
                 return False
@@ -299,6 +300,8 @@ def _py_native_signal(a):
     """hydrapy's own signals written back as their constructors (None for anything else)."""
     from .signals import SH, Clock, Const, Decay, Drift, Env, Expr, Fn1, Lfo, Mouse, Time
     g = lambda v: f"{float(v):g}"
+    if type(a).__name__ in ("FxDraw", "FxParam"):           # a Mint draw: this hash's value
+        return g(a.preview)
     if isinstance(a, Const):
         return g(a.v)
     if isinstance(a, Time):
@@ -401,6 +404,25 @@ def _png_data_url(arr_uint8) -> str:
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
 
+def _nca_specs(programs, precision="highp"):
+    from .nca import NCA, VIEW_GLSL, shader_header, step_glsl
+    seen, out = set(), []
+    for prog in programs:
+        for u in prog.sampler_uniforms:
+            ref = u.source
+            if isinstance(ref, NCA) and ref.name not in seen:
+                seen.add(ref.name)
+                head = shader_header(precision)
+                out.append({"name": ref.name, "w": ref.size[0], "h": ref.size[1], "textures": ref.model.textures,
+                            "speed": ref.speed, "maxSteps": ref.max_steps, "seed": ref.seed, "filter": ref.filter,
+                            "steps": [head + step_glsl(ref.model, k) for k in range(ref.model.textures)],
+                            "view": head + VIEW_GLSL,
+                            "damage": ref.damage.name if ref.damage is not None else None,
+                            "paint": ref.paint.name if ref.paint is not None else None,
+                            "rate": ref.rate.js(), "perturb": ref.perturb.js(), "paintAmount": ref.paint_amount.js()})
+    return out
+
+
 def _collect_media(programs):
     images, videos, cameras, audios, banks = {}, {}, set(), [], {}
 
@@ -434,8 +456,24 @@ def _collect_media(programs):
     return images, videos, sorted(cameras), audios, banks
 
 
+def _mint_spec(programs, mint=None, preview_at=None):
+    from .mint import find_mints
+    objs = [mint] if mint is not None else []
+    for prog in programs:
+        objs += [u.source for u in prog.float_uniforms]
+        objs += [u.source for u in prog.sampler_uniforms if not isinstance(u.source, DelayRef)]
+    mints = find_mints(objs)
+    if len(mints) > 1:
+        raise ValueError("one Mint per patch: the page has one hash")
+    if not mints:
+        return None
+    spec = mints[0].spec()
+    spec["previewAt"] = preview_at
+    return spec
+
+
 def build_spec(patch: Optional[Patch] = None, pixel_ratio: float = 1.0, size: Optional[tuple] = None,
-               precision: str = "highp") -> dict:
+               precision: str = "highp", mint=None, preview_at: Optional[float] = None) -> dict:
     """Everything the JS runtime needs, as plain data (what the HTML export embeds as ``SPEC``)."""
     patch = patch or default_patch()
     programs = compile_patch(patch, precision=precision)
@@ -461,6 +499,12 @@ def build_spec(patch: Optional[Patch] = None, pixel_ratio: float = 1.0, size: Op
     for prog in programs:
         for k, v in prog.history.items():
             history[k] = max(history.get(k, 0), v)
+    ncas = _nca_specs(programs, precision)
+    sims = []
+    for prog in programs:
+        for u in prog.sampler_uniforms:
+            if hasattr(u.source, "gl_step") and hasattr(u.source, "spec") and u.source.name not in [x["name"] for x in sims]:
+                sims.append(u.source.spec(precision))
     return {
         "display": patch.display.name,
         "bpm": patch.bpm,
@@ -473,10 +517,13 @@ def build_spec(patch: Optional[Patch] = None, pixel_ratio: float = 1.0, size: Op
         "images": images,
         "videos": videos,
         "banks": banks,
+        "ncas": ncas,
+        "physarum": sims,
         "cameras": cameras,
         "audio": audio,
         "pixelRatio": pixel_ratio,
         "size": list(size) if size else None,
+        "mint": _mint_spec(programs, mint, preview_at),
         "hydra": _try_hydra(patch),
     }
 
@@ -492,16 +539,74 @@ def spec_json(spec: dict) -> str:
     return json.dumps(spec).replace("</", "<\\/")
 
 
+_HUD = '<div id="hud">hydrapy &middot; 1-4: output &middot; s: save png &middot; f: fullscreen &middot; space: pause</div>'
+
+
+def _page(spec: dict, title: str, head: str = "", hud: bool = True) -> str:
+    from .mint import MINT_JS
+    return (_HTML_TEMPLATE.replace("__TITLE__", title).replace("__HEAD__", head).replace("__HUD__", _HUD if hud else "")
+            .replace("__HELPERS__", JS_HELPERS).replace("__SPEC__", spec_json(spec)).replace("__MINT__", MINT_JS)
+            .replace("__RUNTIME__", RUNTIME_JS))
+
+
 def to_html(patch: Optional[Patch] = None, path: Optional[str] = None, title: str = "hydrapy",
             pixel_ratio: float = 1.0, size: Optional[tuple] = None, precision: str = "highp") -> str:
-    """Compile the patch to a standalone HTML page (WebGL2 with WebGL1 fallback) and optionally write it."""
+    """Compile the patch to a standalone HTML page (WebGL2 with WebGL1 fallback) and optionally write it.
+
+    A patch with a ``Mint`` replays its draws from ``?fxhash=`` in the page's URL (default: the
+    preview hash); press n for another mint."""
     spec = build_spec(patch, pixel_ratio=pixel_ratio, size=size, precision=precision)
-    html = (_HTML_TEMPLATE.replace("__TITLE__", title).replace("__HELPERS__", JS_HELPERS)
-            .replace("__SPEC__", spec_json(spec)).replace("__RUNTIME__", RUNTIME_JS))
+    html = _page(spec, title)
     if path:
         with open(path, "w", encoding="utf-8") as f:
             f.write(html)
     return html
+
+
+def to_fxhash(patch: Optional[Patch] = None, folder: str = "fxhash", sdk: Optional[str] = None,
+              preview: Optional[float] = 2.0, title: str = "hydrapy", pixel_ratio: float = 1.0,
+              size: Optional[tuple] = None, precision: str = "highp", zip: bool = True, mint=None) -> dict:
+    """An fxhash project: ``folder/index.html`` (+ ``fxhash.min.js``) and ``folder/upload.zip``.
+
+    The patch's ``Mint`` (if any) draws from ``$fx.hash``, declares its fx(params) and sets its
+    features at load; ``$fx.preview()`` fires once the page has run ``preview`` seconds.  ``sdk`` is
+    a path to the SDK's ``fxhash.min.js`` (from ``npx fxhash create``, or ``npm pack
+    @fxhash/project-sdk`` → ``package/dist/fxhash.min.js``); without it the page uses a stand-in
+    that reads ``?fxhash=``, fine for looking but not for fxlens or uploading.  Everything else is
+    inlined, as fxhash requires (no network, relative paths only).
+    """
+    import shutil
+    import warnings
+    import zipfile
+    spec = build_spec(patch, pixel_ratio=pixel_ratio, size=size, precision=precision, mint=mint, preview_at=preview)
+    if spec["audio"] or spec["soundtrack"] or spec["cameras"]:
+        warnings.warn("this patch waits for a click (audio, soundtrack or camera): fxhash's capture can't click, "
+                      "so previews will show the start overlay", stacklevel=2)
+    if spec["mint"] is None:
+        warnings.warn("no Mint in this patch: every edition will look the same", stacklevel=2)
+    os.makedirs(folder, exist_ok=True)
+    sdk_dst = os.path.join(folder, "fxhash.min.js")
+    if sdk:
+        shutil.copyfile(sdk, sdk_dst)
+    elif not os.path.exists(sdk_dst):
+        warnings.warn("no fxhash.min.js: the page runs on a stand-in for $fx; pass sdk= (or --sdk) before "
+                      "using fxlens or uploading", stacklevel=2)
+    from .mint import FX_SHIM_JS
+    head = '<script src="./fxhash.min.js"></script>\n<script>' + FX_SHIM_JS + "</script>"
+    index = os.path.join(folder, "index.html")
+    with open(index, "w", encoding="utf-8") as f:
+        f.write(_page(spec, title, head=head, hud=False))
+    out = {"index": index, "zip": None, "mint": spec["mint"]}
+    if zip:
+        zpath = os.path.join(folder, "upload.zip")
+        with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
+            z.write(index, "index.html")
+            if os.path.exists(sdk_dst):
+                z.write(sdk_dst, "fxhash.min.js")
+        if os.path.getsize(zpath) > 15 * 1024 * 1024:
+            warnings.warn("upload.zip is over fxhash's 15 MB limit", stacklevel=2)
+        out["zip"] = zpath
+    return out
 
 
 _HTML_TEMPLATE = r"""<!doctype html>
@@ -510,6 +615,7 @@ _HTML_TEMPLATE = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__TITLE__</title>
+__HEAD__
 <style>
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
   canvas { display: block; width: 100%; height: 100%; }
@@ -524,10 +630,11 @@ _HTML_TEMPLATE = r"""<!doctype html>
 <canvas id="c"></canvas>
 <pre id="err"></pre>
 <div id="overlay" style="display:none">click to start</div>
-<div id="hud">hydrapy &middot; 1-4: output &middot; s: save png &middot; f: fullscreen &middot; space: pause</div>
+__HUD__
 <script>
 __HELPERS__
 var SPEC = __SPEC__;
+__MINT__
 __RUNTIME__
 </script>
 </body>
@@ -772,9 +879,175 @@ RUNTIME_JS = AUDIO_HELPERS_JS + r"""(function(){
     if (cfg.mode === 'random') return ((Math.floor(__hash11(k + cfg.seed * 131.0) * n)) % n + n) % n;
     return ((k % n) + n) % n;
   }
+  // neural cellular automata: fixed-size float state, stepped before the outputs when a frame is drawn
+  var ncas = {};
+  (SPEC.ncas || []).forEach(function(cfg){
+    if (!(isGL2 && floatOK)) { fail('NCA ' + cfg.name + ' needs WebGL2 float render targets'); return; }
+    function stateFBO(){
+      var t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, cfg.w, cfg.h, 0, gl.RGBA, gl.FLOAT, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+      var fb = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+      gl.clearColor(0,0,0,0); gl.clear(gl.COLOR_BUFFER_BIT); gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      return {tex: t, fb: fb};
+    }
+    function fn(js){ try { return new Function('time','bpm','__mx','__my','__fft','__vol','__flux','dt', 'return (' + js + ');'); } catch (e) { fail('nca signal: ' + e); return function(){ return 0; }; } }
+    var names = ['res','stepIndex','rate','perturb','seed','paintAmount','damageOn','paintOn','damage','paint'];
+    for (var t = 0; t < cfg.textures; t++) names.push('s' + t);
+    var steps = cfg.steps.map(function(src){
+      var prog = program(src), locs = {};
+      if (prog) names.forEach(function(n){ locs[n] = gl.getUniformLocation(prog, n); });
+      return {prog: prog, locs: locs};
+    });
+    var view = program(cfg.view);
+    var sets = [0, 1].map(function(){ var a = []; for (var t = 0; t < cfg.textures; t++) a.push(stateFBO()); return a; });
+    var out = makeFBO(cfg.w, cfg.h);
+    if (cfg.filter === 'nearest') { gl.bindTexture(gl.TEXTURE_2D, out.tex); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST); }
+    ncas[cfg.name] = {cfg: cfg, steps: steps, view: view, viewLocs: view ? {s0: gl.getUniformLocation(view, 's0'), res: gl.getUniformLocation(view, 'res')} : {},
+                      sets: sets, cur: 0, out: out, stepIndex: 0, target: null,
+                      rate: fn(cfg.rate), perturb: fn(cfg.perturb), paintAmount: fn(cfg.paintAmount)};
+  });
+  function clearSets(n){ n.sets.forEach(function(a){ a.forEach(function(s){ gl.bindFramebuffer(gl.FRAMEBUFFER, s.fb); gl.clearColor(0,0,0,0); gl.clear(gl.COLOR_BUFFER_BIT); }); }); }
+  function stepNcas(time, dt){
+    Object.keys(ncas).forEach(function(name){
+      var n = ncas[name], cfg = n.cfg, k = Math.floor(time * cfg.speed + 1e-9), count;
+      if (n.target === null || k < n.target) {             // first frame, or time went back: start over
+        if (n.target !== null) { clearSets(n); n.stepIndex = 0; n.cur = 0; }
+        n.target = k; count = n.stepIndex === 0 ? 1 : 0;
+      } else { count = Math.min(k - n.target, cfg.maxSteps); n.target = k; }
+      var args = [time, SPEC.bpm, mx, my, fft, vol, flux, dt];
+      var rate = n.rate.apply(null, args), perturb = n.perturb.apply(null, args), amount = n.paintAmount.apply(null, args);
+      var T = cfg.textures;
+      var dmg = cfg.damage ? outs[cfg.damage].ring[0].tex : null, pnt = cfg.paint ? outs[cfg.paint].ring[0].tex : null;
+      gl.viewport(0, 0, cfg.w, cfg.h);
+      for (var i = 0; i < count; i++) {
+        var cur = n.sets[n.cur], nxt = n.sets[1 - n.cur];
+        n.steps.forEach(function(st, kk){
+          if (!st.prog) return;
+          gl.bindFramebuffer(gl.FRAMEBUFFER, nxt[kk].fb);
+          gl.useProgram(st.prog);
+          for (var t = 0; t < T; t++) { gl.activeTexture(gl.TEXTURE0 + t); gl.bindTexture(gl.TEXTURE_2D, cur[t].tex); gl.uniform1i(st.locs['s' + t], t); }
+          gl.activeTexture(gl.TEXTURE0 + T); gl.bindTexture(gl.TEXTURE_2D, dmg); gl.uniform1i(st.locs.damage, T);
+          gl.activeTexture(gl.TEXTURE0 + T + 1); gl.bindTexture(gl.TEXTURE_2D, pnt); gl.uniform1i(st.locs.paint, T + 1);
+          gl.uniform2f(st.locs.res, cfg.w, cfg.h);
+          gl.uniform1f(st.locs.stepIndex, n.stepIndex);
+          gl.uniform1f(st.locs.rate, rate); gl.uniform1f(st.locs.perturb, perturb); gl.uniform1f(st.locs.seed, cfg.seed);
+          gl.uniform1f(st.locs.paintAmount, amount);
+          gl.uniform1f(st.locs.damageOn, dmg ? 1 : 0); gl.uniform1f(st.locs.paintOn, pnt ? 1 : 0);
+          gl.drawArrays(gl.TRIANGLES, 0, 3);
+        });
+        n.cur = 1 - n.cur; n.stepIndex++;
+      }
+      if (n.view) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, n.out.fb);
+        gl.useProgram(n.view);
+        gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, n.sets[n.cur][0].tex);
+        gl.uniform1i(n.viewLocs.s0, 0); gl.uniform2f(n.viewLocs.res, cfg.w, cfg.h);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+      }
+    });
+    gl.viewport(0, 0, W, H);
+  }
+
+  // physarum: agents in a float texture, deposited as points (a WebGL2 / GLSL ES 3.00 pass), trail diffused
+  var sims = {};
+  (SPEC.physarum || []).forEach(function(cfg){
+    if (!(isGL2 && floatOK)) { fail('Physarum ' + cfg.name + ' needs WebGL2 float render targets'); return; }
+    function fbo32(w, h){
+      var t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, w, h, 0, gl.RGBA, gl.FLOAT, null);
+      [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER].forEach(function(p){ gl.texParameteri(gl.TEXTURE_2D, p, gl.NEAREST); });
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+      var fb = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+      gl.clearColor(0,0,0,0); gl.clear(gl.COLOR_BUFFER_BIT); gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      return {tex: t, fb: fb};
+    }
+    function prog2(vs, fs){
+      var p = gl.createProgram(), v = shader(gl.VERTEX_SHADER, vs), f = shader(gl.FRAGMENT_SHADER, fs);
+      if (!v || !f) return null;
+      gl.attachShader(p, v); gl.attachShader(p, f); gl.linkProgram(p);
+      if (!gl.getProgramParameter(p, gl.LINK_STATUS)) { fail(gl.getProgramInfoLog(p)); return null; }
+      return p;
+    }
+    function locs(p, names){ var o = {}; names.forEach(function(n){ o[n] = p ? gl.getUniformLocation(p, n) : null; }); return o; }
+    var params = {};
+    Object.keys(cfg.params).forEach(function(k){ try { params[k] = new Function('time','bpm','__mx','__my','__fft','__vol','__flux','dt', 'return (' + cfg.params[k] + ');'); } catch (e) { fail('physarum ' + k + ': ' + e); params[k] = function(){ return 0; }; } });
+    var s = {cfg: cfg, params: params, init: program(cfg.init), update: program(cfg.update), diffuse: program(cfg.diffuse),
+             view: program(cfg.view), deposit: prog2(cfg.depositVert, cfg.depositFrag),
+             agents: [fbo32(cfg.aw, cfg.ah), fbo32(cfg.aw, cfg.ah)], trail: [makeFBO(cfg.w, cfg.h), makeFBO(cfg.w, cfg.h)],
+             out: makeFBO(cfg.w, cfg.h), a: 0, t: 0, stepIndex: 0, target: null, fresh: true};
+    s.uInit = locs(s.init, ['seed']);
+    s.uUpdate = locs(s.update, ['agents','trail','food','stepIndex','seed','sensorAngle','sensorDistance','turn','stepSize','foodWeight','foodOn']);
+    s.uDiffuse = locs(s.diffuse, ['trail','decay','diffuse']);
+    s.uView = locs(s.view, ['trail','exposure']);
+    s.uDeposit = locs(s.deposit, ['agents','amount']);
+    sims[cfg.name] = s;
+  });
+  function stepSims(time, dt){
+    Object.keys(sims).forEach(function(name){
+      var s = sims[name], cfg = s.cfg, k = Math.floor(time * cfg.speed + 1e-9), count;
+      if (s.target === null || k < s.target) {
+        if (s.target !== null) { s.stepIndex = 0; s.fresh = true; }
+        s.target = k; count = s.stepIndex === 0 ? 1 : 0;
+      } else { count = Math.min(k - s.target, cfg.maxSteps); s.target = k; }
+      var args = [time, SPEC.bpm, mx, my, fft, vol, flux, dt], p = {};
+      Object.keys(s.params).forEach(function(n){ p[n] = s.params[n].apply(null, args); });
+      if (s.fresh) {
+        s.trail.forEach(function(t){ gl.bindFramebuffer(gl.FRAMEBUFFER, t.fb); gl.clearColor(0,0,0,0); gl.clear(gl.COLOR_BUFFER_BIT); });
+        gl.bindFramebuffer(gl.FRAMEBUFFER, s.agents[s.a].fb); gl.viewport(0, 0, cfg.aw, cfg.ah);
+        gl.useProgram(s.init); gl.uniform1f(s.uInit.seed, cfg.seed); gl.drawArrays(gl.TRIANGLES, 0, 3);
+        s.fresh = false;
+      }
+      var food = cfg.food ? outs[cfg.food].ring[0].tex : null;
+      for (var i = 0; i < count; i++) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, s.agents[1 - s.a].fb); gl.viewport(0, 0, cfg.aw, cfg.ah);
+        gl.useProgram(s.update);
+        gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, s.agents[s.a].tex); gl.uniform1i(s.uUpdate.agents, 0);
+        gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, s.trail[s.t].tex); gl.uniform1i(s.uUpdate.trail, 1);
+        gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, food); gl.uniform1i(s.uUpdate.food, 2);
+        gl.uniform1f(s.uUpdate.stepIndex, s.stepIndex); gl.uniform1f(s.uUpdate.seed, cfg.seed);
+        gl.uniform1f(s.uUpdate.sensorAngle, p.sensor_angle); gl.uniform1f(s.uUpdate.sensorDistance, p.sensor_distance);
+        gl.uniform1f(s.uUpdate.turn, p.turn); gl.uniform1f(s.uUpdate.stepSize, p.step);
+        gl.uniform1f(s.uUpdate.foodWeight, p.food_weight); gl.uniform1f(s.uUpdate.foodOn, food ? 1 : 0);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+        s.a = 1 - s.a;
+        if (s.deposit) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, s.trail[s.t].fb); gl.viewport(0, 0, cfg.w, cfg.h);
+          gl.useProgram(s.deposit);
+          gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, s.agents[s.a].tex); gl.uniform1i(s.uDeposit.agents, 0);
+          gl.uniform1f(s.uDeposit.amount, p.deposit);
+          gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE);
+          gl.disableVertexAttribArray(0);
+          gl.drawArrays(gl.POINTS, 0, cfg.aw * cfg.ah);
+          gl.enableVertexAttribArray(0);
+          gl.disable(gl.BLEND);
+        }
+        gl.bindFramebuffer(gl.FRAMEBUFFER, s.trail[1 - s.t].fb); gl.viewport(0, 0, cfg.w, cfg.h);
+        gl.useProgram(s.diffuse);
+        gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, s.trail[s.t].tex); gl.uniform1i(s.uDiffuse.trail, 0);
+        gl.uniform1f(s.uDiffuse.decay, p.decay); gl.uniform1f(s.uDiffuse.diffuse, p.diffuse);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+        s.t = 1 - s.t; s.stepIndex++;
+      }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, s.out.fb); gl.viewport(0, 0, cfg.w, cfg.h);
+      gl.useProgram(s.view);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, s.trail[s.t].tex); gl.uniform1i(s.uView.trail, 0);
+      gl.uniform1f(s.uView.exposure, p.exposure);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    });
+    gl.viewport(0, 0, W, H);
+  }
+
   function bindRef(ref, delay){
     if (outs[ref]) { var ring = outs[ref].ring; return ring[Math.min(delay || 0, ring.length - 2)].tex; }
     if (tmps[ref]) return tmps[ref].tex;
+    if (ncas[ref]) return ncas[ref].out.tex;
+    if (sims[ref]) return sims[ref].out.tex;
     if (media[ref]) {
       var m = media[ref];
       if (m.kind === 'bank') return m.texs[bankIndex(m.cfg, m.texs.length, curTime)];
@@ -797,8 +1070,11 @@ RUNTIME_JS = AUDIO_HELPERS_JS + r"""(function(){
     // only the displayed output and what it samples (transitively) need rendering this frame
     var needed = {}; var stack = [SPEC.display];
     if (SPEC.soundtrack) stack.push(SPEC.soundtrack.output);
+    (SPEC.ncas || []).forEach(function(c){ if (c.damage) stack.push(c.damage); if (c.paint) stack.push(c.paint); });
+    (SPEC.physarum || []).forEach(function(c){ if (c.food) stack.push(c.food); });
     while (stack.length) { var nm = stack.pop(); if (needed[nm]) continue; needed[nm] = true;
       outputs.forEach(function(o){ if (o.name === nm) o.samplers.forEach(function(s){ if (/^o[0-3]$/.test(s.ref) && !needed[s.ref]) stack.push(s.ref); }); }); }
+    if (draw) { stepNcas(time, dt); stepSims(time, dt); }
     if (draw) outputs.forEach(function(o){
       if (!needed[o.name]) return;
       var vals = o.floats.map(function(f){ var v = f.fn(time, SPEC.bpm, mx, my, fft, vol, flux, dt); return isFinite(v) ? v : 0; });
@@ -832,6 +1108,7 @@ RUNTIME_JS = AUDIO_HELPERS_JS + r"""(function(){
     gl.uniform1i(copyLocs.tex, 0);
     gl.uniform2f(copyLocs.resolution, W, H);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
+    if (draw && typeof hydrapyAfterFrame === 'function') hydrapyAfterFrame(time);
   }
 
   // the optical soundtrack: a strip of an output, read top to bottom once per 1/fps, is the waveform

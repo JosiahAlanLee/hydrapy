@@ -18,7 +18,8 @@ Paint:    stain alpha drops crackle veins scratches dust pan  (hydrapy.recipes: 
 Textures: src(o0) prev() delay(o0, k) Image Video Camera Bank Quilt Text Lines
 Signals:  Lfo Seq Clock Env SH Drift Mouse Time Fn Fft Audio
 Live:     CvIn CvOut (ES-6/ES-3 or any DC-coupled interface)  OscIn OscOut  Midi  Link  Probe  Soundtrack (drawn sound)
-Glitch:   Fx (fxhash sfc32, entropy locking)  EntropyLock  tear  shred
+Glitch:   Fx (fxhash's $fx.rand, entropy locking)  EntropyLock  tear  shred
+Mint:     Mint (draws/params/features per mint in the page)  switch  to_fxhash
 Video:    psort ruttetra contours sinefold bits shear  ·  yiq linejitter headswitch dropouts ringing
           filmstock gate grain(size) set_frame_rate  (hydrapy.recipes: vhs super8)
 Strokes:  harmonograph wave arc dab charcoal smear  ·  halftone boil polarRepeat  (hydrapy.recipes: studie cutout)
@@ -31,12 +32,18 @@ from . import ops_3d as _ops_3d  # noqa: F401  (plane/sphere/cylinder)
 from . import ops_glitch as _ops_glitch  # noqa: F401  (tear/shred)
 from . import ops_video as _ops_video  # noqa: F401  (psort/ruttetra/contours/bits/yiq/linejitter/...)
 from . import ops_stroke as _ops_stroke  # noqa: F401  (harmonograph/wave/arc/dab/charcoal/smear/halftone/boil/polarRepeat)
+from . import ops_marble as _ops_marble  # noqa: F401  (inkdrop/tine/swirl/ripple/disc)
 from .core import (REGISTRY, Bank, Camera, Chain, Ctx, External, Image, Input, Op, Output, Patch, Texture, Transform, Video,
                    default_patch, normalize_args, reset_patch)
 from .synth import Quilt, quilt
+from .nca import NCA, NCAModel
+from .physarum import Physarum
+from .analysis import Beats, Flow
+from .vector import XY, Contours, Harmonograph, Lissajous, Paths, Rose, chain_contours, streamlines, to_plotter_svg
 from .drawing import Lines, Text, meadow, plant, to_svg
 from .live import (CvIn, CvOut, Link, LiveValue, Midi, MidiClock, OscIn, OscOut, Probe, Soundtrack, Transport, TrigPhase, audio_devices,
                    register_hook)
+from .mint import Mint, switch
 from .signals import SH, Audio, Clock, Const, Decay, Drift, EntropyLock, Env, Expr, Fft, Fn, Fx, Lfo, Mouse, Seq, Signal, Time, as_signal
 
 __version__ = "0.1.0"
@@ -134,7 +141,7 @@ def patch() -> Patch:
 # ---------------------------------------------------------------------------
 
 from .backend_np import Renderer, iter_frames, render_chain, render_frames  # noqa: E402
-from .export import (chain_to_hydra, patch_to_hydra, save_gif, save_mp4, save_png, to_ansi, to_html,  # noqa: E402
+from .export import (chain_to_hydra, patch_to_hydra, save_gif, save_mp4, save_png, to_ansi, to_fxhash, to_html,  # noqa: E402
                      to_image)
 from .glsl import compile_chain, compile_output, compile_patch  # noqa: E402
 from .hydra_import import from_hydra  # noqa: E402
@@ -168,11 +175,11 @@ def describe(name: str) -> str:
 __all__ = (
     list(_sources) + [
         "o0", "o1", "o2", "o3", "render", "hush", "set_bpm", "set_resolution", "set_frame_rate", "set_composite_alpha", "speed", "patch",
-        "Chain", "Patch", "Output", "Image", "Video", "Camera", "Bank", "Quilt", "quilt", "Text", "Lines", "plant", "meadow", "to_svg",
+        "Chain", "Patch", "Output", "Image", "Video", "Camera", "Bank", "Quilt", "quilt", "NCA", "NCAModel", "Physarum", "Beats", "Flow", "XY", "Contours", "Harmonograph", "Lissajous", "Paths", "Rose", "chain_contours", "streamlines", "to_plotter_svg", "Text", "Lines", "plant", "meadow", "to_svg",
         "CvIn", "CvOut", "Link", "LiveValue", "Midi", "MidiClock", "OscIn", "OscOut", "Probe", "Soundtrack", "Transport", "TrigPhase", "audio_devices", "register_hook", "Ctx", "reset_patch", "default_patch",
-        "Signal", "Lfo", "Seq", "Clock", "Env", "SH", "Decay", "Drift", "Mouse", "Time", "Fn", "Fx", "EntropyLock", "Fft", "Audio", "Const", "Expr", "External", "as_signal",
+        "Signal", "Lfo", "Seq", "Clock", "Env", "SH", "Decay", "Drift", "Mouse", "Time", "Fn", "Fx", "EntropyLock", "Mint", "switch", "Fft", "Audio", "Const", "Expr", "External", "as_signal",
         "Renderer", "iter_frames", "render_chain", "render_frames", "save_gif", "save_mp4", "save_png", "to_image", "to_ansi",
-        "to_html", "chain_to_hydra", "patch_to_hydra", "from_hydra",
+        "to_html", "to_fxhash", "chain_to_hydra", "patch_to_hydra", "from_hydra",
         "compile_chain", "compile_output", "compile_patch", "ops", "describe", "REGISTRY", "add_op", "Op", "Input",
     ]
 )

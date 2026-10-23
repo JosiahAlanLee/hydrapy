@@ -54,6 +54,10 @@ class Env:
         del ring[depth + 1:]
 
     def texture(self, ref: Texture) -> np.ndarray:
+        if hasattr(ref, "advance_np"):              # simulations: NCA, Physarum (stepped to this frame's time)
+            return ref.advance_np(self, self.time)
+        if hasattr(ref, "dynamic_array"):           # vector.XY phosphor preview, anything computed per frame in Python
+            return ref.dynamic_array(self.time)
         if isinstance(ref, DelayRef):
             return self.history(ref.output, ref.frames)
         if isinstance(ref, Output):
