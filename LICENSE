@@ -1,0 +1,10 @@
+hydrapy — a Python port of Hydra (https://hydra.ojack.xyz) by Olivia Jack and contributors.
+
+Hydra (hydra-synth) is released under the GNU Affero General Public License v3.0.
+The GLSL bodies of the Hydra ops in hydrapy/ops.py are transcribed from hydra-synth's
+glsl-functions.js and the NumPy twins reproduce them, so this port is a derivative work
+and is distributed under the same license: GNU AGPL v3.0 or later.
+Full text: https://www.gnu.org/licenses/agpl-3.0.txt
+
+The 3D simplex noise is the public-domain-style MIT-licensed implementation by
+Ian McEwan / Ashima Arts and Stefan Gustavson (webgl-noise), as used by Hydra.

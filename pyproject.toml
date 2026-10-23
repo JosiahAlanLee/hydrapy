@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hydrapy"
+version = "0.1.0"
+description = "Hydra's video synth as a Python library: CPU + GPU backends, CV-style signals, feedback/reaction-diffusion ops, HTML/Hydra export"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "AGPL-3.0-or-later" }
+dependencies = ["numpy>=1.24", "pillow>=9", "imageio>=2.30"]
+
+[project.optional-dependencies]
+gpu = ["moderngl>=5.8"]
+live = ["moderngl>=5.8", "glfw>=2.6"]
+video = ["imageio-ffmpeg>=0.4"]
+camera = ["opencv-python"]
+all = ["moderngl>=5.8", "glfw>=2.6", "imageio-ffmpeg>=0.4", "opencv-python"]
+test = ["pytest"]
+
+[project.scripts]
+hydrapy = "hydrapy.cli:main"
+
+[tool.setuptools]
+packages = ["hydrapy"]

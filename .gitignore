@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+*.gif
+!docs/*.gif
+*.mp4
+!docs/tour.mp4
+*.html
+!patches/*.html
+*.wav
+!patches/test.wav
+/patches/matter/
+/patches/texture.jpg
