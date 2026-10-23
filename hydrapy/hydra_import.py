@@ -17,7 +17,7 @@ import math
 import re
 from typing import Optional
 
-from .core import REGISTRY, Camera, Chain, Image, Output, Patch, Transform, Video, default_patch, normalize_args
+from .core import REGISTRY, Camera, Chain, External, Image, Output, Patch, Transform, Video, default_patch, normalize_args
 from .signals import Audio, Fft, Fn, Seq
 
 
@@ -251,9 +251,11 @@ class _Parser:
             self.sources[slot] = Image(args[0])
         elif method == "initVideo":
             self.sources[slot] = Video(args[0])
-        elif method == "initScreen":
-            raise HydraSyntaxError("initScreen() has no equivalent here")
-        # clear()/init with other args: ignore
+        elif method in ("initScreen", "init"):
+            # a p5 canvas, the screen, a stream: nothing to read offline. A black placeholder you can swap
+            # for an Image/Video/Bank, or, for the p5 "hydra canvas on a plane" loop, src(oN).plane3d(...)
+            self.sources[slot] = External(slot, note=f"{slot}.{method}({', '.join(args)})")
+        # clear() and the rest: ignore
 
     def get_audio(self) -> Audio:
         if self.audio is None:
@@ -361,8 +363,8 @@ class _Parser:
                 return self.output(name)
             if re.fullmatch(r"s[0-3]", stripped):
                 self.i = m.end()
-                if name not in self.sources:
-                    raise HydraSyntaxError(f"{name} is used before {name}.initCam()/initImage()/initVideo()")
+                if name not in self.sources:   # init may come later in the file (p5's setup()); placeholder for now
+                    self.sources[name] = External(name, note=f"{name} used before init")
                 return self.sources[name]
             # audio expression without an arrow (Hydra would evaluate it once; we keep it live)
             if "a.fft[" in stripped:
@@ -445,11 +447,61 @@ class _Parser:
         return seq
 
 
-def from_hydra(src: str, patch: Optional[Patch] = None) -> Patch:
-    """Parse a Hydra sketch into a Patch (the default patch unless one is given)."""
+_HYDRA_START = re.compile(r"^\s*(?:render\s*\(|bpm\s*=|speed\s*=|s[0-3]\.|a\.(?:set|fft)|(?:%s)\s*\()" % "|".join(
+    sorted((n for n, o in REGISTRY.items() if o.kind == "src"), key=len, reverse=True)))
+
+
+def hydra_statements(src: str) -> list[str]:
+    """Split a JS file into the statements that look like Hydra: a Hydra source call (or render/bpm/
+    speed/s0./a.) at the start of a line, continued by lines that start with a dot."""
+    out, cur = [], None
+    for line in src.splitlines():
+        stripped = line.split("//")[0].rstrip()
+        if not stripped.strip():
+            continue
+        if _HYDRA_START.match(stripped):
+            if cur:
+                out.append(cur)
+            cur = stripped
+        elif cur is not None and stripped.lstrip().startswith("."):
+            cur += "\n" + stripped
+        else:
+            if cur:
+                out.append(cur)
+            cur = None
+    if cur:
+        out.append(cur)
+    return out
+
+
+def from_hydra(src: str, patch: Optional[Patch] = None, lenient: Optional[bool] = None) -> "Patch":
+    """Parse a Hydra sketch into a Patch (the default patch unless one is given).
+
+    ``lenient`` (default: on when the text contains things that aren't Hydra, like a p5 sketch
+    around the Hydra block) extracts the Hydra-looking statements and skips the rest; what was
+    skipped or failed is in ``patch.import_notes``.
+    """
     patch = patch or default_patch()
-    p = _Parser(src, patch)
-    p.program()
+    patch.import_notes = []
+    if lenient is None:
+        try:
+            _Parser(src, Patch()).program()
+            lenient = False
+        except Exception:
+            lenient = True
+    if not lenient:
+        _Parser(src, patch).program()
+        return patch
+    parser = _Parser("", patch)
+    stmts = hydra_statements(src)
+    # sources and settings first: s0.init*() usually sits in p5's setup(), after the chains that use it
+    stmts = [t for t in stmts if re.match(r"\s*(s[0-3]\.|a\.|bpm|speed)", t)] + [t for t in stmts if not re.match(r"\s*(s[0-3]\.|a\.|bpm|speed)", t)]
+    for stmt in stmts:
+        parser.s, parser.i = stmt, 0
+        try:
+            parser.program()
+        except Exception as e:
+            patch.import_notes.append(f"skipped: {stmt.splitlines()[0][:60]}...  ({e})")
     return patch
 
 

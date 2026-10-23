@@ -118,6 +118,23 @@ class Image(Texture):
         return self._array
 
 
+class External(Texture):
+    """A source hydrapy can't read offline (a p5 canvas, the screen, a stream): black until replaced."""
+
+    def __init__(self, name: str = "s0", note: str = ""):
+        self.name = name
+        self.note = note
+
+    def array(self):
+        return np.zeros((2, 2, 4), dtype=np.float32)
+
+    def render(self):
+        return np.zeros((2, 2, 4), dtype=np.uint8)
+
+    def __repr__(self):
+        return f"<External {self.name}: {self.note}>"
+
+
 class Camera(Texture):
     """Webcam source. Live in the HTML export and the GL backend (via OpenCV); not available offline."""
 

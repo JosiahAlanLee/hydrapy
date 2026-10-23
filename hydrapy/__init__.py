@@ -23,11 +23,11 @@ from __future__ import annotations
 from . import ops as _ops  # noqa: F401  (populates the registry)
 from . import ops_paint as _ops_paint  # noqa: F401  (paint-on-film ops)
 from . import ops_3d as _ops_3d  # noqa: F401  (plane/sphere/cylinder)
-from .core import (REGISTRY, Bank, Camera, Chain, Ctx, Image, Input, Op, Output, Patch, Texture, Transform, Video,
+from .core import (REGISTRY, Bank, Camera, Chain, Ctx, External, Image, Input, Op, Output, Patch, Texture, Transform, Video,
                    default_patch, normalize_args, reset_patch)
 from .synth import Quilt, quilt
 from .drawing import Lines, Text, meadow, plant, to_svg
-from .signals import SH, Audio, Clock, Const, Drift, Env, Expr, Fft, Fn, Lfo, Mouse, Seq, Signal, Time, as_signal
+from .signals import SH, Audio, Clock, Const, Drift, Env, Expr, Fft, Fn, Fx, Lfo, Mouse, Seq, Signal, Time, as_signal
 
 __version__ = "0.1.0"
 
@@ -144,7 +144,7 @@ __all__ = (
     list(_sources) + [
         "o0", "o1", "o2", "o3", "render", "hush", "set_bpm", "set_resolution", "speed", "patch",
         "Chain", "Patch", "Output", "Image", "Video", "Camera", "Bank", "Quilt", "quilt", "Text", "Lines", "plant", "meadow", "to_svg", "Ctx", "reset_patch", "default_patch",
-        "Signal", "Lfo", "Seq", "Clock", "Env", "SH", "Drift", "Mouse", "Time", "Fn", "Fft", "Audio", "Const", "Expr",
+        "Signal", "Lfo", "Seq", "Clock", "Env", "SH", "Drift", "Mouse", "Time", "Fn", "Fx", "Fft", "Audio", "Const", "Expr", "External",
         "Renderer", "render_chain", "render_frames", "save_gif", "save_mp4", "save_png", "to_image", "to_ansi",
         "to_html", "chain_to_hydra", "patch_to_hydra", "from_hydra",
         "compile_chain", "compile_output", "compile_patch", "ops", "describe", "REGISTRY", "add_op", "Op", "Input",

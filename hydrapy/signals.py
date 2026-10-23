@@ -610,3 +610,41 @@ function __seq(arr,speed,smooth,offset,ease,time,bpm){var n=arr.length;var index
   var t=Math.min(((_i%1)+1)%1/smooth,1);return e(t)*(nxt-cur)+cur;}
  return arr[Math.floor(((index%n)+n)%n)];}
 """
+
+
+# ---------------------------------------------------------------------------
+# fxhash-style determinism
+# ---------------------------------------------------------------------------
+
+class Fx:
+    """A seeded random source with the fxhash helper names: ``rand()``, ``rnd_btw``, ``rnd_btwexp``,
+    ``rnd_int``, ``pick``. Same hash, same numbers, so a patch is reproducible from its seed:
+
+        fx = Fx("ooXYZ...")               # or any string/int
+        osc(fx.rnd_btw(5, 40), 0.1, fx.rnd_btwexp(0, 2)).kaleid(fx.rnd_int(3, 8)).out()
+    """
+
+    def __init__(self, hash_or_seed="hydrapy"):
+        import random, zlib
+        seed = hash_or_seed if isinstance(hash_or_seed, int) else zlib.crc32(str(hash_or_seed).encode("utf-8"))
+        self.hash = hash_or_seed
+        self._rng = random.Random(seed)
+
+    def rand(self) -> float:
+        return self._rng.random()
+
+    fxrand = rand
+
+    def rnd_btw(self, lo: float, hi: float) -> float:
+        return self.rand() * (hi - lo) + lo
+
+    def rnd_btwexp(self, lo: float, hi: float) -> float:
+        return self.rand() ** 2 * (hi - lo) + lo
+
+    def rnd_int(self, lo: int, hi: int) -> int:
+        import math
+        lo, hi = math.ceil(lo), math.floor(hi)
+        return int(math.floor(self.rand() * (hi - lo + 1)) + lo)
+
+    def pick(self, seq):
+        return seq[self.rnd_int(0, len(seq) - 1)]

@@ -269,3 +269,38 @@ def test_delay_reads_exact_history_on_both_backends():
             rg.step(i / 30)
             assert np.abs(a - rg.read() / 255.0).mean() < 0.01
         assert len(rg.outs["o0"]["ring"]) == 5
+
+
+def test_lenient_import_of_a_p5_sketch():
+    from hydrapy.hydra_import import from_hydra
+    from hydrapy.export import patch_to_python
+    sketch = """
+    new p5();
+    function rnd_btw(min, max) {return fxrand() * (max - min) + min;}
+    let hydra = new Hydra ({detectAudio: false, canvas:c})
+    //hydra
+    src(o0)
+    .layer(src(s0))
+    .blend(osc())
+    .pixelate(150,150)
+    .out(o0)
+    render(o0)
+    function setup() {
+        createCanvas(windowWidth, windowHeight, WEBGL);
+        s0.init({ src:drawingContext.canvas })
+    }
+    """
+    p = from_hydra(sketch, Patch())
+    assert [t.op.name for t in p.o0.chain.transforms] == ["src", "layer", "blend", "pixelate"]
+    assert p.import_notes == []
+    code = patch_to_python(p)
+    ns = {}
+    exec(code, ns)                       # the export is valid Python
+    assert "External('s0')" in code
+    assert np.isfinite(p.o0.chain.render(0.2, size=(32, 18))).all()
+
+
+def test_fx_is_deterministic():
+    a, b = Fx("ooABC"), Fx("ooABC")
+    assert [a.rnd_btw(0, 1) for _ in range(5)] == [b.rnd_btw(0, 1) for _ in range(5)]
+    assert Fx("ooABC").rnd_int(3, 8) in range(3, 9) and Fx(1).rand() != Fx(2).rand()

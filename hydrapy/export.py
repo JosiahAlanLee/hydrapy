@@ -121,6 +121,8 @@ def _hydra_arg(a, strict: bool) -> str:
         return "s0 /* s0.initVideo('%s') */" % a.path
     if isinstance(a, Camera):
         return "s0 /* s0.initCam() */"
+    if type(a).__name__ == "External":
+        return f"s0 /* {a.note} */"
     if hasattr(a, "render") and not hasattr(a, "array_at"):
         return "s0 /* s0.initImage(...): export this %s with Image.fromarray(x.render()).save(...) */" % type(a).__name__
     if hasattr(a, "array_at"):
@@ -221,6 +223,8 @@ def _py_arg(a) -> str:
         return f"Video({a.path!r})"
     if isinstance(a, Camera):
         return f"Camera({a.device})"
+    if type(a).__name__ == "External":
+        return a.name
     if hasattr(a, "render") and not hasattr(a, "array_at"):
         return f"{type(a).__name__}(...)"
     if isinstance(a, Seq):
@@ -257,13 +261,28 @@ def chain_to_python(chain: Chain) -> str:
     return ".".join(parts)
 
 
+def _externals(chain, found):
+    for tr in chain.transforms:
+        for a in tr.args:
+            if type(a).__name__ == "External":
+                found[a.name] = a
+            elif isinstance(a, Chain):
+                _externals(a, found)
+
+
 def patch_to_python(patch: Optional[Patch] = None) -> str:
     patch = patch or default_patch()
     body = []
+    ext = {}
     for o in patch.active_outputs():
+        _externals(o.chain, ext)
         body.append(f"{chain_to_python(o.chain)}.out({o.name})")
     src = "\n".join(body)
     head = ["import math", "from hydrapy import *", ""]
+    for name, e in ext.items():
+        head.append(f"# {name} was `{e.note}`: a source hydrapy can't read offline. Swap in an Image, Video, Bank or")
+        head.append(f"# Camera; for the p5 'hydra canvas on a plane' loop use src(oN).plane3d(...) in its place.")
+        head.append(f"{name} = External({name!r})")
     if "a.fft" in src or "a.band_at" in src:
         head.append("a = Audio()  # microphone in the HTML export; use Audio.from_file('track.wav') offline")
     if patch.bpm != 30:

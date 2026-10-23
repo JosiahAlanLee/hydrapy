@@ -260,8 +260,16 @@ src(o0).blend(delay(o0, 6), Clock(1).smoothstep().quantize(1))                  
 src(o0).diff(delay(o0, 2)).thresh(0.1)                                                              # motion only
 ```
 
-Patches `14_text_and_lines.py`, `15_canvas_in_3d.py`, `16_delay_line.py`; `docs/tour.mp4` walks
-through every primitive and the combination patches (`python docs/tour.py` re-renders it).
+**The p5 loop.** A Hydra + p5 practice often ran Hydra's canvas through p5's `plane()` and back
+in as `s0`. That round trip is `src(o0).plane3d(...)` fed back into `o0` here; `patches/17_p5_hydra_loop.py`
+is the `p5js-hydra-fxhash` template rebuilt that way, and `Fx("oo…")` is `fxrand()` with the
+`rnd_btw / rnd_btwexp / rnd_int` helpers, so a hash reproduces its edition. `hydrapy import file.js`
+is lenient: it pulls the Hydra statements out of a p5 sketch, and a source it can't read offline
+(`s0.init({src: canvas})`) becomes an `External` placeholder to swap for an Image, Bank or the loop.
+
+Patches `14_text_and_lines.py`, `15_canvas_in_3d.py`, `16_delay_line.py`, `17_p5_hydra_loop.py`;
+`docs/tour.mp4` walks through every primitive and the combination patches (`python docs/tour.py`
+re-renders it).
 
 ## Op reference
 
@@ -454,7 +462,7 @@ hydrapy/synth.py       image quilting, Quilt frame bank
 hydrapy/export.py      GIF/MP4/PNG/ANSI, Hydra JS, Python, standalone HTML runtime
 hydrapy/hydra_import.py Hydra JS -> patch
 hydrapy/cli.py
-patches/               examples (00–16)
+patches/               examples (00–17)
 docs/tour.py           renders docs/tour.mp4, the feature tour
 tests/                 ~300 tests incl. CPU/GPU parity for every op
 ```
