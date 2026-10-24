@@ -13,7 +13,7 @@ Combine:  add sub layer blend mult diff mask  +  lighten darken screen overlay w
 Modulate: modulate modulateRepeat modulateRepeatX modulateRepeatY modulateKaleid
           modulateScrollX modulateScrollY modulateScale modulatePixelate modulateRotate
           modulateHue  +  displace
-Texture:  blur mipblur sharpen edge emboss dilate erode life rd chroma bleed bake plane3d sphere3d cylinder3d pixelsort(CPU)
+Texture:  blur mipblur sharpen edge emboss dilate erode life ca rd chroma bleed bake plane3d sphere3d cylinder3d pixelsort(CPU)
 Paint:    stain alpha drops crackle veins scratches dust pan  (hydrapy.recipes: handpainted mothlight film)
 Textures: src(o0) prev() delay(o0, k) Image Video Camera Bank Quilt Text Lines
 Signals:  Lfo Seq Clock Env SH Drift Mouse Time Fn Fft Audio
@@ -36,6 +36,8 @@ from . import ops_marble as _ops_marble  # noqa: F401  (inkdrop/tine/swirl/rippl
 from . import ops_fields as _ops_fields  # noqa: F401  (orbitVoronoi, signed distance fields)
 from . import ops_material as _ops_material  # noqa: F401  (normals, lighting, reflections)
 from . import ops_phase as _ops_phase  # noqa: F401  (independent pixel oscillators)
+from . import ops_automata as _ops_automata  # noqa: F401  (ca: Life-like rules per pixel, asynchronous)
+from .ops_automata import CA_MODES, CA_RULES
 from .core import (REGISTRY, Bank, Camera, Chain, Ctx, External, FrameSource, Image, Input, Op, Output, Patch, Texture, Transform, Video,
                    default_patch, normalize_args, reset_patch)
 from .cellular import CARule, Cellular, MultiCA1D, WOLFRAM3, WOLFRAM5
@@ -195,7 +197,7 @@ __all__ = (
     list(_sources) + [
         "o0", "o1", "o2", "o3", "render", "hush", "set_bpm", "set_resolution", "set_frame_rate", "set_composite_alpha", "set_fast_noise", "speed", "patch",
         "Chain", "Patch", "Output", "Image", "Video", "Camera", "Bank", "Quilt", "quilt", "NCA", "NCAModel", "Physarum", "Beats", "Flow", "XY", "Contours", "Harmonograph", "Lissajous", "Paths", "Rose", "chain_contours", "streamlines", "to_plotter_svg", "Text", "Lines", "plant", "meadow", "to_svg",
-        "FrameSource", "Cellular", "CARule", "MultiCA1D", "WOLFRAM3", "WOLFRAM5", "subdivide", "fuzzy_paths", "flora_lines",
+        "FrameSource", "Cellular", "CARule", "CA_MODES", "CA_RULES", "MultiCA1D", "WOLFRAM3", "WOLFRAM5", "subdivide", "fuzzy_paths", "flora_lines",
         "catmull_rom", "lathe_wire", "project_wire", "sweep_wire", "Track", "Timeline",
         "SDF3", "raymarch",
         "Param", "VideoOut", "close_resources", "CvIn", "CvOut", "Link", "LiveValue", "Midi", "MidiClock", "OscIn", "OscOut", "Probe", "Soundtrack", "Transport", "TrigPhase", "audio_devices", "register_hook", "Ctx", "reset_patch", "default_patch",
