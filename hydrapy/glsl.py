@@ -127,6 +127,44 @@ def function_source(op: Op) -> str:
     return f"{op.returns} {op.name}({', '.join(params)}) {{\n  {op.glsl}\n}}\n"
 
 
+# Ops that are exactly the identity when one input takes one value: the mixes at amount 0, the
+# displacements at amount 0. A renderer can compile a variant of a program without them while that
+# input sits there (``gates`` + ``compile_output(skip=...)``), so a layer that is faded out, or a
+# section of a piece that isn't playing, costs nothing on the GPU.  User ops can set ``Op.identity``.
+IDENTITY_AT = {name: ("amount", 0.0) for name in ("blend", "add", "sub", "mult", "lighten", "darken", "screen", "overlay",
+                                                   "modulate", "displace", "invert", "brightness", "swirl", "tine")}
+IDENTITY_AT["ripple"] = ("amplitude", 0.0)
+
+
+def identity_of(op: Op):
+    return op.identity or IDENTITY_AT.get(op.name)
+
+
+def gates(chain: Chain) -> list:
+    """``(transform, value, identity)`` for each transform in ``chain`` (and in the chains it takes as
+    arguments) that does nothing while ``value`` (a Signal or a number) equals ``identity``."""
+    out, seen = [], set()
+
+    def walk(ch):
+        if id(ch) in seen:
+            return
+        seen.add(id(ch))
+        for tr in ch.transforms:
+            ident = identity_of(tr.op)
+            if ident and tr.op.kind != "src":
+                names = [i.name for i in tr.op.inputs]
+                k = names.index(ident[0]) if ident[0] in names else -1
+                if 0 <= k < len(tr.args):
+                    a = tr.args[k]
+                    if isinstance(a, Signal) or (isinstance(a, (int, float)) and not isinstance(a, bool)):
+                        out.append((tr, a, float(ident[1])))
+            for a in tr.args:
+                if isinstance(a, Chain):
+                    walk(a)
+    walk(chain)
+    return out
+
+
 def glsl_float(v: float) -> str:
     v = float(v)
     if not math.isfinite(v):
@@ -142,9 +180,10 @@ def glsl_float(v: float) -> str:
 
 
 class _Compiler:
-    def __init__(self, program: Program, patch: Optional[Patch]):
+    def __init__(self, program: Program, patch: Optional[Patch], skip=frozenset()):
         self.p = program
         self.patch = patch
+        self.skip = skip              # ids of transforms to leave out (they are the identity this frame)
         self._tmp = 0
         self._float_ids: dict[int, Uniform] = {}
         self._sampler_names: dict[str, Uniform] = {}
@@ -210,6 +249,8 @@ class _Compiler:
     def gen(self, chain: Chain) -> Callable[[str], str]:
         frag: Optional[Callable[[str], str]] = None
         for index, tr in enumerate(chain.transforms):
+            if frag is not None and id(tr) in self.skip:
+                continue
             op, args = tr.op, list(tr.args)
             if op.cpu_only:
                 raise NotImplementedError(f".{op.name}() is CPU-only and cannot be compiled to GLSL")
@@ -291,11 +332,12 @@ class _Compiler:
         return frag
 
 
-def compile_output(output: Output, patch: Optional[Patch] = None, precision: str = "highp") -> Program:
+def compile_output(output: Output, patch: Optional[Patch] = None, precision: str = "highp", skip=frozenset()) -> Program:
+    """``skip``: ids of transforms to leave out — ones ``gates`` reports at their identity value."""
     if output.chain is None:
         raise ValueError(f"{output.name} has no chain assigned")
     prog = Program(output=output, precision=precision)
-    c = _Compiler(prog, patch)
+    c = _Compiler(prog, patch, skip)
     c.sampler_uniform(output, "prevBuffer")  # always available for prev()
     c.add_pass(output.name, c.gen(output.chain))
     return prog.finish()

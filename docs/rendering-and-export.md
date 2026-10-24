@@ -134,6 +134,14 @@ GPU brightness probes reduce their regions before readback; audio strips are rea
 * **Speed**: use `--gpu` for long or high-resolution renders. See the
   [performance guide](PERFORMANCE.md) for reproducible CPU/GL benchmarks and
   measured 1080p/4K improvements. Check the renderer name: software OpenGL still uses the CPU.
+* **Faded layers cost nothing**: a GLSL shader computes every branch of a chain, so a layer blended
+  in at 0 still costs its full price. The GL renderer compiles a variant of each output's program
+  without the transforms that are the identity this frame — `blend`/`add`/`sub`/`mult`/`screen`/
+  `overlay`/`lighten`/`darken` at amount 0, `modulate`/`displace`/`swirl`/`tine` at amount 0,
+  `ripple` at amplitude 0 — and caches the variants (`GLRenderer.specialise = False` turns it off).
+  A long piece whose sections fade layers in and out on signals only pays for what's on screen.
+  Custom ops can declare their own identity with `Op(..., identity=("amount", 0.0))`. Each signal is
+  also evaluated once per frame and shared by every pass that uses it.
 * **Audio in the HTML export**: the file is embedded as base64 and analysed with an `AnalyserNode`
   using the same Bark/loudness pipeline, so what you tuned offline is what plays. The page waits for a
   click (autoplay policy). `Audio()` with no file uses the microphone.

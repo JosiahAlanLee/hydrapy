@@ -17,7 +17,7 @@ from typing import Optional
 import numpy as np
 
 from .core import Camera, Ctx, DelayRef, FrameSource, Image, Output, Patch, RenderClock, Video, default_patch
-from .glsl import VERTEX_DESKTOP, TmpRef, compile_patch, to_desktop
+from .glsl import VERTEX_DESKTOP, TmpRef, compile_output, compile_patch, gates, to_desktop
 from .signals import as_signal
 
 
@@ -56,7 +56,7 @@ class GLRenderer:
         use_compute = compute and self.ctx.version_code >= 430
         if compute and not use_compute:
             self.compute_fallbacks.append("OpenGL 4.3 is required; using fragment shaders")
-        failed_kernels = set()
+        self._use_compute, self._failed_kernels = use_compute, set()
         self.frame = 0
         self.clock = RenderClock(self.fps)
         self._reduce_targets = {}
@@ -64,31 +64,18 @@ class GLRenderer:
         self.mouse = (0.5, 0.5)
         self.programs = compile_patch(self.patch, precision=precision)
         self.vbo = self.ctx.buffer(np.array([-1, -1, 3, -1, -1, 3], dtype="f4").tobytes())
-        self._passes = []     # list of (output_name, target, program, vao, float_uniforms, sampler_uniforms)
+        # Each output is drawn by a variant of its program compiled without the transforms that are the
+        # identity this frame (an amount at 0, a layer faded out): see glsl.gates. Variants are cached by
+        # that set; the full program is built now so shader errors surface at once.
+        self._gates = {prog.output.name: gates(prog.output.chain) for prog in self.programs}
+        self._variants: dict = {}
+        self.specialise = True
         for prog in self.programs:
-            for p in prog.passes:
-                gprog = None
-                if use_compute and p.compute and p.compute.kernel not in failed_kernels:
-                    from .compute import source
-                    try:
-                        gprog = self.ctx.compute_shader(source(p.compute, prog.float_uniforms))
-                    except Exception as e:
-                        failed_kernels.add(p.compute.kernel)
-                        self.compute_fallbacks.append(f"{p.compute.kernel} compute compilation failed; using fragment shaders: {e}")
-                if gprog is not None:
-                    self._passes.append((prog.output, p.target, gprog, None, prog.float_uniforms,
-                                         [u for u in prog.sampler_uniforms if u.name == p.compute.sampler]))
-                    self.compute_passes += 1
-                    continue
-                try:
-                    gprog = self.ctx.program(vertex_shader=VERTEX_DESKTOP, fragment_shader=to_desktop(p.source))
-                except Exception as e:
-                    numbered = "\n".join(f"{i + 1:4d}: {l}" for i, l in enumerate(to_desktop(p.source).splitlines()))
-                    raise RuntimeError(f"shader compile error in {prog.output.name}/{p.target}:\n{e}\n{numbered}")
-                vao = self.ctx.vertex_array(gprog, [(self.vbo, "2f", "position")])
-                self._passes.append((prog.output, p.target, gprog, vao, prog.float_uniforms, prog.sampler_uniforms))
+            self._variants[(prog.output.name, None)] = self._build(prog)
+            self.compute_passes += sum(1 for _, _, vao, _, _ in self._variants[(prog.output.name, None)] if vao is None)
         for reason in self.compute_fallbacks:
             warnings.warn(reason, RuntimeWarning, stacklevel=2)
+        self._ready = True
         self._copy = self.ctx.program(
             vertex_shader=VERTEX_DESKTOP,
             fragment_shader="#version 330 core\nuniform sampler2D tex; uniform vec2 resolution; uniform float compositeAlpha; out vec4 f;\n"
@@ -106,6 +93,46 @@ class GLRenderer:
                 elif hasattr(u.source, "gl_step") and u.source not in self._sims:
                     self._sims.append(u.source)
         self._blank = self.ctx.texture((1, 1), 4, data=bytes([0, 0, 0, 255]))
+
+    def _build(self, prog):
+        passes = []
+        for p in prog.passes:
+            if self._use_compute and p.compute and p.compute.kernel not in self._failed_kernels:
+                from .compute import source
+                try:
+                    kernel = self.ctx.compute_shader(source(p.compute, prog.float_uniforms))
+                except Exception as e:
+                    self._failed_kernels.add(p.compute.kernel)
+                    reason = f"{p.compute.kernel} compute compilation failed; using fragment shaders: {e}"
+                    self.compute_fallbacks.append(reason)
+                    if getattr(self, "_ready", False):      # a later variant; __init__ reports its own at the end
+                        warnings.warn(reason, RuntimeWarning, stacklevel=3)
+                else:
+                    passes.append((p.target, kernel, None, prog.float_uniforms,
+                                   [u for u in prog.sampler_uniforms if u.name == p.compute.sampler]))
+                    continue
+            try:
+                gprog = self.ctx.program(vertex_shader=VERTEX_DESKTOP, fragment_shader=to_desktop(p.source))
+            except Exception as e:
+                numbered = "\n".join(f"{i + 1:4d}: {l}" for i, l in enumerate(to_desktop(p.source).splitlines()))
+                raise RuntimeError(f"shader compile error in {prog.output.name}/{p.target}:\n{e}\n{numbered}")
+            vao = self.ctx.vertex_array(gprog, [(self.vbo, "2f", "position")])
+            passes.append((p.target, gprog, vao, prog.float_uniforms, prog.sampler_uniforms))
+            if p.target.startswith("tmp") and hasattr(self, "tmps") and p.target not in self.tmps:
+                self.tmps[p.target] = self._fbo()         # a variant compiled after _alloc()
+        return passes
+
+    def _variant(self, prog, value):
+        """The passes for ``prog`` this frame: compiled without its transforms at their identity value."""
+        key = None
+        if self.specialise:
+            off = frozenset(id(tr) for tr, v, ident in self._gates[prog.output.name]
+                            if (float(v) if isinstance(v, (int, float)) else value(v)) == ident)
+            key = off or None
+        if (prog.output.name, key) not in self._variants:
+            self._variants[(prog.output.name, key)] = self._build(
+                compile_output(prog.output, self.patch, precision=self.precision, skip=key))
+        return self._variants[(prog.output.name, key)]
 
     # -- buffers -----------------------------------------------------------
     def _fbo(self, size=None, dtype="f2"):
@@ -135,10 +162,11 @@ class GLRenderer:
                 m["tex"].release()
             for t in m.get("texs", {}).values():
                 t.release()
-        for _, _, gprog, vao, _, _ in self._passes:
-            if vao is not None:
-                vao.release()
-            gprog.release()
+        for passes in getattr(self, "_variants", {}).values():
+            for _, gprog, vao, _, _ in passes:
+                if vao is not None:
+                    vao.release()
+                gprog.release()
         for sim in getattr(self, "_sims", []):
             sim.gl_release(self)
         for n in getattr(self, "_ncas", {}).values():
@@ -150,7 +178,7 @@ class GLRenderer:
                 fb["fbo"].release(); fb["tex"].release()
         self._ncas = {}
         self._copy_vao.release(); self._copy.release(); self.vbo.release(); self._blank.release()
-        self.outs, self.tmps, self.media, self._passes = {}, {}, {}, []
+        self.outs, self.tmps, self.media, self._variants = {}, {}, {}, {}
 
     def _alloc(self):
         # each output keeps a ring of frames: ring[0] is the latest completed, ring[-1] is written next
@@ -354,39 +382,44 @@ class GLRenderer:
             self._step_ncas(ctx)
         for sim in self._sims:
             sim.gl_step(self, ctx)
-        current = None
-        for output, target, gprog, vao, floats, samplers in self._passes:
-            if output is not current and current is not None:
-                self._swap(current)
-            current = output
-            dest = self.tmps[target] if target.startswith("tmp") else self.outs[output.name]["ring"][-1]
-            if vao is not None:
-                dest["fbo"].use()
-            self._set(gprog, "time", ctx.time)
-            self._set(gprog, "resolution", (float(self.size[0]), float(self.size[1])))
-            self._set(gprog, "mouse", (self.mouse[0] * self.size[0], self.mouse[1] * self.size[1]))
-            for u in floats:
-                v = as_signal(u.source)(ctx)
-                self._set(gprog, u.name, float(v) if np.isfinite(v) else 0.0)
-            for i, u in enumerate(samplers):
-                tex = self._bind(u.source, output)
-                tex.use(location=i)
-                self._set(gprog, u.name, i)
-            if vao is None:
-                from .compute import GROUP_SIZE
-                dest["tex"].bind_to_image(0, read=False, write=True)
-                gprog.run((self.size[0] + GROUP_SIZE - 1) // GROUP_SIZE,
-                          (self.size[1] + GROUP_SIZE - 1) // GROUP_SIZE)
-                # Publish image writes to later samplers, image writes, FBO
-                # operations (including readback), and texture read/copy APIs.
-                self.ctx.memory_barrier(self.gl.TEXTURE_FETCH_BARRIER_BIT |
-                                        self.gl.SHADER_IMAGE_ACCESS_BARRIER_BIT |
-                                        self.gl.FRAMEBUFFER_BARRIER_BIT |
-                                        self.gl.TEXTURE_UPDATE_BARRIER_BIT)
-            else:
-                vao.render(self.gl.TRIANGLES)
-        if current is not None:
-            self._swap(current)
+        values = {}
+
+        def value(source):                   # each signal once per frame, shared by every pass that uses it
+            k = id(source)
+            if k not in values:
+                v = float(as_signal(source)(ctx))
+                values[k] = v if np.isfinite(v) else 0.0
+            return values[k]
+
+        for prog in self.programs:
+            output = prog.output
+            for target, gprog, vao, floats, samplers in self._variant(prog, value):
+                dest = self.tmps[target] if target.startswith("tmp") else self.outs[output.name]["ring"][-1]
+                if vao is not None:
+                    dest["fbo"].use()
+                self._set(gprog, "time", ctx.time)
+                self._set(gprog, "resolution", (float(self.size[0]), float(self.size[1])))
+                self._set(gprog, "mouse", (self.mouse[0] * self.size[0], self.mouse[1] * self.size[1]))
+                for u in floats:
+                    self._set(gprog, u.name, value(u.source))
+                for i, u in enumerate(samplers):
+                    tex = self._bind(u.source, output)
+                    tex.use(location=i)
+                    self._set(gprog, u.name, i)
+                if vao is None:
+                    from .compute import GROUP_SIZE
+                    dest["tex"].bind_to_image(0, read=False, write=True)
+                    gprog.run((self.size[0] + GROUP_SIZE - 1) // GROUP_SIZE,
+                              (self.size[1] + GROUP_SIZE - 1) // GROUP_SIZE)
+                    # Publish image writes to later samplers, image writes, FBO
+                    # operations (including readback), and texture read/copy APIs.
+                    self.ctx.memory_barrier(self.gl.TEXTURE_FETCH_BARRIER_BIT |
+                                            self.gl.SHADER_IMAGE_ACCESS_BARRIER_BIT |
+                                            self.gl.FRAMEBUFFER_BARRIER_BIT |
+                                            self.gl.TEXTURE_UPDATE_BARRIER_BIT)
+                else:
+                    vao.render(self.gl.TRIANGLES)
+            self._swap(output)
         self._update_probes(wall_time)
         from .live import run_hooks
         run_hooks(ctx, self)

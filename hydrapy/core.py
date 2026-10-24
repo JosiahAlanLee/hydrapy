@@ -46,6 +46,7 @@ class Op:
     glsl_helpers: str = ""         # optional op-specific functions before the body
     python_source: Optional[Callable] = None  # (args, formatter) -> constructor expression
     compute: Optional[str] = None  # opt-in desktop kernel for a whole, unwarped texture pass
+    identity: Optional[tuple] = None    # (input name, value): the op does nothing at that value (see glsl.gates)
 
     @property
     def returns(self) -> str:
