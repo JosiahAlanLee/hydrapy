@@ -564,8 +564,13 @@ def _mint_spec(programs, mint=None, preview_at=None):
 
 
 def build_spec(patch: Optional[Patch] = None, pixel_ratio: float = 1.0, size: Optional[tuple] = None,
-               precision: str = "highp", mint=None, preview_at: Optional[float] = None) -> dict:
-    """Everything the JS runtime needs, as plain data (what the HTML export embeds as ``SPEC``)."""
+               precision: str = "highp", mint=None, preview_at: Optional[float] = None,
+               adaptive: bool | float = False, float_buffers: bool = True) -> dict:
+    """Everything the JS runtime needs, as plain data (what the HTML export embeds as ``SPEC``).
+
+    ``adaptive``: render the outputs smaller while frames arrive slower than the display refreshes
+    (True, or the smallest scale to allow; True means 0.35). ``float_buffers=False``: 8-bit outputs
+    even where half-float targets exist, as Hydra does — half the memory traffic on a phone."""
     patch = patch or default_patch()
     programs = compile_patch(patch, precision=precision)
     images, videos, cameras, audios, banks = _collect_media(programs)
@@ -618,6 +623,8 @@ def build_spec(patch: Optional[Patch] = None, pixel_ratio: float = 1.0, size: Op
         "size": list(size) if size else None,
         "mint": _mint_spec(programs, mint, preview_at),
         "scales": {f"o{i}": s for i, s in getattr(patch, "scales", {}).items() if s != 1.0},
+        "adaptive": ({"min": 0.35 if adaptive is True else float(adaptive), "step": 0.85} if adaptive else None),
+        "floatBuffers": bool(float_buffers),
         "hydra": _try_hydra(patch),
     }
 
@@ -644,12 +651,21 @@ def _page(spec: dict, title: str, head: str = "", hud: bool = True) -> str:
 
 
 def to_html(patch: Optional[Patch] = None, path: Optional[str] = None, title: str = "hydrapy",
-            pixel_ratio: float = 1.0, size: Optional[tuple] = None, precision: str = "highp") -> str:
+            pixel_ratio: float = 1.0, size: Optional[tuple] = None, precision: str = "highp",
+            adaptive: bool | float = False, float_buffers: bool = True, phone: bool = False) -> str:
     """Compile the patch to a standalone HTML page (WebGL2 with WebGL1 fallback) and optionally write it.
 
     A patch with a ``Mint`` replays its draws from ``?fxhash=`` in the page's URL (default: the
-    preview hash); press n for another mint."""
-    spec = build_spec(patch, pixel_ratio=pixel_ratio, size=size, precision=precision)
+    preview hash); press n for another mint.
+
+    ``phone=True`` is ``precision="mixed"`` (colour math in mediump, coordinates, time and noise in
+    highp) plus ``adaptive=True`` (outputs render smaller while the page can't keep up). See
+    ``build_spec`` for ``adaptive`` and ``float_buffers``."""
+    if phone:
+        precision = "mixed" if precision == "highp" else precision
+        adaptive = adaptive or True
+    spec = build_spec(patch, pixel_ratio=pixel_ratio, size=size, precision=precision, adaptive=adaptive,
+                      float_buffers=float_buffers)
     html = _page(spec, title)
     if path:
         with open(path, "w", encoding="utf-8") as f:
@@ -802,7 +818,7 @@ RUNTIME_JS = AUDIO_HELPERS_JS + NOISE_TEXTURE_JS + r"""
   function makeTex(w, h){
     var t = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, t);
-    if (isGL2 && floatOK) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, null);
+    if (isGL2 && floatOK && SPEC.floatBuffers !== false) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, null);
     else gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
@@ -955,6 +971,33 @@ RUNTIME_JS = AUDIO_HELPERS_JS + NOISE_TEXTURE_JS + r"""
   var copyLocs = {tex: gl.getUniformLocation(copyProg, 'tex'), resolution: gl.getUniformLocation(copyProg, 'resolution')};
 
   var W = 0, H = 0, outs = {}, tmps = {}, lastRenderTime = null;
+  var dyn = 1;                       // adaptive render scale (SPEC.adaptive); 1 = full size
+  var rawCopy = program('precision mediump float; uniform sampler2D tex; uniform vec2 resolution;\nvoid main(){ gl_FragColor = texture2D(tex, gl_FragCoord.xy / resolution); }');
+  function freeTarget(t){ gl.deleteFramebuffer(t.fb); gl.deleteTexture(t.tex); }
+  function allocate(keep){
+    var old = outs, oldTmps = tmps;
+    outs = {}; tmps = {};
+    ['o0','o1','o2','o3'].forEach(function(n){
+      var depth = (SPEC.history && SPEC.history[n]) || 0, ring = [], sz = osz(n);
+      for (var k = 0; k < Math.max(2, depth + 2); k++) ring.push(makeFBO(sz[0], sz[1]));
+      outs[n] = {ring: ring, w: sz[0], h: sz[1]};   // ring[0] = latest completed frame, ring[ring.length-1] = written next
+      if (keep && old[n]) old[n].ring.forEach(function(fb, k){   // a new size keeps the feedback, resampled
+        if (k >= ring.length) return;
+        gl.bindFramebuffer(gl.FRAMEBUFFER, ring[k].fb); gl.viewport(0, 0, sz[0], sz[1]);
+        gl.useProgram(rawCopy); gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, fb.tex);
+        gl.uniform1i(gl.getUniformLocation(rawCopy, 'tex'), 0);
+        gl.uniform2f(gl.getUniformLocation(rawCopy, 'resolution'), sz[0], sz[1]);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+      });
+    });
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    Object.keys(old).forEach(function(n){ old[n].ring.forEach(freeTarget); });
+    Object.keys(oldTmps).forEach(function(k){ freeTarget(oldTmps[k]); });
+    // intermediate targets belong to one output and share its size (Chain.out(scale=...))
+    outputs.forEach(function(o){ var sz = osz(o.name); o.passes.forEach(function(p){
+      var key = o.name + ':' + p.target;
+      if (p.target.indexOf('tmp') === 0 && !tmps[key]) tmps[key] = makeFBO(sz[0], sz[1]); }); });
+  }
   function resize(){
     var pr = SPEC.pixelRatio || 1;
     var w = SPEC.size ? SPEC.size[0] : Math.floor(window.innerWidth * pr);
@@ -962,20 +1005,32 @@ RUNTIME_JS = AUDIO_HELPERS_JS + NOISE_TEXTURE_JS + r"""
     if (w === W && h === H) return;
     W = w; H = h; canvas.width = W; canvas.height = H;
     lastRenderTime = null;
-    outs = {}; tmps = {};
-    ['o0','o1','o2','o3'].forEach(function(n){
-      var depth = (SPEC.history && SPEC.history[n]) || 0, ring = [], sz = osz(n);
-      for (var k = 0; k < Math.max(2, depth + 2); k++) ring.push(makeFBO(sz[0], sz[1]));
-      outs[n] = {ring: ring, w: sz[0], h: sz[1]};   // ring[0] = latest completed frame, ring[ring.length-1] = written next
-    });
-    // intermediate targets belong to one output and share its size (Chain.out(scale=...))
-    outputs.forEach(function(o){ var sz = osz(o.name); o.passes.forEach(function(p){
-      var key = o.name + ':' + p.target;
-      if (p.target.indexOf('tmp') === 0 && !tmps[key]) tmps[key] = makeFBO(sz[0], sz[1]); }); });
+    allocate(false);
   }
   function osz(n){
-    var s = (SPEC.scales && SPEC.scales[n]) || 1;
+    var s = ((SPEC.scales && SPEC.scales[n]) || 1) * dyn;
     return [Math.max(1, Math.round(W * s)), Math.max(1, Math.round(H * s))];
+  }
+  // SPEC.adaptive: when frames come slower than the display refreshes, render the outputs smaller
+  // (the canvas keeps its size and upsamples); when there is headroom again, grow back
+  var adaptive = SPEC.adaptive || null, ivals = [], refresh = 1000 / 60, lastChange = 0, lastDown = -1e9, ceiling = 1, prevNow = null;
+  function adapt(now){
+    if (prevNow !== null) { var iv = now - prevNow; if (iv > 0 && iv < 1000) ivals.push(iv); }
+    prevNow = now;
+    var span = 0; ivals.forEach(function(v){ span += v; });
+    if (ivals.length < 45 && (span < 1500 || ivals.length < 4)) return;   // 45 frames, or 1.5 s of slow ones
+    while (ivals.length > 45) ivals.shift();
+    var med = ivals.slice().sort(function(a, b){ return a - b; })[ivals.length >> 1];
+    refresh = Math.min(refresh, Math.max(med, 1000 / 240));   // a 90/120 Hz display shows itself
+    if (now - lastChange < 1500) return;
+    var next = dyn;
+    if (med > refresh * 1.45 && dyn > adaptive.min) { next = Math.max(adaptive.min, dyn * adaptive.step); ceiling = dyn; lastDown = now; }
+    else if (med < refresh * 1.12 && dyn < 1 && (dyn / adaptive.step < ceiling - 1e-6 || now - lastDown > 20000))
+      next = Math.min(1, dyn / adaptive.step);
+    if (next === dyn) return;
+    dyn = next; lastChange = now; ivals = [];
+    canvas.dataset.scale = dyn.toFixed(3);
+    allocate(true);
   }
   window.addEventListener('resize', resize);
   resize();
@@ -1178,6 +1233,7 @@ RUNTIME_JS = AUDIO_HELPERS_JS + NOISE_TEXTURE_JS + r"""
     requestAnimationFrame(frame);
     if (t0 === null) t0 = now;
     if (paused) return;
+    if (adaptive) adapt(now);
     var time = ((now - t0) / 1000) * SPEC.speed;
     if (SPEC.frameRate) time = Math.floor(time * SPEC.frameRate + 1e-9) / SPEC.frameRate;
     var draw = !SPEC.frameRate || time !== lastRenderTime;

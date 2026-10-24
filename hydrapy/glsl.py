@@ -10,6 +10,7 @@ intermediate target ``tmpN``; the op then samples ``tex_tmpN``.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -92,27 +93,48 @@ class Program:
         return [p.target for p in self.passes if p.target.startswith("tmp")]
 
     def header(self) -> str:
-        lines = [f"precision {self.precision} float;", "uniform float time;", "uniform vec2 resolution;",
-                 "uniform vec2 mouse;"]
+        mixed = self.precision == "mixed"
+        lines = [f"precision {'mediump' if mixed else self.precision} float;", "uniform float time;",
+                 "uniform vec2 resolution;", "uniform vec2 mouse;"]
         for u in self.uniforms:
             lines.append(f"uniform {u.type} {u.name};")
         helpers = list(dict.fromkeys(op.glsl_helpers for op in self.functions if op.glsl_helpers))
         if any(op.mipmaps for op in self.functions):
             helpers.insert(0, TEXLOD)
-        return ("\n".join(lines) + "\n" + GLSL_NOISE + "\n" + "\n".join(helpers)
-                + "\n" + "\n".join(function_source(op) for op in self.functions))
+        functions = [function_source(op) for op in self.functions]
+        noise = GLSL_NOISE
+        if mixed:
+            lines = [lines[0]] + [highp(line) for line in lines[1:]]
+            noise = highp(noise, colours=True)
+            helpers = [highp(h, colours=bool(_HASHY.search(h))) for h in helpers]
+            functions = [highp(f, colours=bool(_HASHY.search(f))) for f in functions]
+        return ("\n".join(lines) + "\n" + noise + "\n" + "\n".join(helpers) + "\n" + "\n".join(functions))
 
     def finish(self):
         head = self.header()
+        st = "highp vec2" if self.precision == "mixed" else "vec2"
         for p in self.passes:
             lets = "".join(f"  {line}\n" for line in p.lets)
-            p.source = (head + "\nvoid main () {\n  vec2 st = gl_FragCoord.xy / resolution.xy;\n" + lets +
+            p.source = (head + f"\nvoid main () {{\n  {st} st = gl_FragCoord.xy / resolution.xy;\n" + lets +
                         f"  gl_FragColor = {p.expr};\n}}\n")
         return self
 
     @property
     def source(self) -> str:
         return self.passes[-1].source
+
+
+# precision="mixed" (phones): colour math in mediump, everything that can grow or must be exact in
+# highp: time, uniforms, coordinates (Hydra's coordinates are vec2), scalars (an angle is speed*time),
+# and every value inside hashing and noise, which mediump destroys.
+_DECL = re.compile(r"(?<![\w.])(float|vec2|vec3|mat2|mat3|mat4)(?=\s+[A-Za-z_])")
+_DECL4 = re.compile(r"(?<![\w.])(float|vec2|vec3|vec4|mat2|mat3|mat4)(?=\s+[A-Za-z_])")
+_HASHY = re.compile(r"_noise|_hash|_h\d\d|_h11|43758|fract\s*\(\s*sin|sin\s*\(\s*dot")
+
+
+def highp(source: str, colours: bool = False) -> str:
+    """Qualify the declarations in ``source`` as highp (vec4 too when ``colours``); used by "mixed"."""
+    return (_DECL4 if colours else _DECL).sub(r"highp \1", source)
 
 
 def iterated(op: Op) -> bool:

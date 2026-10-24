@@ -840,6 +840,43 @@ def test_fast_noise_travels_with_the_patch():
     assert "set_fast_noise(True)" in patch_to_python(p)
 
 
+def test_phone_export_uses_mixed_precision_and_adapts_its_resolution():
+    p = Patch(size=(32, 18))
+    src(p.o0).scale(1.01).blend(osc(10).modulate(noise(3), 0.2), 0.1).out(p.o0, patch=p)
+    html = H.to_html(p, phone=True, float_buffers=False)
+    assert "precision mediump float;" in html and "uniform highp float time;" in html
+    assert "highp float _noise(highp vec3 v)" in html and "highp vec2 st = gl_FragCoord" in html
+    assert '"adaptive": {"min": 0.35, "step": 0.85}' in html and '"floatBuffers": false' in html
+    plain = H.to_html(p)
+    assert '"adaptive": null' in plain and "precision highp float;" in plain
+    if _gl_available():                                   # desktop GL accepts the qualifiers (and ignores them)
+        from hydrapy.backend_gl import GLRenderer
+        g = GLRenderer(p, size=(32, 18), fps=10, precision="mixed"); g.step(0.2)
+        assert np.isfinite(g.read_rgba()).all(); g.release()
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    from hydrapy.export import RUNTIME_JS
+    body = "function adapt(now){" + RUNTIME_JS.split("function adapt(now){", 1)[1].split("\n  }\n", 1)[0] + "\n  }"
+    js = """
+var SPEC = {}, dyn = 1, canvas = {dataset: {}}, allocs = 0;
+var adaptive = {min: 0.35, step: 0.85}, ivals = [], refresh = 1000 / 60, lastChange = 0, lastDown = -1e9, ceiling = 1, prevNow = null;
+function allocate(keep){ if (keep) allocs++; }
+""" + body + """
+var now = 0, trace = [];
+function run(ms, interval){ var end = now + ms; while (now < end) { now += interval; adapt(now); } trace.push(+dyn.toFixed(3)); }
+run(1000, 1000 / 60);            // keeping up: stays at 1
+run(6000, 100);                  // 10 fps: steps down
+var low = +dyn.toFixed(3);
+run(4000, 1000 / 60);            // headroom again, but the next size up was too slow: it holds
+run(25000, 1000 / 60);           // after 20 s it tries full size again
+console.log(JSON.stringify({trace: trace, low: low, allocs: allocs}));
+"""
+    out = json.loads(subprocess.run([node, "-e", js], capture_output=True, text=True, check=True).stdout)
+    t = out["trace"]
+    assert t[0] == 1 and out["low"] < 0.7 and t[2] == out["low"] and t[3] == 1 and out["allocs"] >= 4
+
+
 def test_repeated_subchains_are_computed_once_per_pass():
     import hydrapy.glsl as G
     def build():

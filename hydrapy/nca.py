@@ -246,7 +246,7 @@ void main() {
 
 def shader_header(precision: str = "highp") -> str:
     from .noise import GLSL_NOISE
-    return f"precision {precision} float;\n" + GLSL_NOISE + "\n"
+    return f"precision {'highp' if precision == 'mixed' else precision} float;\n" + GLSL_NOISE + "\n"
 
 
 # -----------------------------------------------------------------------------
