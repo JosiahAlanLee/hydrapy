@@ -45,6 +45,7 @@ class Pass:
     source: str = ""          # full fragment shader, filled in by Program.finish()
     compute: Optional[ComputeStep] = None
     lets: list = field(default_factory=list)   # "vec4 _sN = ...;": sub-chains used more than once, computed once
+    mipmap: bool = False      # build this target's mip levels after drawing it (a mipmaps op samples it)
 
 
 @dataclass
@@ -96,6 +97,8 @@ class Program:
         for u in self.uniforms:
             lines.append(f"uniform {u.type} {u.name};")
         helpers = list(dict.fromkeys(op.glsl_helpers for op in self.functions if op.glsl_helpers))
+        if any(op.mipmaps for op in self.functions):
+            helpers.insert(0, TEXLOD)
         return ("\n".join(lines) + "\n" + GLSL_NOISE + "\n" + "\n".join(helpers)
                 + "\n" + "\n".join(function_source(op) for op in self.functions))
 
@@ -382,11 +385,14 @@ class _Compiler:
                 # Longer iterations overwrite their input while ping-ponging.
                 # Give them a private target: an earlier branch may still
                 # sample a cached prefix in the final composite pass.
-                reusable = iterations <= 2
+                # A mipmapped prefix is private too: other ops sample with implicit LOD, and a seam in their
+                # coordinates (fract, kaleid) would pick a tiny mip level there.
+                reusable = iterations <= 2 and not op.mipmaps
                 tmp = self._prefix_textures.get(key) if reusable else None
                 if tmp is None:
                     tmp = self.new_tmp()
                     self.add_pass(tmp, f0)
+                    self.p.passes[-1].mipmap = op.mipmaps
                     if reusable:
                         self._prefix_textures[key] = tmp
                 tex = self.sampler_uniform(TmpRef(tmp))
@@ -434,11 +440,17 @@ def compile_patch(patch: Optional[Patch] = None, precision: str = "highp") -> li
     return progs
 
 
+# Explicit-LOD sampling for mipmaps ops. GLSL 3 (desktop, WebGL2) defines _texLod as textureLod before
+# this; GLSL ES 1.00 can't choose a level in a fragment shader (and WebGL1 has no mip levels for
+# non-power-of-two targets), so there it samples the base level.
+TEXLOD = "#ifndef _texLod\n#define _texLod(s, uv, l) texture2D(s, uv)\n#endif"
+
+
 # Desktop-GL (moderngl) flavour of the same shader
 def to_desktop(source: str) -> str:
     body = "\n".join(l for l in source.splitlines() if not l.strip().startswith("precision "))
-    return ("#version 330 core\n#define texture2D texture\nout vec4 _fragColor;\n#define gl_FragColor _fragColor\n"
-            + body)
+    return ("#version 330 core\n#define texture2D texture\n#define _texLod textureLod\nout vec4 _fragColor;\n"
+            "#define gl_FragColor _fragColor\n" + body)
 
 
 VERTEX_ES = "attribute vec2 position;\nvoid main () { gl_Position = vec4(position, 0.0, 1.0); }\n"

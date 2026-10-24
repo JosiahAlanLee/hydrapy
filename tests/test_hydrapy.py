@@ -761,6 +761,37 @@ def test_live_settle_skips_compiles_for_values_that_only_touch_zero():
     live.release(); full.release()
 
 
+def test_mipblur_is_smooth_cheap_and_the_same_on_both_backends():
+    from hydrapy.glsl import gates
+    def base():
+        return shape(4, 0.3, 0.01).repeat(3, 3).add(osc(30, 0.1, 1.2).mask(shape(40, 0.2, 0.01)))
+    def chain(r):
+        return base().mipblur(r)
+    prog = compile_chain(chain(6))
+    assert [p.mipmap for p in prog.passes] == [True, False]
+    assert any(name == "mipblur" and v == 6 for name, v in [(tr.op.name, v) for tr, v, _ in gates(chain(6))])
+    sharp = chain(0).render(0.5, size=(64, 36))
+    assert np.allclose(sharp, base().render(0.5, size=(64, 36)))           # radius 0: no blur
+    soft = chain(12).render(0.5, size=(64, 36))
+    assert soft[..., :3].std() < sharp[..., :3].std() * 0.7
+    assert "_texLod(_tex" in prog.source and "#define _texLod(s, uv, l) texture2D(s, uv)" in prog.source
+    if _gl_available():
+        from hydrapy.backend_gl import GLRenderer
+        for r in (0.5, 3, 12, 40):
+            p = Patch(size=(64, 36)); chain(r).out(p.o0, patch=p)
+            g = GLRenderer(p, size=(64, 36), fps=10); g.step(0.5)
+            a = np.clip(g.read_rgba(), 0, 1); g.release()
+            b = np.clip(Renderer(p, size=(64, 36), fps=10).step(0.5), 0, 1)
+            assert np.abs(a - b).max() < 0.01, r
+
+
+def test_html_export_builds_mip_levels_for_mipblur():
+    p = Patch(size=(32, 18))
+    osc(10).mipblur(Lfo(0.2, lo=0, hi=20)).out(p.o0, patch=p)
+    html = H.to_html(p)
+    assert '"mipmap": true' in html and "generateMipmap" in html and "#version 300 es" in html
+
+
 def test_repeated_subchains_are_computed_once_per_pass():
     import hydrapy.glsl as G
     def build():

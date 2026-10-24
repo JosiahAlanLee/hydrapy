@@ -577,7 +577,8 @@ def build_spec(patch: Optional[Patch] = None, pixel_ratio: float = 1.0, size: Op
     for prog in programs:
         outs.append({
             "name": prog.output.name,
-            "passes": [{"target": p.target, "source": p.source} for p in prog.passes],
+            "passes": [dict(target=p.target, source=p.source, **({"mipmap": True} if p.mipmap else {}))
+                       for p in prog.passes],
             "floats": [{"name": u.name, "js": as_signal(u.source).js()} for u in prog.float_uniforms],
             "samplers": [({"name": u.name, "ref": u.source.output.name, "delay": u.source.frames}
                           if isinstance(u.source, DelayRef) else {"name": u.name, "ref": u.source.name})
@@ -770,6 +771,9 @@ RUNTIME_JS = AUDIO_HELPERS_JS + r"""(function(){
   var floatOK = isGL2 ? !!gl.getExtension('EXT_color_buffer_float') : false;
 
   var VERT = 'attribute vec2 position;\nvoid main(){ gl_Position = vec4(position, 0.0, 1.0); }';
+  var VERT3 = '#version 300 es\nin vec2 position;\nvoid main(){ gl_Position = vec4(position, 0.0, 1.0); }';
+  // passes that pick mip levels (_texLod) need GLSL ES 3.00; the rest stay 1.00
+  function es3(src){ return '#version 300 es\n#define texture2D texture\n#define _texLod textureLod\nout highp vec4 _fragColor;\n#define gl_FragColor _fragColor\n' + src; }
   function shader(type, src){
     var s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
     if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) { fail(gl.getShaderInfoLog(s) + "\n" + src.split("\n").map(function(l,i){return (i+1)+': '+l;}).join("\n")); return null; }
@@ -777,7 +781,8 @@ RUNTIME_JS = AUDIO_HELPERS_JS + r"""(function(){
   }
   function program(fs){
     var p = gl.createProgram();
-    var v = shader(gl.VERTEX_SHADER, VERT), f = shader(gl.FRAGMENT_SHADER, fs);
+    var v3 = fs.indexOf('#version 300 es') === 0;
+    var v = shader(gl.VERTEX_SHADER, v3 ? VERT3 : VERT), f = shader(gl.FRAGMENT_SHADER, fs);
     if (!v || !f) return null;
     gl.attachShader(p, v); gl.attachShader(p, f); gl.bindAttribLocation(p, 0, 'position'); gl.linkProgram(p);
     if (!gl.getProgramParameter(p, gl.LINK_STATUS)) { fail(gl.getProgramInfoLog(p)); return null; }
@@ -914,14 +919,14 @@ RUNTIME_JS = AUDIO_HELPERS_JS + r"""(function(){
     return {
       name: o.name,
       passes: o.passes.map(function(p){
-        var prog = program(p.source);
+        var prog = program(isGL2 && p.source.indexOf('_texLod') >= 0 ? es3(p.source) : p.source);
         var locs = {};
         if (prog) {
           ['time','resolution','mouse'].forEach(function(n){ locs[n] = gl.getUniformLocation(prog, n); });
           o.floats.forEach(function(f){ locs[f.name] = gl.getUniformLocation(prog, f.name); });
           o.samplers.forEach(function(s){ locs[s.name] = gl.getUniformLocation(prog, s.name); });
         }
-        return {target: p.target, prog: prog, locs: locs};
+        return {target: p.target, prog: prog, locs: locs, mipmap: !!p.mipmap && isGL2};
       }),
       floats: o.floats.map(function(f){
         try { return {name: f.name, fn: new Function('time','bpm','__mx','__my','__fft','__vol','__flux','dt', 'return (' + f.js + ');')}; }
@@ -1192,6 +1197,11 @@ RUNTIME_JS = AUDIO_HELPERS_JS + r"""(function(){
           gl.uniform1i(p.locs[s.name], i);
         });
         gl.drawArrays(gl.TRIANGLES, 0, 3);
+        if (p.mipmap) {                    // a mipblur reads this target's levels
+          gl.bindTexture(gl.TEXTURE_2D, target.tex);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+          gl.generateMipmap(gl.TEXTURE_2D);
+        }
       });
       outs[o.name].ring.unshift(outs[o.name].ring.pop());   // the frame just written becomes ring[0]
     });

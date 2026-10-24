@@ -33,6 +33,10 @@ def _create_context(compute=False):
     raise error
 
 
+class _MipTarget(str):
+    """A pass target whose mip levels are built after it is drawn (a mipmaps op samples it)."""
+
+
 class GLRenderer:
     """Renders a patch with moderngl. ``ctx`` may be an existing context.
 
@@ -125,7 +129,8 @@ class GLRenderer:
                 numbered = "\n".join(f"{i + 1:4d}: {l}" for i, l in enumerate(source.splitlines()))
                 raise RuntimeError(f"shader compile error in {prog.output.name}/{p.target}:\n{e}\n{numbered}")
             vao = self.ctx.vertex_array(gprog, [(self.vbo, "2f", "position")])
-            passes.append((p.target, gprog, vao, prog.float_uniforms, prog.sampler_uniforms))
+            passes.append((_MipTarget(p.target) if p.mipmap else p.target, gprog, vao, prog.float_uniforms,
+                           prog.sampler_uniforms))
             key = (prog.output.name, p.target)
             if p.target.startswith("tmp") and hasattr(self, "tmps") and key not in self.tmps:
                 self.tmps[key] = self._fbo(self._osize(prog.output.name))   # a variant compiled after _alloc()
@@ -500,6 +505,13 @@ class GLRenderer:
                                             self.gl.TEXTURE_UPDATE_BARRIER_BIT)
                 else:
                     vao.render(self.gl.TRIANGLES)
+                if isinstance(target, _MipTarget):
+                    dest["tex"].build_mipmaps()
+                    dest["tex"].filter = (self.gl.LINEAR_MIPMAP_LINEAR, self.gl.LINEAR)
+                    dest["mip"] = True
+                elif dest.get("mip"):                # the same tmp in another variant: plain sampling again
+                    dest["tex"].filter = (self.gl.LINEAR, self.gl.LINEAR)
+                    dest["mip"] = False
             self._swap(output)
         self._update_probes(wall_time)
         from .live import run_hooks

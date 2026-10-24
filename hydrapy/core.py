@@ -47,6 +47,7 @@ class Op:
     python_source: Optional[Callable] = None  # (args, formatter) -> constructor expression
     compute: Optional[str] = None  # opt-in desktop kernel for a whole, unwarped texture pass
     identity: Optional[tuple] = None    # (input name, value): the op does nothing at that value (see glsl.gates)
+    mipmaps: bool = False          # texture op that reads its input's mip levels: _texLod(_tex, uv, level)
 
     @property
     def returns(self) -> str:

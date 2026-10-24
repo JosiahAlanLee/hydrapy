@@ -13,7 +13,7 @@ Combine:  add sub layer blend mult diff mask  +  lighten darken screen overlay w
 Modulate: modulate modulateRepeat modulateRepeatX modulateRepeatY modulateKaleid
           modulateScrollX modulateScrollY modulateScale modulatePixelate modulateRotate
           modulateHue  +  displace
-Texture:  blur sharpen edge emboss dilate erode life rd chroma bleed bake plane3d sphere3d cylinder3d pixelsort(CPU)
+Texture:  blur mipblur sharpen edge emboss dilate erode life rd chroma bleed bake plane3d sphere3d cylinder3d pixelsort(CPU)
 Paint:    stain alpha drops crackle veins scratches dust pan  (hydrapy.recipes: handpainted mothlight film)
 Textures: src(o0) prev() delay(o0, k) Image Video Camera Bank Quilt Text Lines
 Signals:  Lfo Seq Clock Env SH Drift Mouse Time Fn Fft Audio
