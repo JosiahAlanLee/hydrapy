@@ -717,6 +717,50 @@ def test_gl_variants_skip_faded_branches_and_match_the_full_program():
     fast.release(); full.release()
 
 
+@pytest.mark.skipif(not _gl_available(), reason="no OpenGL context")
+def test_prewarm_compiles_the_score_before_the_first_frame():
+    from hydrapy.backend_gl import GLRenderer
+    fade = Fn(lambda c: 0.0 if c.time < 0.5 or c.time > 1.0 else (c.time - 0.5) * 2)
+    p = Patch(size=(32, 18))
+    osc(8, 0.1, 1.2).add(noise(4, 0.3).blur(2, 2), fade).out(p.o0, patch=p)
+    r = GLRenderer(p, size=(32, 18), fps=10)
+    assert r.prewarm([i / 10 for i in range(16)]) == 1          # one variant: the blur faded out
+    def no_compiles(*a, **k):
+        raise AssertionError("compiled mid-render")
+    r._build = no_compiles
+    for i in range(16):
+        r.step(i / 10)
+    r.release()
+    # a gate on audio analysis can't be predicted, so it's left alone
+    q = Patch(size=(32, 18))
+    osc(8).add(noise(4), Fft(2)).out(q.o0, patch=q)
+    r = GLRenderer(q, size=(32, 18), fps=10)
+    assert r.prewarm([0.0, 1.0]) == 0
+    r.release()
+
+
+@pytest.mark.skipif(not _gl_available(), reason="no OpenGL context")
+def test_live_settle_skips_compiles_for_values_that_only_touch_zero():
+    from hydrapy.backend_gl import GLRenderer
+    # zero for one frame at t=0.3, then for good from t=1.0
+    amount = Fn(lambda c: 0.0 if abs(c.time - 0.3) < 0.01 or c.time >= 0.95 else 0.5)
+    def build():
+        p = Patch(size=(32, 18))
+        osc(8, 0.1, 1.2).add(noise(4, 0.3).blur(2, 2), amount).out(p.o0, patch=p)
+        return p
+    live, full = GLRenderer(build(), size=(32, 18), fps=10), GLRenderer(build(), size=(32, 18), fps=10)
+    live.settle, full.specialise = 4, False
+    for i in range(8):
+        live.step(i / 10), full.step(i / 10)
+        assert np.array_equal(live.read_rgba(), full.read_rgba()), i
+    assert [k for (name, k) in live._variants if name == "o0"] == [None]     # the blip compiled nothing
+    for i in range(8, 16):
+        live.step(i / 10), full.step(i / 10)
+        assert np.array_equal(live.read_rgba(), full.read_rgba()), i
+    assert len(live._variants) == 2 and live._active["o0"]                 # the lasting zero did, after 4 frames
+    live.release(); full.release()
+
+
 def test_repeated_subchains_are_computed_once_per_pass():
     import hydrapy.glsl as G
     def build():

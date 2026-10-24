@@ -70,6 +70,8 @@ class GLRenderer:
         self._gates = {prog.output.name: gates(prog.output.chain) for prog in self.programs}
         self._variants: dict = {}
         self.specialise = True
+        self.settle = 0                      # frames a new idle set must hold before its variant compiles (live uses 12)
+        self._pending, self._active = {}, {}
         for prog in self.programs:
             self._variants[(prog.output.name, None)] = self._build(prog)
             self.compute_passes += sum(1 for _, _, vao, _, _ in self._variants[(prog.output.name, None)] if vao is None)
@@ -129,17 +131,78 @@ class GLRenderer:
                 self.tmps[key] = self._fbo(self._osize(prog.output.name))   # a variant compiled after _alloc()
         return passes
 
-    def _variant(self, prog, value):
-        """The passes for ``prog`` this frame: compiled without its transforms at their identity value."""
-        key = None
-        if self.specialise:
-            off = frozenset(id(tr) for tr, v, ident in self._gates[prog.output.name]
-                            if (float(v) if isinstance(v, (int, float)) else value(v)) == ident)
-            key = off or None
+    def _idle(self, name, value):
+        return frozenset(id(tr) for tr, v, ident in self._gates[name]
+                         if (float(v) if isinstance(v, (int, float)) else value(v)) == ident) or None
+
+    def _compiled(self, prog, key):
         if (prog.output.name, key) not in self._variants:
             self._variants[(prog.output.name, key)] = self._build(
                 compile_output(prog.output, self.patch, precision=self.precision, skip=key))
         return self._variants[(prog.output.name, key)]
+
+    def _variant(self, prog, value):
+        """The passes for ``prog`` this frame: compiled without its transforms at their identity value.
+
+        With ``settle`` > 0 a set of idle transforms that hasn't been seen before must hold for that many
+        frames before its variant is compiled; meanwhile the last variant that is still valid (one that
+        skips a subset of what is idle now), or the full program, draws. A value that touches zero for a
+        frame never costs a compile, and a live set never stalls on a passing combination."""
+        name = prog.output.name
+        key = self._idle(name, value) if self.specialise else None
+        if key is not None and (name, key) not in self._variants and self.settle > 0:
+            seen, count = self._pending.get(name, (None, 0))
+            count = count + 1 if seen == key else 1
+            self._pending[name] = (key, count)
+            if count < self.settle:
+                last = self._active.get(name)
+                usable = last if last is not None and (name, last) in self._variants and last <= key else None
+                self._active[name] = usable
+                return self._variants[(name, usable)]
+        self._pending.pop(name, None)
+        self._active[name] = key
+        return self._compiled(prog, key)
+
+    def prewarm(self, times) -> int:
+        """Compile, now, the variants the score will need at ``times`` (seconds), so a render or a set
+        never compiles mid-way. Only gates driven by signals that can be evaluated at any time without
+        side effects are predicted (audio analysis and live inputs are not); returns the number compiled."""
+        from .controls import Param
+        from .signals import Fft, Signal
+
+        def pure(sig, depth=0):
+            # predictable: hydrapy's own time-driven signals (and Fn, which exports already sample at
+            # arbitrary times); not audio analysis, controls, live inputs, probes or unknown subclasses
+            if not isinstance(sig, Signal):
+                return True
+            mod = type(sig).__module__
+            if depth > 40 or isinstance(sig, (Fft, Param)) or not mod.startswith("hydrapy.") or mod == "hydrapy.live":
+                return False
+            for v in vars(sig).values():
+                for item in (v if isinstance(v, (list, tuple)) else (v,)):
+                    if isinstance(item, Signal) and not pure(item, depth + 1):
+                        return False
+            return True
+
+        before = len(self._variants)
+        for prog in self.programs:
+            name = prog.output.name
+            if not self.specialise or not self._gates[name]:
+                continue
+            if not all(isinstance(v, (int, float)) or pure(v) for _, v, _ in self._gates[name]):
+                continue
+            seen = set()
+            for t in times:
+                ctx = Ctx(time=float(t), frame=int(round(float(t) * self.fps)), width=self.size[0], height=self.size[1],
+                          bpm=self.patch.bpm, dt=1.0 / self.fps, fps=self.fps)
+                def value(sig, ctx=ctx):
+                    v = float(as_signal(sig)(ctx))
+                    return v if np.isfinite(v) else 0.0
+                key = self._idle(name, value)
+                if key not in seen:
+                    seen.add(key)
+                    self._compiled(prog, key)
+        return len(self._variants) - before
 
     # -- buffers -----------------------------------------------------------
     def _osize(self, name) -> tuple:
@@ -190,6 +253,7 @@ class GLRenderer:
         self._ncas = {}
         self._copy_vao.release(); self._copy.release(); self.vbo.release(); self._blank.release()
         self.outs, self.tmps, self.media, self._variants = {}, {}, {}, {}
+        self._pending, self._active = {}, {}
 
     def _alloc(self):
         # each output keeps a ring of frames: ring[0] is the latest completed, ring[-1] is written next
@@ -579,6 +643,7 @@ def iter_frames_gl(patch: Optional[Patch] = None, seconds: float = 4.0, fps: flo
                    start: float = 0.0, warmup: int = 0, compute: bool = False):
     r = GLRenderer(patch, size=size, fps=fps, compute=compute)
     try:
+        r.prewarm([start + i / fps for i in range(-warmup, int(round(seconds * fps)))])
         for i in range(warmup):
             r.step(start - (warmup - i) / fps)
         from .live import clear_recordings
@@ -625,6 +690,7 @@ def live(patch: Optional[Patch] = None, size=(1280, 720), fps: float = 60.0, tit
     ctx = moderngl.create_context()
     fb = glfw.get_framebuffer_size(window)
     r = GLRenderer(patch, size=fb, ctx=ctx, fps=fps)
+    r.settle = LIVE_SETTLE
     transport = r.patch.transport
     state = {"paused": False, "t0": glfw.get_time(), "paused_at": 0.0}
 
@@ -707,6 +773,11 @@ def live(patch: Optional[Patch] = None, size=(1280, 720), fps: float = 60.0, tit
         transport.close()
 
 
+# live sets: an idle set must hold this many frames before its variant compiles, so a value crossing
+# zero never stalls the show on a shader compile
+LIVE_SETTLE = 12
+
+
 def _reload(old: "GLRenderer", loader, ctx, fps):
     """Build the edited patch; on success swap renderers, carrying each output's last frame over."""
     import traceback
@@ -718,6 +789,7 @@ def _reload(old: "GLRenderer", loader, ctx, fps):
             patch = loader()
             carry_controls(old.patch, patch)
             new = GLRenderer(patch, size=old.size, ctx=ctx, fps=fps, compute=old.compute)
+            new.settle = old.settle
             for name, o in old.outs.items():
                 if name in new.outs:
                     for dest, source in zip(new.outs[name]["ring"], o["ring"]):
