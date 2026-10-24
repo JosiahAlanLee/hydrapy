@@ -119,6 +119,7 @@ class _Compiler:
         self._tmp = 0
         self._float_ids: dict[int, Uniform] = {}
         self._sampler_names: dict[str, Uniform] = {}
+        self._prefix_textures: dict[tuple, str] = {}
 
     # -- uniforms --------------------------------------------------------
     def float_uniform(self, sig) -> str:
@@ -175,7 +176,7 @@ class _Compiler:
     # -- chain -----------------------------------------------------------
     def gen(self, chain: Chain) -> Callable[[str], str]:
         frag: Optional[Callable[[str], str]] = None
-        for tr in chain.transforms:
+        for index, tr in enumerate(chain.transforms):
             op, args = tr.op, list(tr.args)
             if op.cpu_only:
                 raise NotImplementedError(f".{op.name}() is CPU-only and cannot be compiled to GLSL")
@@ -224,8 +225,21 @@ class _Compiler:
                 frag = lambda uv, f0=f0, f1=f1, name=name, rest=rest: f0(f"{name}({uv}, {f1(uv)}{rest(uv)})")
             elif op.kind == "texture":
                 # materialise the prefix into its own pass
-                tmp = self.new_tmp()
-                self.p.passes.append(Pass(tmp, f0("st")))
+                key = tuple(id(t) for t in chain.transforms[:index])
+                # bake() already materialised this exact prefix. Reuse its
+                # half-float target instead of making an identity copy.
+                if index and chain.transforms[index - 1].op.name == "bake":
+                    key = key[:-1]
+                # Longer iterations overwrite their input while ping-ponging.
+                # Give them a private target: an earlier branch may still
+                # sample a cached prefix in the final composite pass.
+                reusable = iterations <= 2
+                tmp = self._prefix_textures.get(key) if reusable else None
+                if tmp is None:
+                    tmp = self.new_tmp()
+                    self.p.passes.append(Pass(tmp, f0("st")))
+                    if reusable:
+                        self._prefix_textures[key] = tmp
                 tex = self.sampler_uniform(TmpRef(tmp))
                 # iterated ops get their 0-based iteration index as the last argument
                 last = f", {glsl_float(iterations - 1)}" if iterated(op) else ""

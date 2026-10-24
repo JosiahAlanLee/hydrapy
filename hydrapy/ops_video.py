@@ -177,19 +177,18 @@ _TO_RGB = np.array([[1.0, 0.956, 0.621], [1.0, -0.272, -0.647], [1.0, -1.106, 1.
 
 
 def _np_yiq(tex, st, chroma, luma, shift, env):
-    px = np.array([1.0 / env.res[0], 0.0], np.float32)
     c = env.sample(tex, st)[..., :3] @ _TO_YIQ.T
     Y = c[..., 0]
     if luma > 0:
         Y = Y * 3.0
         for k, w in ((-2, 1.0), (-1, 2.0), (1, 2.0), (2, 1.0)):
-            Y = Y + w * (env.sample(tex, st + px * (luma * 0.5 * k))[..., :3] @ _TO_YIQ.T)[..., 0]
+            Y = Y + w * (env.sample_offset(tex, st, (luma * 0.5 * k, 0))[..., :3] @ _TO_YIQ.T)[..., 0]
         Y = Y / 9.0
     iq = np.zeros(st.shape[:2] + (2,), np.float32)
     wsum = 0.0
     for i in range(-8, 9):
         w = 1.0 - abs(i) / 9.0
-        s = env.sample(tex, st + np.array([i / 8.0 * chroma - shift, 0.0], np.float32))[..., :3] @ _TO_YIQ.T
+        s = env.sample_offset(tex, st, ((i / 8.0 * chroma - shift) * env.w, 0))[..., :3] @ _TO_YIQ.T
         iq += s[..., 1:] * w
         wsum += w
     iq /= wsum

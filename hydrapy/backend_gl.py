@@ -109,6 +109,8 @@ class GLRenderer:
         for n in getattr(self, "_ncas", {}).values():
             for gp, vao in n["steps"] + [n["view_prog"]]:
                 vao.release(); gp.release()
+            for fb in n.get("mrt", []):
+                fb.release()
             for fb in [f for sset in n["sets"] for f in sset] + [n["view"]]:
                 fb["fbo"].release(); fb["tex"].release()
         self._ncas = {}
@@ -227,12 +229,15 @@ class GLRenderer:
     def _nca(self, ref):
         if ref.name in self._ncas:
             return self._ncas[ref.name]
-        from .nca import VIEW_GLSL, shader_header, step_glsl
+        from .nca import VIEW_GLSL, shader_header, step_glsl, step_mrt_glsl
         head = shader_header(self.precision)
 
-        def prog(src):
+        def prog(src, mrt=False):
             try:
-                p = self.ctx.program(vertex_shader=VERTEX_DESKTOP, fragment_shader=to_desktop(head + src))
+                source = to_desktop(head + src)
+                if mrt:
+                    source = source.replace("out vec4 _fragColor;", "")
+                p = self.ctx.program(vertex_shader=VERTEX_DESKTOP, fragment_shader=source)
             except Exception as e:
                 raise RuntimeError(f"NCA shader compile error: {e}")
             return p, self.ctx.vertex_array(p, [(self.vbo, "2f", "position")])
@@ -247,9 +252,12 @@ class GLRenderer:
 
         T = ref.model.textures
         view_filter = self.gl.NEAREST if ref.filter == "nearest" else self.gl.LINEAR
-        n = {"steps": [prog(step_glsl(ref.model, k)) for k in range(T)], "view_prog": prog(VIEW_GLSL),
+        limit = min(self.ctx.info.get("GL_MAX_DRAW_BUFFERS", 1), self.ctx.info.get("GL_MAX_COLOR_ATTACHMENTS", 1))
+        mrt = 1 < T <= limit
+        n = {"steps": [prog(step_mrt_glsl(ref.model), mrt=True)] if mrt else [prog(step_glsl(ref.model, k)) for k in range(T)], "view_prog": prog(VIEW_GLSL),
              "sets": [[target(self.gl.NEAREST) for _ in range(T)] for _ in range(2)], "cur": 0,
              "view": target(view_filter)}
+        n["mrt"] = [self.ctx.framebuffer(color_attachments=[fb["tex"] for fb in sset]) for sset in n["sets"]] if mrt else []
         self._ncas[ref.name] = n
         return n
 
@@ -269,7 +277,7 @@ class GLRenderer:
             for _ in range(steps):
                 cur, nxt = n["sets"][n["cur"]], n["sets"][1 - n["cur"]]
                 for k, (gp, vao) in enumerate(n["steps"]):
-                    nxt[k]["fbo"].use()
+                    (n["mrt"][1 - n["cur"]] if n["mrt"] else nxt[k]["fbo"]).use()
                     for t in range(T):
                         cur[t]["tex"].use(location=t)
                         self._set(gp, f"s{t}", t)

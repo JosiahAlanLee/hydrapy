@@ -18,10 +18,8 @@ def _normalize(v):
 
 def _np_normal(tex, st, strength, radius, env):
     radius = max(abs(radius), .5)
-    dx = np.array([radius / env.res[0], 0], np.float32)
-    dy = np.array([0, radius / env.res[1]], np.float32)
-    gx = (env.sample(tex, st + dx)[..., 0] - env.sample(tex, st - dx)[..., 0]) * env.res[1] / (2 * radius)
-    gy = (env.sample(tex, st + dy)[..., 0] - env.sample(tex, st - dy)[..., 0]) * env.res[1] / (2 * radius)
+    gx = (env.sample_offset(tex, st, (radius, 0))[..., 0] - env.sample_offset(tex, st, (-radius, 0))[..., 0]) * env.res[1] / (2 * radius)
+    gy = (env.sample_offset(tex, st, (0, radius))[..., 0] - env.sample_offset(tex, st, (0, -radius))[..., 0]) * env.res[1] / (2 * radius)
     n = _normalize(np.stack([-gx * strength, -gy * strength, np.ones_like(gx)], axis=-1))
     return np.concatenate([n * .5 + .5, env.sample(tex, st)[..., 3:4]], axis=-1)
 

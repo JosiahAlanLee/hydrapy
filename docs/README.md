@@ -23,6 +23,7 @@ guide for the work you want to make. Run commands from the repository root.
 - [Operator reference](operators.md): every registered operator, argument and default.
 - [Development](development.md): adding operators, source layout, testing and regenerating the reference.
 - [Audio timing](audio-timing.md): sample-clock behavior, long-duration checks and hardware-testing limits.
+- [Performance](PERFORMANCE.md): operator benchmarks, 1080p/4K measurements and optimization limits.
 
 ## Watch and reproduce
 

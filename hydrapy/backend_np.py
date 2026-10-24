@@ -79,6 +79,8 @@ class Env:
     def sample(self, tex: np.ndarray, st: np.ndarray) -> np.ndarray:
         """Sample a (h, w, 4) texture at st (…, 2) with wrap-around, bilinear by default."""
         H, W = tex.shape[:2]
+        if st is self.base_st and (H, W) == (self.h, self.w):
+            return tex.copy()  # custom operators may modify a sampled image
         st = np.nan_to_num(st, nan=0.0, posinf=0.0, neginf=0.0)
         x = np.mod(st[..., 0], 1.0) * W - 0.5
         y = np.mod(st[..., 1], 1.0) * H - 0.5
@@ -98,6 +100,33 @@ class Env:
         y0 = np.mod(y0, H)
         return (tex[y0, x0] * (1 - fx) * (1 - fy) + tex[y0, x1] * fx * (1 - fy)
                 + tex[y1, x0] * (1 - fx) * fy + tex[y1, x1] * fx * fy)
+
+    def sample_offset(self, tex: np.ndarray, st: np.ndarray, offset) -> np.ndarray:
+        """Sample a fixed render-pixel offset without rebuilding a UV grid per tap.
+
+        Matching pixel-centred grids need only shifted arrays and constant
+        bilinear weights. Warped coordinates and other sizes use the sampler.
+        """
+        delta = np.asarray(offset, dtype=np.float32)
+        if (st is not self.base_st or tex.shape[:2] != (self.h, self.w)
+                or delta.shape != (2,) or not np.isfinite(delta).all()):
+            return self.sample(tex, st + delta / self.res)
+        dx, dy = map(float, delta)
+        ix, iy = math.floor(dx), math.floor(dy)
+        fx, fy = np.float32(dx - ix), np.float32(dy - iy)
+        if self.filter == "nearest" and (fx or fy):
+            return self.sample(tex, st + delta / self.res)
+        def shifted(x, y):
+            return tex if x == y == 0 else np.roll(tex, (-y, -x), axis=(0, 1))
+        if not fx and not fy:
+            return shifted(ix, iy)
+        a = shifted(ix, iy)
+        if not fy:
+            return a * (1 - fx) + shifted(ix + 1, iy) * fx
+        if not fx:
+            return a * (1 - fy) + shifted(ix, iy + 1) * fy
+        return (a * ((1 - fx) * (1 - fy)) + shifted(ix + 1, iy) * (fx * (1 - fy))
+                + shifted(ix, iy + 1) * ((1 - fx) * fy) + shifted(ix + 1, iy + 1) * (fx * fy))
 
 
 # ---------------------------------------------------------------------------

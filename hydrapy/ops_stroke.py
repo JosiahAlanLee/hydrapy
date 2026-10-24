@@ -29,17 +29,51 @@ def _asp(env):
     return np.array([env.res[0] / env.res[1], 1.0], np.float32)
 
 
+def _stroke_grid(q):
+    """Recognise rectilinear coordinates once, including scaled/pixelated grids."""
+    xs, ys = q[0, :, 0], q[:, 0, 1]
+    if (np.all(np.diff(xs) >= 0) and np.all(np.diff(ys) >= 0)
+            and np.all(q[..., 0] == xs[None, :]) and np.all(q[..., 1] == ys[:, None])):
+        return xs, ys
+    return None
+
+
+def _stroke_segment(best, q, a, b, width, amplitude, grid):
+    # Beyond eight widths exp(-2*(d/width)^2) underflows to zero in
+    # float32. This is a numerical bound, not a visible-tail quality setting.
+    pad = abs(width) * 8
+    if not np.isfinite(pad) or width == 0:
+        d = segd(q, a, b)
+        np.maximum(best, np.exp(-(d / width) ** 2 * 2) * amplitude, out=best)
+        return
+    lo, hi = np.minimum(a, b) - pad, np.maximum(a, b) + pad
+    if grid is not None:
+        xs, ys = grid
+        x0, x1 = np.searchsorted(xs, lo[0]), np.searchsorted(xs, hi[0], side="right")
+        y0, y1 = np.searchsorted(ys, lo[1]), np.searchsorted(ys, hi[1], side="right")
+        if x0 == x1 or y0 == y1:
+            return
+        region = best[y0:y1, x0:x1]
+        d = segd(q[y0:y1, x0:x1], a, b)
+        np.maximum(region, np.exp(-(d / width) ** 2 * 2) * amplitude, out=region)
+    else:
+        inside = ((q[..., 0] >= lo[0]) & (q[..., 0] <= hi[0])
+                  & (q[..., 1] >= lo[1]) & (q[..., 1] <= hi[1]))
+        if np.any(inside):
+            d = segd(q[inside], a, b)
+            best[inside] = np.maximum(best[inside], np.exp(-(d / width) ** 2 * 2) * amplitude)
+
+
 def _stroke_alpha(q, pts, width, taper, head_at_end=True):
     """Max over segments of a gaussian stroke profile; width/alpha taper towards the tail."""
     K = len(pts) - 1
     best = np.zeros(q.shape[:2], np.float32)
+    grid = _stroke_grid(q)
     for i in range(K):
         u = (i + 0.5) / K
         tail = (1.0 - u) if head_at_end else u
         w = width * (1.0 - taper * tail * 0.85)
-        d = segd(q, pts[i], pts[i + 1])
-        a = np.exp(-(d / w) ** 2 * 2.0) * (1.0 - taper * tail * 0.7)
-        best = np.maximum(best, a)
+        _stroke_segment(best, q, pts[i], pts[i + 1], w, 1.0 - taper * tail * 0.7, grid)
     return best.astype(np.float32)
 
 
@@ -53,9 +87,9 @@ def _white(alpha):
 # strokes
 # -----------------------------------------------------------------------------
 
-_STROKE_GLSL = """    float d = _segd(q, prev, p);
-    float tail = 1.0 - u;
+_STROKE_GLSL = """    float tail = 1.0 - u;
     float w = width * (1.0 - taper * tail * 0.85);
+    float d = _segd(q, prev, p);
     float a = exp(-(d / w) * (d / w) * 2.0) * (1.0 - taper * tail * 0.7);
     best = max(best, a);
     prev = p;"""
@@ -128,13 +162,12 @@ def _np_wave(st, frequency, amplitude, width, speed, phase, length, taper, env):
         pts.append((x, y))
     # both ends taper, so the window is symmetric: fold the segment index towards the middle
     best = np.zeros(st.shape[:2], np.float32)
+    grid = _stroke_grid(q)
     for i in range(K):
         u = (i + 0.5) / K
         edge = abs(2.0 * u - 1.0)
         w = width * (1.0 - taper * edge * 0.85)
-        d = segd(q, pts[i], pts[i + 1])
-        a = np.exp(-(d / w) ** 2 * 2.0) * (1.0 - taper * edge * 0.7)
-        best = np.maximum(best, a)
+        _stroke_segment(best, q, pts[i], pts[i + 1], w, 1.0 - taper * edge * 0.7, grid)
     return _white(best)
 
 
@@ -156,8 +189,8 @@ register(Op("wave", "src",
     vec2 p = vec2(x, amplitude * sin(6.283185307 * (frequency * (x / asp.x + 0.5) + phase + time * speed)));
     float um = (float(i) - 0.5) / n;
     float edge = abs(2.0 * um - 1.0);
-    float d = _segd(q, prev, p);
     float w = width * (1.0 - taper * edge * 0.85);
+    float d = _segd(q, prev, p);
     float a = exp(-(d / w) * (d / w) * 2.0) * (1.0 - taper * edge * 0.7);
     best = max(best, a);
     prev = p;
