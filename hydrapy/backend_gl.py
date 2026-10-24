@@ -123,8 +123,9 @@ class GLRenderer:
                 raise RuntimeError(f"shader compile error in {prog.output.name}/{p.target}:\n{e}\n{numbered}")
             vao = self.ctx.vertex_array(gprog, [(self.vbo, "2f", "position")])
             passes.append((p.target, gprog, vao, prog.float_uniforms, prog.sampler_uniforms))
-            if p.target.startswith("tmp") and hasattr(self, "tmps") and p.target not in self.tmps:
-                self.tmps[p.target] = self._fbo()         # a variant compiled after _alloc()
+            key = (prog.output.name, p.target)
+            if p.target.startswith("tmp") and hasattr(self, "tmps") and key not in self.tmps:
+                self.tmps[key] = self._fbo(self._osize(prog.output.name))   # a variant compiled after _alloc()
         return passes
 
     def _variant(self, prog, value):
@@ -140,6 +141,10 @@ class GLRenderer:
         return self._variants[(prog.output.name, key)]
 
     # -- buffers -----------------------------------------------------------
+    def _osize(self, name) -> tuple:
+        """The pixel size an output renders at (Chain.out(scale=...))."""
+        return self.patch.output_size(name, self.size)
+
     def _fbo(self, size=None, dtype="f2"):
         tex = self.ctx.texture(size or self.size, 4, dtype=dtype)
         tex.filter = (self.gl.LINEAR, self.gl.LINEAR)
@@ -198,13 +203,15 @@ class GLRenderer:
         for prog in self.programs:
             for k, v in prog.history.items():
                 depth[k] = max(depth.get(k, 0), v)
-        self.outs = {f"o{i}": {"ring": [self._fbo() for _ in range(max(2, depth.get(f"o{i}", 0) + 2))]} for i in range(4)}
-        self.tmps = {}
+        self.outs = {f"o{i}": {"ring": [self._fbo(self._osize(f"o{i}")) for _ in range(max(2, depth.get(f"o{i}", 0) + 2))]}
+                     for i in range(4)}
+        self.tmps = {}                      # (output name, tmpN) -> target at that output's size
         self._present = self._fbo(dtype="f1")
         for prog in self.programs:
             for p in prog.passes:
-                if p.target.startswith("tmp") and p.target not in self.tmps:
-                    self.tmps[p.target] = self._fbo()
+                key = (prog.output.name, p.target)
+                if p.target.startswith("tmp") and key not in self.tmps:
+                    self.tmps[key] = self._fbo(self._osize(prog.output.name))
 
     def resize(self, size):
         if tuple(size) == self.size:
@@ -285,7 +292,7 @@ class GLRenderer:
         if isinstance(ref, Output):
             return self.outs[ref.name]["ring"][0]["tex"]
         if isinstance(ref, TmpRef):
-            return self.tmps[ref.name]["tex"]
+            return self.tmps[(current.name, ref.name)]["tex"]
         from .nca import NCA
         if isinstance(ref, NCA):
             return self._nca(ref)["view"]["tex"]
@@ -398,13 +405,15 @@ class GLRenderer:
 
         for prog in self.programs:
             output = prog.output
+            w, h = self._osize(output.name)
             for target, gprog, vao, floats, samplers in self._variant(prog, value):
-                dest = self.tmps[target] if target.startswith("tmp") else self.outs[output.name]["ring"][-1]
+                dest = self.tmps[(output.name, target)] if target.startswith("tmp") else self.outs[output.name]["ring"][-1]
                 if vao is not None:
                     dest["fbo"].use()
+                    self.ctx.viewport = (0, 0, w, h)
                 self._set(gprog, "time", ctx.time)
-                self._set(gprog, "resolution", (float(self.size[0]), float(self.size[1])))
-                self._set(gprog, "mouse", (self.mouse[0] * self.size[0], self.mouse[1] * self.size[1]))
+                self._set(gprog, "resolution", (float(w), float(h)))
+                self._set(gprog, "mouse", (self.mouse[0] * w, self.mouse[1] * h))
                 for u in floats:
                     self._set(gprog, u.name, value(u.source))
                 for i, u in enumerate(samplers):
@@ -414,8 +423,7 @@ class GLRenderer:
                 if vao is None:
                     from .compute import GROUP_SIZE
                     dest["tex"].bind_to_image(0, read=False, write=True)
-                    gprog.run((self.size[0] + GROUP_SIZE - 1) // GROUP_SIZE,
-                              (self.size[1] + GROUP_SIZE - 1) // GROUP_SIZE)
+                    gprog.run((w + GROUP_SIZE - 1) // GROUP_SIZE, (h + GROUP_SIZE - 1) // GROUP_SIZE)
                     # Publish image writes to later samplers, image writes, FBO
                     # operations (including readback), and texture read/copy APIs.
                     self.ctx.memory_barrier(self.gl.TEXTURE_FETCH_BARRIER_BIT |
@@ -481,7 +489,7 @@ void main() {
                     continue
             if audio and not pr.needs_update(wall_time, 1.0 / self.fps):
                 continue
-            x0, y0, w, h = pr.region(self.size[0], self.size[1])
+            x0, y0, w, h = pr.region(*self._osize(pr.output.name))
             source = self.outs[pr.output.name]["ring"][0]
             if type(pr) is Probe:
                 rgba = self._probe_mean(source["tex"], (x0, y0, w, h))
@@ -522,7 +530,8 @@ void main() {
     def read_rgba(self) -> np.ndarray:
         """Uncomposited straight RGBA, for analysis and transparent-layer tests."""
         fbo = self.outs[self.patch.display.name]["ring"][0]["fbo"]
-        return np.frombuffer(fbo.read(components=4, dtype="f4"), np.float32).reshape(self.size[1], self.size[0], 4)[::-1].copy()
+        w, h = self._osize(self.patch.display.name)    # a scaled display is read at its own size
+        return np.frombuffer(fbo.read(components=4, dtype="f4"), np.float32).reshape(h, w, 4)[::-1].copy()
 
     def blit_to_screen(self, screen_size):
         self.ctx.screen.use()
@@ -685,7 +694,8 @@ def _reload(old: "GLRenderer", loader, ctx, fps):
             for name, o in old.outs.items():
                 if name in new.outs:
                     for dest, source in zip(new.outs[name]["ring"], o["ring"]):
-                        ctx.copy_framebuffer(dest["fbo"], source["fbo"])
+                        if dest["tex"].size == source["tex"].size:     # an edit may change an output's scale
+                            ctx.copy_framebuffer(dest["fbo"], source["fbo"])
             new.clock.calls, new.clock.updates = old.clock.calls, old.clock.updates
             new.clock.last_time, new.clock.last_key = old.clock.last_time, None
             new.frame, new.mouse = old.frame, old.mouse

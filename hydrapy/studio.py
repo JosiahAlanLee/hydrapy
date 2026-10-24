@@ -194,7 +194,8 @@ class Session:
                     if hasattr(old, 'outs') and hasattr(new, 'outs'):
                         for name, output in old.outs.items():
                             for dst, src in zip(new.outs[name]['ring'], output['ring']):
-                                new.ctx.copy_framebuffer(dst['fbo'], src['fbo'])
+                                if dst['tex'].size == src['tex'].size:
+                                    new.ctx.copy_framebuffer(dst['fbo'], src['fbo'])
                     elif hasattr(old, 'env') and hasattr(new, 'env'):
                         new.env.buffers = dict(old.env.buffers)
                         new.env.rings = {k: list(v) for k, v in old.env.rings.items()}

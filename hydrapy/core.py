@@ -326,10 +326,23 @@ class Chain:
     def _with(self, op: Op, args: list) -> "Chain":
         return Chain(self.transforms + [Transform(op, args)])
 
-    def out(self, output: "Output | None" = None, patch: "Patch | None" = None) -> "Chain":
-        """Assign this chain to an output (default o0) of a patch (default the global patch)."""
+    def out(self, output: "Output | None" = None, patch: "Patch | None" = None, scale: "float | None" = None) -> "Chain":
+        """Assign this chain to an output (default o0) of a patch (default the global patch).
+
+        ``scale`` renders that output at a fraction of the frame size (0.25 = a quarter of the width and
+        height, a sixteenth of the pixels); whatever samples it, the display included, scales it back up
+        bilinearly. Soft material — out-of-focus grounds, feedback trails, blurs, simulations — loses
+        nothing visible and costs a fraction. Pixel-sized ops (``blur``, ``rd``) work in that output's pixels."""
         p = patch or default_patch()
-        p.assign(output or p.o0, self)
+        o = output or p.o0
+        p.assign(o, self)
+        if scale is not None:
+            scale = float(scale)
+            if not (0.0 < scale <= 4.0):
+                raise ValueError("scale must be in (0, 4]")
+            p.scales[o.index] = scale
+        else:
+            p.scales.pop(o.index, None)
         return self
 
     # -- python operators (sugar) ----------------------------------------------
@@ -470,6 +483,7 @@ class Patch:
         self.frame_rate = None          # e.g. 18: update feedback and pixels at most 18 times a second
         self.composite_alpha = False   # Hydra's display: RGB, alpha is a fourth channel. True: show RGB x alpha over black
         self.controls: dict = {}        # explicitly exposed Param signals
+        self.scales: dict = {}          # output index -> render scale (Chain.out(scale=...)); absent = 1
         self.probes: list = []          # live.Probe instances, updated after every frame
         self.transport = None           # live.Transport (Link, MidiClock) for `hydrapy live`; None = wall clock
 
@@ -487,6 +501,17 @@ class Patch:
         for o in self.outputs:
             o.chain = None
         self.display = self.o0
+        self.scales.clear()
+
+    def output_size(self, output, size) -> tuple:
+        """The pixel size ``output`` (an Output, an index or a name like 'o1') renders at in a ``size`` frame."""
+        if isinstance(output, str):
+            if not (output.startswith("o") and output[1:].isdigit()):
+                return tuple(size)
+            output = int(output[1:])
+        index = output if isinstance(output, int) else output.index
+        s = getattr(self, "scales", {}).get(index, 1.0)
+        return (max(1, int(round(size[0] * s))), max(1, int(round(size[1] * s))))
 
     def active_outputs(self) -> list[Output]:
         return [o for o in self.outputs if o.chain is not None]

@@ -753,3 +753,49 @@ def test_structurally_equal_signals_share_one_uniform():
     ch = osc(10, l * 0.5 + 0.1).rotate(l * 0.5 + 0.1).kaleid(Lfo(0.3) * 2)
     prog = compile_chain(ch)
     assert len(prog.float_uniforms) == 2        # l*0.5+0.1 once; the second Lfo is another object
+
+
+# --- per-output resolution -------------------------------------------------------------------
+
+def _scaled_patch():
+    p = Patch(size=(64, 36))
+    noise(3, 0.2).color(0.9, 0.5, 0.2).blur(1).out(p.o1, patch=p, scale=0.25)
+    src(p.o2).scale(1.02).blend(osc(6, 0.1, 1.2), 0.2).out(p.o2, patch=p, scale=0.5)
+    src(p.o1).add(src(p.o2), 0.5).out(p.o0, patch=p)
+    return p
+
+
+def test_scaled_outputs_render_smaller_and_upscale_on_numpy():
+    p = _scaled_patch()
+    assert p.output_size(p.o1, (64, 36)) == (16, 9) and p.output_size("o2", (64, 36)) == (32, 18)
+    r = Renderer(p, size=(64, 36), fps=10)
+    for i in range(3):
+        img = r.step(i / 10)
+    assert img.shape == (36, 64, 4) and np.isfinite(img).all()
+    assert r.env.buffers[1].shape == (9, 16, 4) and r.env.buffers[2].shape == (18, 32, 4)
+    with pytest.raises(ValueError):
+        osc().out(p.o3, patch=p, scale=0)
+    from hydrapy.export import patch_to_python
+    assert "out(o1, scale=0.25)" in patch_to_python(p)
+
+
+@pytest.mark.skipif(not _gl_available(), reason="no GL")
+def test_scaled_outputs_on_gl_match_numpy_and_read_at_their_size():
+    from hydrapy.backend_gl import GLRenderer
+    rn, rg = Renderer(_scaled_patch(), size=(64, 36), fps=10), GLRenderer(_scaled_patch(), size=(64, 36), fps=10)
+    for i in range(4):
+        a = rn.step(i / 10)
+        rg.step(i / 10)
+    assert rg.outs["o1"]["ring"][0]["tex"].size == (16, 9) and rg.outs["o2"]["ring"][0]["tex"].size == (32, 18)
+    assert np.abs(np.clip(a[..., :3], 0, 1) - rg.read() / 255.0).mean() < 0.02
+    rg.patch.render(rg.patch.o1)
+    assert rg.read_rgba().shape == (9, 16, 4) and rg.read().shape == (36, 64, 3)
+    rg.release()
+
+
+def test_html_export_carries_output_scales():
+    from hydrapy.export import build_spec
+    spec = build_spec(_scaled_patch(), size=(64, 36))
+    assert spec["scales"] == {"o1": 0.25, "o2": 0.5}
+    from hydrapy.export import RUNTIME_JS
+    assert "function osz(n)" in RUNTIME_JS and "bindRef(s.ref, s.delay, o.name)" in RUNTIME_JS

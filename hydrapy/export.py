@@ -447,7 +447,8 @@ def patch_to_python(patch: Optional[Patch] = None) -> str:
     del _PY_NOTES[:]
     for o in patch.active_outputs():
         _externals(o.chain, ext)
-        body.append(f"{chain_to_python(o.chain)}.out({o.name})")
+        scale = getattr(patch, "scales", {}).get(o.index)
+        body.append(f"{chain_to_python(o.chain)}.out({o.name}" + (f", scale={scale:g})" if scale else ")"))
     src = "\n".join(body)
     head = ["import math", "from hydrapy import *", ""]
     if _PY_NOTES:
@@ -611,6 +612,7 @@ def build_spec(patch: Optional[Patch] = None, pixel_ratio: float = 1.0, size: Op
         "pixelRatio": pixel_ratio,
         "size": list(size) if size else None,
         "mint": _mint_spec(programs, mint, preview_at),
+        "scales": {f"o{i}": s for i, s in getattr(patch, "scales", {}).items() if s != 1.0},
         "hydra": _try_hydra(patch),
     }
 
@@ -941,11 +943,18 @@ RUNTIME_JS = AUDIO_HELPERS_JS + r"""(function(){
     lastRenderTime = null;
     outs = {}; tmps = {};
     ['o0','o1','o2','o3'].forEach(function(n){
-      var depth = (SPEC.history && SPEC.history[n]) || 0, ring = [];
-      for (var k = 0; k < Math.max(2, depth + 2); k++) ring.push(makeFBO(W, H));
-      outs[n] = {ring: ring};   // ring[0] = latest completed frame, ring[ring.length-1] = written next
+      var depth = (SPEC.history && SPEC.history[n]) || 0, ring = [], sz = osz(n);
+      for (var k = 0; k < Math.max(2, depth + 2); k++) ring.push(makeFBO(sz[0], sz[1]));
+      outs[n] = {ring: ring, w: sz[0], h: sz[1]};   // ring[0] = latest completed frame, ring[ring.length-1] = written next
     });
-    outputs.forEach(function(o){ o.passes.forEach(function(p){ if (p.target.indexOf('tmp') === 0 && !tmps[p.target]) tmps[p.target] = makeFBO(W, H); }); });
+    // intermediate targets belong to one output and share its size (Chain.out(scale=...))
+    outputs.forEach(function(o){ var sz = osz(o.name); o.passes.forEach(function(p){
+      var key = o.name + ':' + p.target;
+      if (p.target.indexOf('tmp') === 0 && !tmps[key]) tmps[key] = makeFBO(sz[0], sz[1]); }); });
+  }
+  function osz(n){
+    var s = (SPEC.scales && SPEC.scales[n]) || 1;
+    return [Math.max(1, Math.round(W * s)), Math.max(1, Math.round(H * s))];
   }
   window.addEventListener('resize', resize);
   resize();
@@ -1130,9 +1139,9 @@ RUNTIME_JS = AUDIO_HELPERS_JS + r"""(function(){
     gl.viewport(0, 0, W, H);
   }
 
-  function bindRef(ref, delay){
+  function bindRef(ref, delay, owner){
     if (outs[ref]) { var ring = outs[ref].ring; return ring[Math.min(delay || 0, ring.length - 2)].tex; }
-    if (tmps[ref]) return tmps[ref].tex;
+    if (owner && tmps[owner + ':' + ref]) return tmps[owner + ':' + ref].tex;
     if (ncas[ref]) return ncas[ref].out.tex;
     if (sims[ref]) return sims[ref].out.tex;
     if (media[ref]) {
@@ -1165,18 +1174,19 @@ RUNTIME_JS = AUDIO_HELPERS_JS + r"""(function(){
     if (draw) outputs.forEach(function(o){
       if (!needed[o.name]) return;
       var vals = o.floats.map(function(f){ var v = f.fn(time, SPEC.bpm, mx, my, fft, vol, flux, dt); return isFinite(v) ? v : 0; });
+      var OW = outs[o.name].w, OH = outs[o.name].h;
       o.passes.forEach(function(p){
         if (!p.prog) return;
-        var target = p.target.indexOf('tmp') === 0 ? tmps[p.target] : outs[o.name].ring[outs[o.name].ring.length - 1];
+        var target = p.target.indexOf('tmp') === 0 ? tmps[o.name + ':' + p.target] : outs[o.name].ring[outs[o.name].ring.length - 1];
         gl.bindFramebuffer(gl.FRAMEBUFFER, target.fb);
-        gl.viewport(0, 0, W, H);
+        gl.viewport(0, 0, OW, OH);
         gl.useProgram(p.prog);
         gl.uniform1f(p.locs.time, time);
-        gl.uniform2f(p.locs.resolution, W, H);
-        gl.uniform2f(p.locs.mouse, mx * W, my * H);
+        gl.uniform2f(p.locs.resolution, OW, OH);
+        gl.uniform2f(p.locs.mouse, mx * OW, my * OH);
         o.floats.forEach(function(f, i){ gl.uniform1f(p.locs[f.name], vals[i]); });
         o.samplers.forEach(function(s, i){
-          var tex = bindRef(s.ref, s.delay);
+          var tex = bindRef(s.ref, s.delay, o.name);
           gl.activeTexture(gl.TEXTURE0 + i);
           gl.bindTexture(gl.TEXTURE_2D, tex);
           gl.uniform1i(p.locs[s.name], i);
@@ -1222,21 +1232,22 @@ RUNTIME_JS = AUDIO_HELPERS_JS + r"""(function(){
       // Bound catch-up after a suspended tab. Audio keeps holding the last complete strip.
       if (now - nextT > period * 6) nextT = now - period * 5;
       var col = lastCol;
-      if (dirty || !col || col.length !== H) {
-        var w = Math.min(Math.max(Math.round(cfg.width * W), 1), W);
-        var x0 = Math.min(Math.max(Math.floor(cfg.x * W - w / 2), 0), W - w);
-        var pix = useFloat ? new Float32Array(w * H * 4) : new Uint8Array(w * H * 4);
+      var TW = outs[cfg.output].w, TH = outs[cfg.output].h;
+      if (dirty || !col || col.length !== TH) {
+        var w = Math.min(Math.max(Math.round(cfg.width * TW), 1), TW);
+        var x0 = Math.min(Math.max(Math.floor(cfg.x * TW - w / 2), 0), TW - w);
+        var pix = useFloat ? new Float32Array(w * TH * 4) : new Uint8Array(w * TH * 4);
         gl.bindFramebuffer(gl.FRAMEBUFFER, outs[cfg.output].ring[0].fb);
-        gl.readPixels(x0, 0, w, H, gl.RGBA, useFloat ? gl.FLOAT : gl.UNSIGNED_BYTE, pix);
-        col = new Float64Array(H);
+        gl.readPixels(x0, 0, w, TH, gl.RGBA, useFloat ? gl.FLOAT : gl.UNSIGNED_BYTE, pix);
+        col = new Float64Array(TH);
         var scale = useFloat ? 1 : 1 / 255;
-        for (var y = 0; y < H; y++) {
+        for (var y = 0; y < TH; y++) {
           var s = 0;
           for (var xx = 0; xx < w; xx++) {
             var o = ((y * w) + xx) * 4;
             s += (pix[o] * 0.2125 + pix[o+1] * 0.7154 + pix[o+2] * 0.0721) * scale * (SPEC.compositeAlpha ? Math.max(0, Math.min(1, pix[o+3] * scale)) : 1);
           }
-          col[H - 1 - y] = s / w;
+          col[TH - 1 - y] = s / w;
         }
         dirty = false;
       }
