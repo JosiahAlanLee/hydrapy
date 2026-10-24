@@ -17,6 +17,26 @@ preview is 640×360 at a target 30 fps. Use `--size 960x540 --fps 24` to change 
 `--port 0` chooses a free port; `--no-browser` just prints the local URL. Keep the full
 URL, including its session fragment. The server binds only to 127.0.0.1.
 
+The selected preview requests the next available JPEG as soon as the previous image
+is decoded and scheduled for display, independently of the 250 ms controls/status
+poll. At most one request/decode is in flight. Slow clients receive the latest frame;
+they do not accumulate a playback queue. Switching outputs or reloading invalidates
+old captures and in-flight browser results. Hidden tabs suspend preview requests.
+
+JPEG encoding runs in a separate worker with one replaceable pending main frame and
+up to four pending thumbnails. Only the selected output gets full-size JPEGs.
+Thumbnails refresh about twice a second each, staggered across render ticks. With no
+viewers, requests stop driving captures and the thumbnail lease expires after two
+seconds. Encoding/HTTP failures do not pause synthesis. GPU readback still runs on
+the GL thread and can wait for the GPU; this change does not add asynchronous PBOs
+to Studio or change render resolution, precision, simulation clocks, feedback, or
+live hooks. Recording reads every synthesis frame and snapshots read a fresh lossless
+frame, independently of preview delivery.
+
+Open **Preview performance** for delivered frame rate and stage timings. GPU timer
+queries are opt-in; leave them off for an ordinary performance. See
+[preview measurement and regression checks](#measure-preview-performance) below.
+
 ![HydraPy Studio workspace](studio/workspace.png)
 
 ## Work with a patch
@@ -144,3 +164,67 @@ No node graph or separate project language is required.
 
 For a complete audio-reactive piece with seven scenes and moving crossfades, see
 the [Bullfrog demo](bullfrog-demo.md).
+
+## Measure preview performance
+
+The browser retains the latest 300 measurements in `window.hydrapyPreview.samples`.
+The authenticated `/api/frame?output=o0&after=SEQUENCE` endpoint waits at most one
+second for a newer selected frame, returning a JPEG with `X-Preview-Sequence`,
+`X-Preview-Age-Ms`, and `Server-Timing` headers, or an empty 204 response. Status
+reports encoder replacements, bounded pending-slot counts, and preview errors.
+
+| Measurement | Scope and limitation |
+| --- | --- |
+| `render_cpu_ms` | Wall time in `renderer.step()`, including Python, GL submission and live hooks. It is not GPU-only time. |
+| `gpu_ms` | Optional GL elapsed-time query around the same step. Read only after the normal readback has completed; unavailable on CPU. Software GL reports software-renderer execution here. |
+| `readback_ms` | Wall time for selected-output presentation, framebuffer download and RGB conversion. Includes any remaining GPU wait; overlaps GPU timing, so these fields must not be added as independent stages. Recording shares its existing readback. |
+| `encode_wait_ms`, `jpeg_ms` | Captured RGB waiting for the worker, then image/JPEG encoding. Neither runs on the render thread. |
+| `wait_ms` | HTTP handler waiting for a newer encoded image. This is normal when the client catches up. |
+| `transfer_ms`, `ttfb_ms` | Browser Resource Timing: response start to end, and request start to first byte. TTFB includes the server wait and network time. Null when the browser has no resource entry. |
+| `decode_ms`, `display_wait_ms` | Image decoding and waiting for the next animation-frame callback before inserting the decoded image. Browser scheduling can contribute to decode time. |
+| `frame_age_estimate_ms` | Server render-start-to-send duration plus browser headers-received-to-display scheduling. Excludes first-byte transit and physical monitor scanout. Clocks are not assumed synchronized. This is an estimate, not a camera-measured end-to-end latency. |
+
+Run the real page in headless Chromium with both a simple oscillator and an expensive
+four-output noise/blur/feedback composition:
+
+```sh
+python -m pip install -e '.[gpu,test,video]' playwright
+python -m playwright install chromium
+python docs/studio_preview_benchmark.py --backend gl --size 640x360 --json preview.json
+python docs/studio_preview_benchmark.py --backend gl --size 640x360 --profile --json profiled.json
+HYDRAPY_BROWSER_TESTS=1 python -m pytest tests/test_studio.py tests/test_studio_preview.py tests/test_studio_preview_browser.py -q
+```
+
+`--case single` / `--case multi`, `--fps`, `--seconds`, and `--warmup` control the run.
+`--checkout /path/to/base` runs the same browser harness against another checkout,
+including the original polling page. Reports identify the actual imported package,
+commit, dirty-tree status, Python, browser and GL renderer, and median/p95 stage times.
+Do not compare runs while another benchmark or test suite is competing for the same
+CPU/GPU. The browser tests are explicit opt-in; missing Playwright/Chromium fails an
+opted-in run rather than silently skipping it. GL tests skip if no GL context exists.
+
+Measured on October 24, 2026 with Mesa llvmpipe (LLVM 20.1.2), Python 3.13.16 and
+headless Chromium 134.0.6998.35 at 640×360 / 30 fps: two seconds warmup and five seconds
+sampling per case. Baseline is `44c88f4`; the same harness drove both pages. GPU
+profiling was off for this comparison. These are short software-renderer measurements,
+not physical Ubuntu GPU results or guaranteed rates.
+
+| Synthetic patch | Before: browser fps | After: browser fps | Before / after: render fps | After: frame age estimate, median / p95 |
+| --- | ---: | ---: | ---: | ---: |
+| Single oscillator | 4.0 | 23.2 | 30.0 / 30.0 | 26.4 / 39.7 ms |
+| Four outputs, noise/blur/feedback | 4.0 | 18.2 | 28.5 / 30.0 | 46.0 / 60.5 ms |
+
+A separate run with GPU profiling enabled delivered 29.6 / 18.4 browser fps; timing
+and scheduling vary between runs. The original page has no per-frame instrumentation,
+so no baseline frame-age estimate is claimed. Persistent HTTP initially introduced
+about 42 ms of response-body delay in this environment; `TCP_NODELAY` removed that
+delay (final median body transfer about 0.7 ms). Optional GPU timings in the four-output
+run were 24.0 ms median, with 2.7 ms readback and 0.9 ms JPEG encoding; GPU/readback
+timings overlap as described above.
+
+Regression checks cover bounded latest-frame replacement, stalled encoding and clients,
+selection/reload invalidation, thumbnail cadence, pause/resume and visibility handling,
+HTTP authorization, and exact CPU/GL feedback and audio equivalence at fixed timestamps.
+The existing Studio tests also exercise controls, failed edits, staged hardware, and
+real offline PNG export. Physical GPU, ADAT/CV, and a concurrent RAVE workload still
+need validation on the Ubuntu performance machine.
