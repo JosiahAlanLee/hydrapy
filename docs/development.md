@@ -71,12 +71,15 @@ tests/                 tests including CPU/GPU parity, exports and audio timing
 ## Check a change
 
 ```sh
-python -m pip install -e ".[test,gpu,video]"
+python -m pip install -e ".[test,osc,video,vector]"
 python -m pytest -q
 ```
 
-GPU tests need a working GL context; encoded-video inspection also uses `ffprobe`.
-Optional integrations are skipped when their dependencies are unavailable.
+PRs run the CPU suite on Python 3.9 and 3.13. Install the `gpu` extra for GPU tests;
+these need a working GL context. Encoded-video inspection also uses `ffprobe`.
+Optional integrations are skipped when their dependencies are unavailable. See
+[maintenance checks](maintenance.md) for the CI environment, saved test reports,
+repeatable GPU measurements and the separate physical-audio test protocol.
 
 ## Maintain the operator reference
 
