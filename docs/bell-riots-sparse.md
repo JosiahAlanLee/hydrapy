@@ -1,5 +1,8 @@
 # Bell Riots Pt 2 — Unfolding edit
 
+The later [counterpoint mix and fourth edit](bell-riots-counterpoint.md) add the
+external Pd score and move Unfolding into brief bridges and a distant tunnel center.
+
 A third pass on the same closing edit: **7:14.462–13:15.555** of the recording,
 lasting **6:01.093**. Opus's [Unfolding](../patches/41_unfolding.py) stays on
 screen while individual materials from the earlier videos enter through sparse
