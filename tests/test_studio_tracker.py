@@ -203,3 +203,54 @@ def test_external_clock_exclusion_reload_and_rejected_edits(tmp_path):
         assert not session.tracker.enabled
     finally:
         session.close()
+
+
+def test_studio_output_sync_is_not_an_edit_conflict():
+    tracker = Tracker()
+    base = tracker.revision
+    tracker.sync_program('o2', 1.)
+    assert tracker.document['modes']['program'] == 'o2'
+    assert tracker.revision == base + 1
+    # An editor still holding the pre-sync revision is accepted, and the
+    # server's program output survives its stale copy of the routing.
+    d = score(); d['bpm'] = 120
+    tracker.replace(d, 1., base)
+    assert tracker.document['bpm'] == 120
+    assert tracker.document['modes']['program'] == 'o2'
+    # Repeating a sync to the same output changes nothing.
+    revision = tracker.revision
+    tracker.sync_program('o2', 1.)
+    assert tracker.revision == revision
+
+
+def test_a_real_concurrent_edit_is_still_rejected_after_a_sync():
+    tracker = Tracker()
+    tracker.replace(score(), 1., 0)        # window A edits
+    tracker.sync_program('o3', 1.)         # Studio switches output
+    with pytest.raises(ValueError, match='another window'):
+        tracker.replace(score(), 1., 0)    # window B never saw A's edit
+    with pytest.raises(ValueError, match='another window'):
+        tracker.replace(score(), 1., tracker.revision + 1)
+    with pytest.raises(ValueError, match='another window'):
+        tracker.replace(score(), 1., True)
+
+
+def test_switching_studio_output_does_not_reject_the_open_tracker(tmp_path):
+    (tmp_path/'p.py').write_text("from hydrapy import *\nsolid(1,0,0).out(o0)\nsolid(0,1,0).out(o1)\n")
+    session = Session(tmp_path, 'p.py', backend='cpu', size=(32,18), fps=30)
+    try:
+        base = session.tracker.revision
+        session.call('output', index=1)
+        assert session.tracker.document['modes']['program'] == 'o1'
+        d = copy.deepcopy(session.tracker.document); d['modes']['program'] = 'o0'; d['bpm'] = 100
+        result = session.call('tracker_score', document=d, revision=base)
+        assert result['document']['bpm'] == 100
+        assert result['document']['modes']['program'] == 'o1'
+        assert session.renderer.patch.display.name == 'o1'
+        session.call('output', index=0)    # another sync after the edit
+        session.call('tracker_save', revision=result['revision'])
+        assert json.loads((tmp_path/'.hydrapy'/'tracker.json').read_text())['bpm'] == 100
+        with pytest.raises(ValueError, match='another window'):
+            session.call('tracker_save', revision=base)   # predates the edit
+    finally:
+        session.close()
