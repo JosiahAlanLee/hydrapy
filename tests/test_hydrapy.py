@@ -682,3 +682,36 @@ def test_cvout_carries_a_soundtrack_at_audio_rate(tmp_path):
     expected = np.concatenate([*queued, np.tile(queued[-1], 3)])[:6000]
     np.testing.assert_array_equal(np.concatenate([a, b]), expected)  # hold the whole converted chunk
     q.close()
+
+
+# --- specialised GL variants: transforms at their identity value are compiled out ----------------
+
+def test_gates_find_identity_parameters_but_not_per_pixel_ones():
+    from hydrapy.glsl import gates
+    w = Fn(lambda c: 0.0)
+    ch = osc(10).blend(noise(3).add(voronoi(4), w), w).modulate(noise(2), 0).mult(shape(4), osc(2))
+    found = [(tr.op.name, v) for tr, v, ident in gates(ch)]
+    assert ("blend", w) in found and ("add", w) in found and ("modulate", 0) in found
+    assert all(name != "mult" for name, _ in found)          # a per-pixel amount is never gated
+
+
+@pytest.mark.skipif(not _gl_available(), reason="no GL")
+def test_gl_variants_skip_faded_branches_and_match_the_full_program():
+    from hydrapy.backend_gl import GLRenderer
+    fade = Fn(lambda c: 0.0 if c.time < 0.5 or c.time > 1.0 else (c.time - 0.5) * 2)
+    def build():
+        p = Patch(size=(48, 27))
+        heavy = noise(4, 0.3).blur(2, 2).color(0.2, 0.9, 0.4)               # a texture op: extra passes
+        src(p.o0).scale(1.01).blend(osc(8, 0.1, 1.2).add(heavy, fade), 0.5).out(p.o0, patch=p)
+        return p
+    fast, full = GLRenderer(build(), size=(48, 27), fps=10), GLRenderer(build(), size=(48, 27), fps=10)
+    full.specialise = False
+    for i in range(16):
+        t = i / 10
+        fast.step(t), full.step(t)
+        assert np.array_equal(fast.read_rgba(), full.read_rgba()), t
+    keys = [k for (name, k) in fast._variants if name == "o0"]
+    assert None in keys and any(k for k in keys)               # the full program and a variant without the blur
+    skipped = next(v for (name, k), v in fast._variants.items() if name == "o0" and k)
+    assert len(skipped) < len(fast._variants[("o0", None)])    # fewer passes while the branch is faded out
+    fast.release(); full.release()

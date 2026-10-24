@@ -33,8 +33,10 @@ guide for the work you want to make. Run commands from the repository root.
 | [Demoscene preview](demoscene_preview.mp4) · [contact sheet](demoscene_preview.png) | `python docs/demoscene_demo.py --out demo.mp4 --contact demo.png` |
 | [Drawn soundtrack](ornament_sound.mp4) | Render [patch 25](../patches/25_ornament_sound.py) with audio |
 | Animated cellular and geometry sources | `python docs/generative_demo.py --out generative_demo.mp4` |
+| [Bullfrog, in layers](bullfrog-layers.md): how Hydra layers, one technique at a time | `python docs/bullfrog_layers.py Bullfrog.flac -o bullfrog_layers.mp4` (your copy of the track) |
 
 See [rendering and export](rendering-and-export.md) for backend and encoder requirements.
 
 - [Studio workspace](studio.md) — editor, live output previews, performance controls, presets, connections and export checks.
 - [Bullfrog demo](bullfrog-demo.md) — seven scenes, audio response, and moving crossfades.
+- [Bullfrog, in layers](bullfrog-layers.md) — the same track as a lesson in layering: planes added one combinator at a time, captioned, and taken apart on screen.
