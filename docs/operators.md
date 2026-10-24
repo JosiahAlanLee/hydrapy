@@ -42,6 +42,7 @@ Edit operator declarations, then regenerate this page.
 | `sdfCircle` | `radius=0.25, x=0.5, y=0.5` | **new** | Signed distance to a circle; negative inside. radius is in screen-height units, x/y in normalized screen coordinates. Finish with sdfMask or sdfBands. |
 | `sdfBox` | `width=0.45, height=0.35, radius=0.04, x=0.5, y=0.5` | **new** | Signed distance to a rounded box. Full width/height and corner radius are screen-height units; center x/y is normalized. Finish with sdfMask or sdfBands. |
 | `sdfMetaballs` | `count=5, radius=0.12, spread=0.28, smoothness=0.12, speed=0.5, seed=0` | **new** | Smooth union of 1..16 animated circles, a negative-inside distance bound. Deterministic motion in seconds; radius/spread/smoothness use screen-height units. Finish with sdfMask/sdfBands or derive a normal map. |
+| `pixelOsc` | `rate=0.035, spread=1.6, density=90, pixel=4, geometry=0, phase=0.137, threshold=0` | **new** | Independent binary pixel clocks. With constant controls each cell has a fixed frequency and phase: rate + spread*field (Hz), density*geometry + phase (cycles). pixel is an integer screen-pixel pitch >=1. geometry: 0 saddle, 1 radial, 2 folded, 3 lattice. threshold compares with sine, normally -1..1. No neighbor reads or history; deliberate spatial aliasing. |
 
 ## Coordinate ops
 

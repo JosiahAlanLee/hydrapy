@@ -17,6 +17,7 @@ guide for the work you want to make. Run commands from the repository root.
 | [Rendering and export](rendering-and-export.md) | NumPy/GLSL backends, hardware encoding, frame holds, alpha, streaming and audio export, fxhash projects |
 | [Demoscene tools](DEMOSCENE.md) | Materials, metaballs, spline wireframes, 3D fields, fractal folds and musical timelines |
 | [Animated thi.ng adaptations](TOXI_ANIMATION_SOURCES.md) | Cellular rules, Voronoi fields, curves, vegetation, export limits and source provenance |
+| [Pixel clocks](pixel-oscillators.md) | Independent pixel oscillators, two-color moiré, Studio controls and a live browser study |
 
 ## Reference and development
 
