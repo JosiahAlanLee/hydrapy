@@ -106,6 +106,7 @@ def main(argv=None):
     r.add_argument("--warmup", type=int, default=0, help="frames to run before recording (feedback patches)")
     r.add_argument("--scale", type=int, default=1, help="nearest-neighbour upscale factor")
     r.add_argument("--gpu", action="store_true", help="render with moderngl instead of NumPy")
+    r.add_argument("--compute", action="store_true", help="try experimental rd/bleed compute kernels (implies --gpu; falls back on older GL)")
     r.add_argument("--nearest", action="store_true", help="nearest-neighbour texture sampling (CPU)")
     r.add_argument("--encoder", default="auto", help="H.264 encoder: auto, software, nvenc, videotoolbox, qsv, amf, vaapi (or FFmpeg name)")
 
@@ -275,9 +276,10 @@ def main(argv=None):
         ext = os.path.splitext(a.out)[1].lower()
         size = a.size or patch.size
         t0 = time.time()
-        if a.gpu:
+        if a.gpu or a.compute:
             from .backend_gl import iter_frames_gl
-            frames = iter_frames_gl(patch, seconds=a.seconds, fps=a.fps, size=size, start=a.start, warmup=a.warmup)
+            frames = iter_frames_gl(patch, seconds=a.seconds, fps=a.fps, size=size, start=a.start,
+                                    warmup=a.warmup, compute=a.compute)
         else:
             from .backend_np import iter_frames
             frames = iter_frames(patch, seconds=a.seconds, fps=a.fps, size=size, start=a.start, warmup=a.warmup,

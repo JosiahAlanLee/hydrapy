@@ -22,16 +22,20 @@ import hydrapy as H
 from hydrapy.glsl import compile_patch
 
 
-def cases(size):
+def cases(size, iterations=None):
     image = H.Image("benchmark-memory")
     image._array = np.random.default_rng(11).random((size[1], size[0], 4), dtype=np.float32)
     image._array[..., 3] = 1
     base = lambda: H.src(image)
+    paint = H.Image("benchmark-paint")
+    paint._array = np.random.default_rng(12).random((size[1], size[0], 4), dtype=np.float32)
+    simulation_args = {} if iterations is None else {"iterations": iterations}
     return {
         "osc": lambda: H.osc(),
         "blur": lambda: base().blur(),
-        "rd": lambda: base().rd(),
-        "bleed": lambda: base().bleed(),
+        "rd": lambda: base().rd(**simulation_args),
+        "bleed": lambda: base().bleed(**simulation_args),
+        "bleed_alpha": lambda: H.src(paint).bleed(**simulation_args),
         "drops": lambda: H.drops(),
         "harmonograph": lambda: H.harmonograph(),
         "wave": lambda: H.wave(),
@@ -53,6 +57,8 @@ def main():
     parser.add_argument("--frames", type=int, default=12)
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--readback", action="store_true", help="include GPU RGB download for video export")
+    parser.add_argument("--compute", action="store_true", help="opt into experimental GL compute kernels")
+    parser.add_argument("--iterations", type=int, help="override rd/bleed iterations for both paths")
     parser.add_argument("--json", type=Path)
     args = parser.parse_args()
     try:
@@ -61,19 +67,25 @@ def main():
             raise ValueError
     except ValueError:
         parser.error("size must be WIDTHxHEIGHT; frames and warmup must be positive")
-    factories = cases(size)
+    if args.compute and args.backend != "gl":
+        parser.error("--compute requires --backend gl")
+    if args.iterations is not None and args.iterations < 1:
+        parser.error("iterations must be positive")
+    factories = cases(size, args.iterations)
     names = args.case or [*factories, "bullfrog_surface"]
     if any(n not in factories and n != "bullfrog_surface" for n in names):
         parser.error("unknown case; choose from " + ", ".join([*factories, "bullfrog_surface"]))
     ctx = None
     result = {"backend": args.backend, "size": size, "fps": 30, "readback": args.readback,
               "frames": args.frames, "warmup": args.warmup, "python": platform.python_version(),
-              "numpy": np.__version__, "platform": platform.platform(), "cases": []}
+              "numpy": np.__version__, "platform": platform.platform(), "cases": [],
+              "compute_requested": args.compute, "iterations": args.iterations}
     if args.backend == "gl":
         from hydrapy.backend_gl import GLRenderer, _create_context
-        ctx = _create_context()
+        ctx = _create_context(compute=args.compute)
         result["renderer"] = ctx.info.get("GL_RENDERER")
         result["vendor"] = ctx.info.get("GL_VENDOR")
+        result["gl_version"] = ctx.version_code
     print(json.dumps({k: v for k, v in result.items() if k != "cases"}), flush=True)
     try:
         for name in names:
@@ -85,7 +97,7 @@ def main():
                 patch = H.Patch(size=size)
                 factories[name]().out(patch.o0, patch=patch)
             started = time.perf_counter()
-            renderer = H.Renderer(patch, fps=30) if ctx is None else GLRenderer(patch, fps=30, ctx=ctx)
+            renderer = H.Renderer(patch, fps=30) if ctx is None else GLRenderer(patch, fps=30, ctx=ctx, compute=args.compute)
             setup_ms = (time.perf_counter() - started) * 1000
             samples, first_ms = [], None
             try:
@@ -102,6 +114,10 @@ def main():
                        "setup_ms": setup_ms, "first_ms": first_ms,
                        "median_ms": statistics.median(samples), "p95_ms": float(np.percentile(samples, 95)),
                        "samples_ms": samples}
+                if ctx is not None:
+                    row["compute_passes"] = renderer.compute_passes
+                    row["fragment_passes"] = len(renderer._passes) - renderer.compute_passes
+                    row["compute_fallbacks"] = renderer.compute_fallbacks
                 result["cases"].append(row)
                 print(json.dumps({k: v for k, v in row.items() if k != "samples_ms"}), flush=True)
             finally:

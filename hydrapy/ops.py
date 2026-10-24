@@ -1205,7 +1205,7 @@ def _np_rd(tex, st, feed, kill, da, db, env):
 
 register(Op("rd", "texture", [F("feed", 0.055, scalar=True), F("kill", 0.062, scalar=True),
                               F("da", 1.0, scalar=True), F("db", 0.5, scalar=True), I("iterations", 4)],
-            np=_np_rd, iterations=True,
+            np=_np_rd, iterations=True, compute="rd",
             doc="Gray-Scott reaction-diffusion step: A in red, B in green/blue. Black counts as pure A, so seed B with green and feed it back: src(o0).rd().add(shape().color(0,1,0), 0.1).out(o0).",
             glsl="""vec2 px = 1.0 / resolution;
   vec4 cur = texture2D(_tex, fract(_st));

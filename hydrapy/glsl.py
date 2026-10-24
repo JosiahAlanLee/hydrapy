@@ -32,10 +32,39 @@ class TmpRef(Texture):
 
 
 @dataclass
+class ComputeStep:
+    kernel: str
+    sampler: str
+    arguments: dict[str, str]   # per-frame scalar expressions (literals or uniforms)
+
+
+@dataclass
 class Pass:
     target: str               # 'o0'..'o3' or 'tmpN'
     expr: str                 # GLSL expression for gl_FragColor (functions/uniforms are shared)
     source: str = ""          # full fragment shader, filled in by Program.finish()
+    compute: Optional[ComputeStep] = None
+
+
+@dataclass
+class _TextureCall:
+    """Retain eligibility until composition/coordinate changes wrap the call."""
+    op: Op
+    sampler: str
+    args: list[Callable[[str], str]]
+    iteration: Optional[int]
+
+    def __call__(self, uv):
+        rest = "".join(", " + f(uv) for f in self.args)
+        last = f", {glsl_float(self.iteration)}" if self.iteration is not None else ""
+        return f"{self.op.name}({self.sampler}, {uv}{rest}{last})"
+
+    def compute_step(self):
+        inputs = [i for i in self.op.inputs if i.name != "iterations"]
+        if self.op.compute and all(i.scalar and i.type == "float" for i in inputs):
+            return ComputeStep(self.op.compute, self.sampler,
+                               {i.name: f("st") for i, f in zip(inputs, self.args)})
+        return None
 
 
 @dataclass
@@ -147,6 +176,10 @@ class _Compiler:
         if op not in self.p.functions:
             self.p.functions.append(op)
 
+    def add_pass(self, target: str, expr: Callable[[str], str]):
+        compute = expr.compute_step() if isinstance(expr, _TextureCall) else None
+        self.p.passes.append(Pass(target, expr("st"), compute=compute))
+
     # -- arguments -------------------------------------------------------
     def arg(self, a, inp) -> Callable[[str], str]:
         """Return a function of the uv expression giving this argument's GLSL."""
@@ -237,20 +270,20 @@ class _Compiler:
                 tmp = self._prefix_textures.get(key) if reusable else None
                 if tmp is None:
                     tmp = self.new_tmp()
-                    self.p.passes.append(Pass(tmp, f0("st")))
+                    self.add_pass(tmp, f0)
                     if reusable:
                         self._prefix_textures[key] = tmp
                 tex = self.sampler_uniform(TmpRef(tmp))
                 # iterated ops get their 0-based iteration index as the last argument
-                last = f", {glsl_float(iterations - 1)}" if iterated(op) else ""
+                last = iterations - 1 if iterated(op) else None
                 # extra iterations ping-pong between this target and one more
                 if iterations > 1:
                     names = [tmp, self.new_tmp()]
                     for i in range(1, iterations):
                         target = names[i % 2]
-                        self.p.passes.append(Pass(target, f"{name}({tex}, st{rest('st')}, {glsl_float(i - 1)})"))
+                        self.add_pass(target, _TextureCall(op, tex, argfns, i - 1))
                         tex = self.sampler_uniform(TmpRef(target))
-                frag = lambda uv, tex=tex, name=name, rest=rest, last=last: f"{name}({tex}, {uv}{rest(uv)}{last})"
+                frag = _TextureCall(op, tex, argfns, last)
             else:
                 raise ValueError(op.kind)
         if frag is None:
@@ -264,8 +297,7 @@ def compile_output(output: Output, patch: Optional[Patch] = None, precision: str
     prog = Program(output=output, precision=precision)
     c = _Compiler(prog, patch)
     c.sampler_uniform(output, "prevBuffer")  # always available for prev()
-    expr = c.gen(output.chain)("st")
-    prog.passes.append(Pass(output.name, expr))
+    c.add_pass(output.name, c.gen(output.chain))
     return prog.finish()
 
 

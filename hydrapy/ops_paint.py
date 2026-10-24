@@ -336,7 +336,7 @@ def _np_bleed(tex, st, grow, softness, roughness, env):
 
 
 register(Op("bleed", "texture", [F("grow", 0.08, scalar=True), F("softness", 0.15, scalar=True), F("roughness", 0.4, scalar=True), I("iterations", 3)],
-            np=_np_bleed, iterations=True,
+            np=_np_bleed, iterations=True, compute="bleed",
             doc="Ink spreading: blurs a dye layer and re-thresholds its alpha with noise, so edges creep outward (grow) and go ragged (roughness). Iterate for more.",
             glsl="""vec2 px = 1.0 / resolution;
   vec4 acc = vec4(0.0); float wsum = 0.0;
