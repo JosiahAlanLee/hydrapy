@@ -18,6 +18,7 @@ guide for the work you want to make. Run commands from the repository root.
 | [Demoscene tools](DEMOSCENE.md) | Materials, metaballs, spline wireframes, 3D fields, fractal folds and musical timelines |
 | [Animated thi.ng adaptations](TOXI_ANIMATION_SOURCES.md) | Cellular rules, Voronoi fields, curves, vegetation, export limits and source provenance |
 | [Pixel clocks](pixel-oscillators.md) | Independent pixel oscillators, two-color moiré, Studio controls and a live browser study |
+| [Bell Riots video](bell-riots-video.md) | Full-track edit combining rule fields, pixel clocks, thi.ng cellular patterns and entropy locking |
 
 ## Reference and development
 
