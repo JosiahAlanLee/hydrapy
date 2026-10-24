@@ -311,7 +311,7 @@ def main():
             muxed=Path(tmp)/"complete.mp4"
             subprocess.run(["ffmpeg","-v","error","-i",str(video),"-i",str(audio),
                             "-map","0:v:0","-map","1:a:0","-map_metadata","1",
-                            "-c:v","copy","-c:a","aac","-b:a","256k","-shortest",
+                            "-c:v","copy","-c:a","aac","-b:a","256k",
                             "-movflags","+faststart",str(muxed)],check=True)
             muxed.replace(args.out)
         print(args.out,flush=True)
