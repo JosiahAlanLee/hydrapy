@@ -30,6 +30,7 @@ guide for the work you want to make. Run commands from the repository root.
 
 - [Operator reference](operators.md): every registered operator, argument and default.
 - [Development](development.md): adding operators, source layout, testing and regenerating the reference.
+- [Maintenance checks](maintenance.md): automatic CPU checks, repeatable GPU reports and physical-audio qualification.
 - [Audio timing](audio-timing.md): sample-clock behavior, long-duration checks and hardware-testing limits.
 - [Performance](PERFORMANCE.md): benchmarks, per-output resolution, `mipblur`, fast noise, phone pages, and what is skipped automatically.
 
