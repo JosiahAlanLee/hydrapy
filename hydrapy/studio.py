@@ -1,15 +1,15 @@
 """Local, code-first workspace. All rendering and patch execution stay in one thread."""
 from __future__ import annotations
 
-import base64
 import hashlib
-import io
+from contextlib import nullcontext
 import json
 import math
 import os
 from pathlib import Path
 import queue
 import secrets
+import socket
 import subprocess
 import sys
 import threading
@@ -20,6 +20,7 @@ from urllib.parse import urlparse, parse_qs
 
 from .controls import apply_controls, carry_controls
 from .inspect import catalog, capabilities
+from .studio_preview import Preview
 
 
 def digest(text):
@@ -38,16 +39,6 @@ def atomic_text(path, text):
     temp = path.with_name(path.name + '.tmp')
     temp.write_text(text, encoding='utf-8')
     os.replace(temp, path)
-
-
-def jpeg(frame, size=None):
-    from PIL import Image
-    im = Image.fromarray(frame)
-    if size:
-        im.thumbnail(size)
-    out = io.BytesIO()
-    im.save(out, 'JPEG', quality=85)
-    return out.getvalue()
 
 
 class Recorder:
@@ -108,7 +99,11 @@ class Session:
         self.error, self.notice, self.backend_note = '', 'Choose a patch to begin.', ''
         self.clock_time, self.actual_fps = 0., 0.
         self.last_wall, self.last_watch, self.stamp = time.monotonic(), 0., None
-        self.images, self.thumbs, self.state = {}, {}, {}
+        self.state = {}
+        self.preview = Preview()
+        self.preview_profile, self.gpu_query = False, None
+        self.render_metrics, self.preview_error = {}, ''
+        self.preview_dirty = True
         self.recorder, self.record_path, self.last_frame = None, None, None
         self.jobs, self.job_processes = {}, {}
         self.recent = []
@@ -212,6 +207,10 @@ class Session:
         if old and hasattr(old, 'release'):
             old.release()
         self.renderer, self.path, self.source, self.armed = new, path, source, requested_arm
+        self.gpu_query = None
+        self.preview.reset(patch.display.name)
+        self.preview_dirty = True
+        self.last_frame = None
         if not same:
             self.clock_time = 0.
         self.last_wall = time.monotonic()
@@ -269,7 +268,12 @@ class Session:
             if not 0 <= index < 4:
                 raise ValueError('output must be 0–3')
             patch.render(patch.outputs[index])
-            self._pictures()
+            self.preview.reset(patch.display.name)
+            self.preview_dirty = True
+            self._pictures(force=True)
+        elif action == 'preview_profile':
+            self.preview_profile = bool(data.get('enabled', False))
+            self.gpu_query = None
         elif action == 'mouse':
             x, y = float(data['x']), float(data['y'])
             if not all(math.isfinite(v) for v in (x, y)):
@@ -303,8 +307,8 @@ class Session:
             else:
                 apply_controls(patch, json.loads(file.read_text()))
         elif action == 'snapshot':
-            if self.last_frame is None:
-                raise ValueError('No frame has rendered yet')
+            # A snapshot is a fresh lossless read, independent of JPEG delivery.
+            self.last_frame = self._read_frame()
             from .export import save_png
             path = self._new_output('png')
             save_png(self.last_frame, str(path))
@@ -370,30 +374,43 @@ class Session:
         self.job_processes[job_id] = proc
         return self.jobs[job_id]
 
-    def _pictures(self):
+    def _read_frame(self):
         from .backend_np import to_uint8
         r = self.renderer
+        return r.read() if hasattr(r, 'read') else to_uint8(r.displayed(), r.patch.composite_alpha)
+
+    def _pictures(self, *, force=False, recorded=None, query=None):
+        r, now = self.renderer, time.monotonic()
+        main, thumbnail = self.preview.plan(now, changed=not self.paused or self.preview_dirty)
         chosen = r.patch.display
-        images, thumbs = {}, {}
-        for output in r.patch.outputs:
-            r.patch.display = output
-            frame = r.read() if hasattr(r, 'read') else to_uint8(r.displayed(), r.patch.composite_alpha)
-            images[output.name] = jpeg(frame)
-            thumbs[output.name] = base64.b64encode(jpeg(frame, (160, 90))).decode()
-            if output.index == chosen.index:
-                self.last_frame = frame
-        r.patch.display = chosen
-        if self.path:
+        frame = recorded[0] if recorded is not None else None
+        metrics = dict(self.render_metrics)
+        if main or force:
+            started = time.monotonic()
+            if frame is None:
+                frame = self._read_frame()
+            metrics.update(readback_ms=recorded[1] if recorded is not None else (time.monotonic() - started) * 1000,
+                           captured=time.monotonic())
+            # read() has already completed the preceding GPU commands. Do not
+            # query results before readback or add a finish() to the render loop.
+            if query is not None:
+                metrics['gpu_ms'] = query.elapsed / 1_000_000
+            self.last_frame = frame
+            cache = None
+            if self.path and self.clock_time > 1:
+                cache = self.root / '.hydrapy' / 'previews' / (digest(str(self.path.relative_to(self.root)))[:16] + '.jpg')
+            self.preview.submit(chosen.name, frame, metrics, cache=cache)
+            self.preview_dirty = False
+        if thumbnail is not None:
+            # Restore selection even when readback fails. Thumbnail delivery must
+            # never change the patch's recording/export/display output.
             try:
-                folder = self.root / '.hydrapy' / 'previews'
-                folder.mkdir(parents=True, exist_ok=True)
-                preview = folder / (digest(str(self.path.relative_to(self.root)))[:16] + '.jpg')
-                if not preview.exists() and self.clock_time > 1:
-                    preview.write_bytes(jpeg(self.last_frame, (320, 180)))
-            except OSError:
-                pass  # A read-only project can still be previewed.
-        with self.lock:
-            self.images, self.thumbs = images, thumbs
+                if thumbnail != chosen.name or frame is None:
+                    r.patch.display = r.patch.outputs[int(thumbnail[1])]
+                    frame = self._read_frame()
+                self.preview.submit(thumbnail, frame, {'captured': time.monotonic()}, thumbnail=True)
+            finally:
+                r.patch.display = chosen
 
     def _publish(self):
         from .live import resource_status
@@ -408,6 +425,7 @@ class Session:
                 jobs.append(dict(item, **status))
             except (OSError, ValueError):
                 jobs.append(dict(item, state='running', progress=0))
+        preview = self.preview.snapshot()
         state = dict(path=str(self.path.relative_to(self.root)) if self.path else None,
                      version=digest(self.source), playing=not self.paused, armed=self.armed,
                      backend='GL' if hasattr(self.renderer, 'ctx') else 'CPU', backend_note=self.backend_note,
@@ -419,12 +437,14 @@ class Session:
                      controls=[x.describe() for x in p.controls.values()] if p else [],
                      connections=resource_status(), error=self.error, notice=self.notice,
                      recording=self.recorder is not None, jobs=jobs, recent=self.recent,
-                     thumbnails=self.thumbs)
+                     thumbnails=preview.pop('thumbnails'), preview=preview,
+                     preview_generation=self.preview.generation, preview_profile=self.preview_profile,
+                     preview_error=self.preview_error)
         with self.lock:
             self.state = state
 
     def _run(self):
-        sample_start, frames, last_images = time.monotonic(), 0, 0.
+        sample_start, frames = time.monotonic(), 0
         try:
             while self.running:
                 started = time.monotonic()
@@ -448,6 +468,7 @@ class Session:
                     break
                 now = time.monotonic()
                 if self.renderer:
+                    query = None
                     if not self.paused:
                         self.clock_time += now - self.last_wall
                         try:
@@ -455,23 +476,29 @@ class Session:
                             if transport:
                                 self.renderer.patch.bpm = transport.bpm
                                 self.clock_time = transport.now()
-                            self.renderer.step(self.clock_time)
+                            if self.preview_profile and hasattr(self.renderer, 'ctx'):
+                                if self.gpu_query is None:
+                                    try:
+                                        self.gpu_query = self.renderer.ctx.query(time=True)
+                                    except Exception:
+                                        self.preview_profile = False
+                                query = self.gpu_query
+                            render_started = time.monotonic()
+                            with query if query is not None else nullcontext():
+                                self.renderer.step(self.clock_time)
+                            self.render_metrics = dict(render_cpu_ms=(time.monotonic() - render_started) * 1000,
+                                                       frame_started=render_started, gpu_ms=None)
                             frames += 1
                         except Exception as exc:
                             self.error, self.paused = f'Render paused: {type(exc).__name__}: {exc}', True
-                    if now - last_images >= .1:
-                        try:
-                            self._pictures()
-                        except Exception as exc:
-                            self.error, self.paused = f'Preview paused: {type(exc).__name__}: {exc}', True
-                        last_images = now
-                    if self.recorder and self.last_frame is not None:
+                    recorded = None
+                    if self.recorder:
                         try:
                             # Recording uses every synthesis frame, independently of
                             # the browser's lower-rate JPEG thumbnails.
-                            from .backend_np import to_uint8
-                            r = self.renderer
-                            self.last_frame = r.read() if hasattr(r, 'read') else to_uint8(r.displayed(), r.patch.composite_alpha)
+                            read_started = time.monotonic()
+                            self.last_frame = self._read_frame()
+                            recorded = (self.last_frame, (time.monotonic() - read_started) * 1000)
                             self.recorder.push(self.last_frame)
                         except Exception as exc:
                             self.error = str(exc)
@@ -480,6 +507,12 @@ class Session:
                                 recorder.close()
                             except Exception:
                                 pass
+                    try:
+                        self._pictures(recorded=recorded, query=query)
+                        self.preview_error = ''
+                    except Exception as exc:
+                        # A transport failure must not pause synthesis or live hooks.
+                        self.preview_error = f'{type(exc).__name__}: {exc}'
                 self.last_wall = now
                 if now - sample_start >= .5:
                     self.actual_fps = frames / (now - sample_start)
@@ -496,6 +529,8 @@ class Session:
                 time.sleep(max(.001, 1 / self.fps - (time.monotonic() - started)))
         finally:
             self.running = False
+            self.gpu_query = None  # dispose timer on the GL context's thread
+            self.preview.close()
             if self.recorder:
                 try:
                     self.recorder.close()
@@ -510,6 +545,14 @@ class Session:
 def make_server(session, port=8765):
     token = secrets.token_urlsafe(32)
     class Handler(BaseHTTPRequestHandler):
+        protocol_version = 'HTTP/1.1'
+
+        def setup(self):
+            super().setup()
+            # Headers and JPEG bodies are separate writes. Nagle + delayed ACKs
+            # otherwise introduce ~40 ms stalls on persistent loopback requests.
+            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
         def log_message(self, fmt, *args):
             pass
 
@@ -520,17 +563,25 @@ def make_server(session, port=8765):
             return (host in allowed and (origin is None or origin in tuple('http://' + h for h in allowed))
                     and secrets.compare_digest(self.headers.get('X-Hydrapy-Token', ''), token))
 
-        def _send(self, status, value, content_type='application/json'):
+        def _send(self, status, value, content_type='application/json', headers=None):
             payload = json.dumps(value).encode() if content_type == 'application/json' else value
             self.send_response(status)
             self.send_header('Content-Type', content_type)
             self.send_header('Content-Length', str(len(payload)))
             self.send_header('Cache-Control', 'no-store')
             self.send_header('X-Content-Type-Options', 'nosniff')
+            if status >= 400:
+                # Rejected POST bodies may be unread; do not parse those bytes
+                # as another request on a persistent connection.
+                self.close_connection = True
+                self.send_header('Connection', 'close')
+            for name, val in (headers or {}).items():
+                self.send_header(name, str(val))
             self.end_headers()
             try:
+                self.connection.settimeout(5)
                 self.wfile.write(payload)
-            except (BrokenPipeError, ConnectionResetError):
+            except (BrokenPipeError, ConnectionResetError, TimeoutError):
                 pass
 
         def do_GET(self):
@@ -549,9 +600,21 @@ def make_server(session, port=8765):
                     return self._send(200, {'patches': catalog(session.root)})
                 if parsed.path == '/api/frame':
                     output = args.get('output', ['o0'])[0]
-                    with session.lock:
-                        data = session.images.get(output)
-                    return self._send(200, data, 'image/jpeg') if data else self._send(404, {'error': 'No frame yet'})
+                    if output not in ('o0', 'o1', 'o2', 'o3'):
+                        raise ValueError('output must be o0–o3')
+                    after = int(args.get('after', ['-1'])[0])
+                    started = time.monotonic()
+                    frame = session.preview.frame(output, after)
+                    if frame is None:
+                        return self._send(204, b'', 'image/jpeg')
+                    sent = time.monotonic()
+                    metrics = frame['metrics']
+                    timing = {k: v for k, v in metrics.items() if k.endswith('_ms') and v is not None}
+                    timing['wait_ms'] = (sent - started) * 1000
+                    return self._send(200, frame['data'], 'image/jpeg', {
+                        'X-Preview-Sequence': frame['sequence'],
+                        'X-Preview-Age-Ms': max(0., (sent - metrics.get('frame_started', metrics['captured'])) * 1000),
+                        'Server-Timing': ', '.join(f'{k};dur={v:.3f}' for k, v in timing.items())})
                 if parsed.path == '/api/file':
                     path = project_path(session.root, args['path'][0])
                     if not path.is_relative_to(session.root / '.hydrapy' / 'exports'):

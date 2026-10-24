@@ -14,6 +14,7 @@
 <main class="main"><div class="title-row"><button class="library-toggle" id="browse">Patches</button><h1 id="patch-title">Choose a patch</h1><button id="fullscreen" class="small">Fullscreen <span class="shortcut">F</span></button></div>
 <div class="preview" id="preview-box"><div class="empty" id="empty"><strong>A patch, in motion.</strong>Open an example from the library.<br>Python stays the source. The controls stay within reach.</div><img id="preview" alt="Live patch output"></div>
 <div class="status-strip" id="status"><span>Waiting for a patch</span></div><div class="outputs" id="outputs"></div>
+<details class="section"><summary>Preview performance</summary><label><input id="preview-profile" type="checkbox" style="width:auto"> Measure GPU render time</label><pre id="preview-metrics" class="subtle" style="white-space:pre-wrap">Waiting for preview frames.</pre></details>
 <div class="notice" id="notice" role="status"></div><pre class="error-box hidden" id="error" role="alert"></pre>
 <section class="editor"><div class="editor-head"><label for="source">Patch source <span id="dirty"></span></label><div><button id="reopen" class="small">Reopen</button> <button id="save" class="primary small">Save & run <span class="shortcut">Ctrl ↵</span></button></div></div><textarea id="source" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Python patch source"></textarea><div class="editor-foot" id="editor-foot">Changes run when saved. Failed edits keep the previous patch.</div></section>
 </main>
@@ -36,7 +37,6 @@ let state = {},
   jobKey = '',
   imgURL = null,
   pollBusy = false,
-  lastOutput = '',
   toastTimer;
 const headers = {
   'X-Hydrapy-Token': token,
@@ -66,11 +66,23 @@ function toast(text) {
   toastTimer = setTimeout(() => $('toast').classList.add('hidden'), 5000)
 }
 async function act(name, data = {}) {
+  const changesPreview = ['load', 'save', 'restart', 'connections', 'output'].includes(name);
   try {
+    if (changesPreview) {
+      previewMutations++;
+      previewKey = '';
+      previewRevision++;
+      if (previewController) previewController.abort();
+    }
     return await api(name, data)
   } catch (e) {
     toast(e.message);
     throw e
+  } finally {
+    if (changesPreview) {
+      previewMutations--;
+      poll();
+    }
   }
 }
 
@@ -342,12 +354,123 @@ async function presets() {
     for (let n of r.names) $('presets').append(new Option(n, n))
   } catch (e) {}
 }
+
+// Independent, sequential next-frame requests: no interval queues, overlapping
+// decodes, or accumulated video frames. State/controls keep their slower poll.
+let previewKey = '', previewRevision = 0, previewAfter = -1, previewMutations = 0;
+let previewBusy = false, previewController = null;
+const previewStats = window.hydrapyPreview = {frames: 0, fps: 0, samples: [], error: ''};
+let previewSampleStart = performance.now(), previewSampleFrames = 0;
+performance.addEventListener('resourcetimingbufferfull', () => performance.clearResourceTimings());
+
+function syncPreview() {
+  const key = !previewMutations && !document.hidden && state.path ? state.preview_generation + ':' + state.output : '';
+  if (key !== previewKey) {
+    previewKey = key;
+    previewRevision++;
+    previewAfter = -1;
+    previewSampleStart = performance.now();
+    previewSampleFrames = 0;
+    if (previewController) previewController.abort();
+  }
+  if (key && !previewBusy) previewFrame();
+}
+
+async function previewFrame() {
+  if (previewBusy || !previewKey || document.hidden) return;
+  previewBusy = true;
+  const revision = previewRevision, output = state.output;
+  const controller = previewController = new AbortController();
+  const current = () => revision === previewRevision && !document.hidden && !controller.signal.aborted;
+  const started = performance.now();
+  const url = '/api/frame?output=' + output + '&after=' + previewAfter;
+  let objectURL = null, retry = 0;
+  try {
+    const response = await fetch(url, {headers, signal: controller.signal});
+    const received = performance.now();
+    if (response.status === 204) { retry = 50; return; }
+    if (!response.ok) throw new Error('Preview HTTP ' + response.status);
+    const blob = await response.blob(), bodyEnd = performance.now();
+    if (!current()) return;
+    const sequence = Number(response.headers.get('X-Preview-Sequence'));
+    if (sequence <= previewAfter) return;
+    const timing = {};
+    for (const part of (response.headers.get('Server-Timing') || '').split(',')) {
+      const match = part.trim().match(/^(\w+);dur=([\d.]+)/);
+      if (match) timing[match[1]] = Number(match[2]);
+    }
+    const resource = performance.getEntriesByName(new URL(url, location.href).href).pop();
+    objectURL = URL.createObjectURL(blob);
+    const nextImage = new Image();
+    nextImage.id = 'preview';
+    nextImage.alt = 'Live patch output';
+    nextImage.src = objectURL;
+    const decodeStart = performance.now();
+    await nextImage.decode();
+    const decoded = performance.now();
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    if (!current()) return;
+    $('preview').replaceWith(nextImage);
+    if (imgURL) URL.revokeObjectURL(imgURL);
+    imgURL = objectURL;
+    objectURL = null;
+    previewAfter = sequence;
+    const displayed = performance.now();
+    const sample = {sequence, output, ...timing,
+      request_ms: bodyEnd - started,
+      transfer_ms: resource ? resource.responseEnd - resource.responseStart : null,
+      ttfb_ms: resource ? resource.responseStart - resource.requestStart : null,
+      body_read_ms: bodyEnd - received,
+      decode_ms: decoded - decodeStart,
+      display_wait_ms: displayed - decoded,
+      response_to_display_ms: displayed - received,
+      // Server and browser monotonic clocks have different origins. This is an
+      // estimate from durations, excluding first-byte transit and physical scanout.
+      frame_age_estimate_ms: Number(response.headers.get('X-Preview-Age-Ms')) + displayed - received};
+    previewStats.samples.push(sample);
+    if (previewStats.samples.length > 300) previewStats.samples.shift();
+    previewStats.frames++;
+    previewSampleFrames++;
+    previewStats.error = '';
+    if (displayed - previewSampleStart >= 500) {
+      previewStats.fps = previewSampleFrames * 1000 / (displayed - previewSampleStart);
+      previewSampleStart = displayed;
+      previewSampleFrames = 0;
+      const ms = v => v == null ? 'off / unavailable' : v.toFixed(1) + ' ms';
+      $('preview-metrics').textContent = previewStats.fps.toFixed(1) + ' preview fps\n' +
+        'Render CPU: ' + ms(sample.render_cpu_ms) + ' · GPU: ' + ms(sample.gpu_ms) + '\n' +
+        'Readback: ' + ms(sample.readback_ms) + ' · Encode wait: ' + ms(sample.encode_wait_ms) + ' · JPEG: ' + ms(sample.jpeg_ms) + '\n' +
+        'Transfer: ' + ms(sample.transfer_ms) + ' · Decode: ' + ms(sample.decode_ms) + ' · Display scheduling: ' + ms(sample.display_wait_ms) + '\n' +
+        'Frame age estimate: ' + ms(sample.frame_age_estimate_ms);
+    }
+  } catch (e) {
+    if (e.name !== 'AbortError') {
+      previewStats.error = e.message;
+      $('preview-metrics').textContent = 'Preview retrying: ' + e.message;
+      retry = 500;
+    }
+  } finally {
+    if (objectURL) URL.revokeObjectURL(objectURL);
+    previewBusy = false;
+    if (previewController === controller) previewController = null;
+    if (previewKey && !document.hidden) setTimeout(previewFrame, retry);
+  }
+}
+document.addEventListener('visibilitychange', syncPreview);
+$('preview-profile').onchange = () => act('preview_profile', {
+  enabled: $('preview-profile').checked
+}).catch(() => {});
+
 async function poll() {
   if (pollBusy) return;
   pollBusy = true;
   try {
+    const revision = previewRevision;
     let prevPath = state.path;
-    state = await api('state');
+    const next = await api('state');
+    if (revision !== previewRevision) return;
+    state = next;
+    syncPreview();
     let t = state.time || 0;
     $('time').textContent = String(Math.floor(t / 60)).padStart(2, '0') + ':' + (t % 60).toFixed(1).padStart(4, '0');
     $('play').textContent = state.playing ? 'Pause' : 'Play';
@@ -358,31 +481,26 @@ async function poll() {
     $('patch-title').textContent = state.path ? state.path.split('/').pop() : 'Choose a patch';
     $('empty').classList.toggle('hidden', !!state.path);
     $('notice').textContent = state.notice || '';
-    $('error').textContent = state.error || '';
-    $('error').classList.toggle('hidden', !state.error);
+    const error = [state.error, state.preview_error, state.preview && state.preview.error].filter(Boolean).join('\n');
+    $('error').textContent = error;
+    $('error').classList.toggle('hidden', !error);
+    $('preview-profile').checked = !!state.preview_profile;
     $('status').replaceChildren(el('span', state.playing ? '● Playing' : 'Ⅱ Paused', state.playing ? 'on' : ''), el('span', (state.fps || 0).toFixed(1) + ' fps'), el('span', (state.size || []).join(' × ')), el('span', state.backend || ''), el('span', (state.clock || 'Internal') + ' · ' + (state.bpm || 0).toFixed(1) + ' BPM'), el('span', state.simulation_fps ? 'Image updates ' + state.simulation_fps + ' fps' : 'Continuous image'), el('span', state.armed ? 'Connections enabled' : 'Connections disconnected', state.armed ? 'on' : 'off'));
     $('status').title = state.backend_note || '';
     for (let b of $('outputs').children) {
       let id = b.dataset.output;
       b.classList.toggle('active', id === state.output);
       let img = b.querySelector('img');
-      if (state.thumbnails && state.thumbnails[id]) img.src = 'data:image/jpeg;base64,' + state.thumbnails[id];
+      img.style.visibility = state.thumbnails && state.thumbnails[id] ? 'visible' : 'hidden';
+      if (state.thumbnails && state.thumbnails[id]) {
+        const src = 'data:image/jpeg;base64,' + state.thumbnails[id];
+        if (img.getAttribute('src') !== src) img.src = src;
+      }
       b.querySelector('span').textContent = id + ((state.outputs || []).includes(id) ? '' : ' · unassigned')
     }
     renderControls();
     renderConnections();
     renderJobs();
-    if (state.path) {
-      let r = await fetch('/api/frame?output=' + state.output, {
-        headers
-      });
-      if (r.ok) {
-        let url = URL.createObjectURL(await r.blob());
-        $('preview').src = url;
-        if (imgURL) URL.revokeObjectURL(imgURL);
-        imgURL = url
-      }
-    }
     if (prevPath !== state.path) {
       drawLibrary();
       if (state.path && !editorPath) setSource(await api('source', {
