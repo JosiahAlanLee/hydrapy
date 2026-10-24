@@ -1,4 +1,4 @@
-"""A field of rules: sixteen Life-like automata side by side, each region running its own.
+"""A field of rules: eighteen Life-like automata side by side, each region running its own.
 
 `ca(mode, p, flip)` is one generation of a Life-like automaton with a rule per pixel. Here the rule
 map is itself alive at a coarser scale:
