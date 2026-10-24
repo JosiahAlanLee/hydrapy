@@ -94,6 +94,11 @@ class GLRenderer:
                     self._sims.append(u.source)
         self._blank = self.ctx.texture((1, 1), 4, data=bytes([0, 0, 0, 255]))
 
+    @property
+    def _passes(self):
+        """The full (unspecialised) passes in draw order: (output, target, program, vao, floats, samplers)."""
+        return [(prog.output, *p) for prog in self.programs for p in self._variants[(prog.output.name, None)]]
+
     def _build(self, prog):
         passes = []
         for p in prog.passes:
