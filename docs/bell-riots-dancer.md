@@ -42,6 +42,18 @@ blender -b Dancer_Overlay.blend -t 6 -P docs/render_body_roll.py -- \
   --output /tmp/body-roll
 ```
 
+Add `--warp` to land the movement's holds on the half-time beats. The script
+measures the source action's mean bone speed and takes its minima below 0.7×
+the mean. Each hold must be a minimum over ±12 output frames, the window used by
+`bell_riots_checks.py`. A monotonic piecewise-linear time map then moves each
+hold to its nearest free multiple of 30 frames, strongest first, keeping 480
+frames per cycle. Holds that would collide, or would make a segment more than 2×
+faster or slower than the linear stretch, are left where they fall. For Body
+Roll, holds at source frames 37.6, 50.1, 61.9, 71.6, 96.1, 124.6 and 137.6 land
+on half-beats 4, 5, 6, 7, 10, 13 and 14. Segment speeds stay within 0.75–1.19× of
+the linear stretch. The loop-point hold (155.1) stays 2.7 frames before the bar
+line. `timing.json` records the holds and the breakpoints.
+
 The print directory contains a retimed `.blend`, `timing.json` and 480 RGBA
 PNGs. Convert their alpha planes to a `uint8` NumPy array of shape
 `[480, 540, 960]`, in top-to-bottom image order:
@@ -61,7 +73,9 @@ python docs/bell_riots_dancer.py Bell_Riots_Counterpoint_Mix.flac \
   -o Bell_Riots_Edit_5_1080p.mp4 --checkpoints render-checkpoints
 ```
 
-Use `--offset` and `--seconds` for an excerpt. The audio file and controls are
+Use `--offset` and `--seconds` for an excerpt. `--title-scale 2.5` enlarges the
+title block for phone viewing and keeps it centred in the same place. The
+default is edit 5's size. The audio file and controls are
 the outputs of [the counterpoint mix](bell-riots-counterpoint.md). The input
 recording and Generative_Art drawings remain external assets.
 

@@ -158,6 +158,8 @@ void main(){
 
 
 class SparseRenderer:
+    title_scale=1.  # title type size; the block stays centred where it is at 1
+
     def __init__(self,score,size,art_root,cache,ctx=None):
         paths=raster_assets(cache,art_root)
         self.score,self.size=score,size
@@ -198,12 +200,13 @@ class SparseRenderer:
 
     def title_texture(self):
         w,h=self.size;im=Image.new("RGBA",self.size);d=ImageDraw.Draw(im)
-        small=find_font("DejaVuSansMono",max(10,round(h*.013)))
-        large=find_font("DejaVuSans-Bold",max(16,round(h*.037)))
-        x=round(w*.047);y=round(h*.43)
+        k=self.title_scale
+        small=find_font("DejaVuSansMono",max(10,round(h*.013*k)))
+        large=find_font("DejaVuSans-Bold",max(16,round(h*.037*k)))
+        x=round(w*.047);y=round(h*(.4815-.0515*k))
         d.text((x,y),"ANCHOR RITE",font=small,fill=(171,190,192,255))
-        d.text((x,y+round(h*.038)),"BELL RIOTS",font=large,fill=(228,228,211,255))
-        d.text((x,y+round(h*.089)),"PT. 2",font=small,fill=(208,146,91,255))
+        d.text((x,y+round(h*.038*k)),"BELL RIOTS",font=large,fill=(228,228,211,255))
+        d.text((x,y+round(h*.089*k)),"PT. 2",font=small,fill=(208,146,91,255))
         return self.ctx.texture(self.size,4,np.asarray(im)[::-1].copy().tobytes())
 
     def advance(self,t):
