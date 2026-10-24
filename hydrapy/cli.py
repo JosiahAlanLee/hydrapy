@@ -155,6 +155,9 @@ def main(argv=None):
     fh.add_argument("--pixel-ratio", type=float, default=1.0)
     fh.add_argument("--no-zip", action="store_true")
 
+    for sp in (r, h, lv, fh):
+        sp.add_argument("--fast-noise", action="store_true",
+                        help="GPU noise() from a texture lookup: cheaper, similar but not identical (set_fast_noise)")
     for sp in (r, h, lv, an, fh):
         sp.add_argument("--fxhash", default=None, help="the hash a Mint previews (sets FXHASH)")
         sp.add_argument("--fxparam", action="append", default=[], metavar="ID=VALUE",
@@ -270,7 +273,14 @@ def main(argv=None):
         return
 
     _mint_env(a)
-    patch = load_patch(a.patch)
+
+    def loaded(strict=True):
+        p = load_patch(a.patch, strict=strict)
+        if getattr(a, "fast_noise", False):
+            p.fast_noise = True
+        return p
+
+    patch = loaded()
 
     if a.cmd == "render":
         ext = os.path.splitext(a.out)[1].lower()
@@ -345,7 +355,7 @@ def main(argv=None):
     elif a.cmd == "live":
         from .backend_gl import live
         live(patch, size=a.size, fullscreen=a.fullscreen, watch=None if a.no_watch else a.patch,
-             loader=lambda: load_patch(a.patch, strict=False))
+             loader=lambda: loaded(strict=False))
 
     elif a.cmd == "ansi":
         from .backend_np import Renderer

@@ -46,7 +46,7 @@ class GLRenderer:
     """
 
     def __init__(self, patch: Optional[Patch] = None, size=None, ctx=None, fps: float = 60.0,
-                 precision: str = "highp", compute: bool = False):
+                 precision: str = "highp", compute: bool = False, fast_noise: Optional[bool] = None):
         import moderngl
         self.gl = moderngl
         self.patch = patch or default_patch()
@@ -66,6 +66,13 @@ class GLRenderer:
         self._reduce_targets = {}
         self._reduce_program = self._reduce_vao = None
         self.mouse = (0.5, 0.5)
+        self.fast_noise = self.patch.fast_noise if fast_noise is None else bool(fast_noise)
+        self._noise_tex = None
+        if self.fast_noise:
+            from .noise import noise_texture
+            self._noise_tex = self.ctx.texture((256, 256), 4, noise_texture().tobytes())
+            self._noise_tex.filter = (self.gl.NEAREST, self.gl.NEAREST)   # corners are blended in the shader
+            self._noise_tex.repeat_x = self._noise_tex.repeat_y = True
         self.programs = compile_patch(self.patch, precision=precision)
         self.vbo = self.ctx.buffer(np.array([-1, -1, 3, -1, -1, 3], dtype="f4").tobytes())
         # Each output is drawn by a variant of its program compiled without the transforms that are the
@@ -122,7 +129,7 @@ class GLRenderer:
                     passes.append((p.target, kernel, None, prog.float_uniforms,
                                    [u for u in prog.sampler_uniforms if u.name == p.compute.sampler]))
                     continue
-            source = to_desktop(p.source)
+            source = to_desktop(p.source, fast_noise=self.fast_noise)
             try:
                 gprog = self.ctx.program(vertex_shader=VERTEX_DESKTOP, fragment_shader=source)
             except Exception as e:
@@ -257,6 +264,8 @@ class GLRenderer:
                 fb["fbo"].release(); fb["tex"].release()
         self._ncas = {}
         self._copy_vao.release(); self._copy.release(); self.vbo.release(); self._blank.release()
+        if self._noise_tex is not None:
+            self._noise_tex.release(); self._noise_tex = None
         self.outs, self.tmps, self.media, self._variants = {}, {}, {}, {}
         self._pending, self._active = {}, {}
 
@@ -493,6 +502,9 @@ class GLRenderer:
                     tex = self._bind(u.source, output)
                     tex.use(location=i)
                     self._set(gprog, u.name, i)
+                if self._noise_tex is not None and vao is not None:
+                    self._noise_tex.use(location=len(samplers))
+                    self._set(gprog, "_noiseTex", len(samplers))
                 if vao is None:
                     from .compute import GROUP_SIZE
                     dest["tex"].bind_to_image(0, read=False, write=True)

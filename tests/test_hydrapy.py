@@ -792,6 +792,54 @@ def test_html_export_builds_mip_levels_for_mipblur():
     assert '"mipmap": true' in html and "generateMipmap" in html and "#version 300 es" in html
 
 
+def test_fast_noise_texture_is_the_same_in_python_and_javascript():
+    from hydrapy.noise import NOISE_TEXTURE_JS, noise_texture
+    tex = noise_texture()
+    assert tex.shape == (256, 256, 4) and tex.dtype == np.uint8
+    assert tex[0, 0, 1] == tex[0, 1, 0] and tex[0, 0, 2] == tex[1, 0, 0] and tex[255, 255, 3] == tex[0, 0, 0]
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    js = NOISE_TEXTURE_JS + "\nprocess.stdout.write(Buffer.from(noiseTexture()).toString('hex'));"
+    out = subprocess.run([node, "-e", js], capture_output=True, text=True, check=True).stdout
+    assert bytes.fromhex(out) == tex.tobytes()
+
+
+@pytest.mark.skipif(not _gl_available(), reason="no OpenGL context")
+def test_fast_noise_looks_like_noise_and_every_noise_op_compiles():
+    from hydrapy.backend_gl import GLRenderer
+    shots = {}
+    for fast in (False, True):
+        p = Patch(size=(96, 54)); p.fast_noise = fast
+        noise(4, 0.2).out(p.o0, patch=p)
+        g = GLRenderer(p, size=(96, 54), fps=10); g.step(1.0)
+        shots[fast] = g.read_rgba()[..., 0]; g.release()
+    assert not np.allclose(shots[True], shots[False])
+    assert 0.6 < shots[True].std() / shots[False].std() < 1.4
+    assert 0.6 < shots[True].mean() / shots[False].mean() < 1.4
+    users = [n for n, op in REGISTRY.items() if not op.cpu_only and "_noise(" in (op.glsl + op.glsl_helpers)]
+    assert len(users) >= 8
+    p = Patch(size=(32, 18)); p.fast_noise = True
+    chains = dict(every_op_chain())
+    for i, n in enumerate(users[:4]):
+        chains[n].out(p.outputs[i], patch=p)
+    g = GLRenderer(p, size=(32, 18), fps=10); g.step(0.5)
+    assert np.isfinite(g.read_rgba()).all(); g.release()
+    for n in users[4:]:
+        q = Patch(size=(32, 18)); q.fast_noise = True
+        chains[n].out(q.o0, patch=q)
+        g = GLRenderer(q, size=(32, 18), fps=10); g.step(0.5); g.release()
+
+
+def test_fast_noise_travels_with_the_patch():
+    p = Patch(size=(32, 18)); p.fast_noise = True
+    noise(3).out(p.o0, patch=p)
+    html = H.to_html(p)
+    assert '"fastNoise": true' in html and "_NOISE_TEX" in html and "function noiseTexture" in html
+    from hydrapy.export import patch_to_python
+    assert "set_fast_noise(True)" in patch_to_python(p)
+
+
 def test_repeated_subchains_are_computed_once_per_pass():
     import hydrapy.glsl as G
     def build():

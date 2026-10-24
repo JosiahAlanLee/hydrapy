@@ -447,10 +447,10 @@ TEXLOD = "#ifndef _texLod\n#define _texLod(s, uv, l) texture2D(s, uv)\n#endif"
 
 
 # Desktop-GL (moderngl) flavour of the same shader
-def to_desktop(source: str) -> str:
+def to_desktop(source: str, fast_noise: bool = False) -> str:
     body = "\n".join(l for l in source.splitlines() if not l.strip().startswith("precision "))
     return ("#version 330 core\n#define texture2D texture\n#define _texLod textureLod\nout vec4 _fragColor;\n"
-            "#define gl_FragColor _fragColor\n" + body)
+            "#define gl_FragColor _fragColor\n" + ("#define _NOISE_TEX\n" if fast_noise else "") + body)
 
 
 VERTEX_ES = "attribute vec2 position;\nvoid main () { gl_Position = vec4(position, 0.0, 1.0); }\n"

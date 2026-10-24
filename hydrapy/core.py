@@ -491,6 +491,7 @@ class Patch:
         self.speed = 1.0
         self.frame_rate = None          # e.g. 18: update feedback and pixels at most 18 times a second
         self.composite_alpha = False   # Hydra's display: RGB, alpha is a fourth channel. True: show RGB x alpha over black
+        self.fast_noise = False         # GPU noise() from a texture lookup (set_fast_noise); NumPy stays exact
         self.controls: dict = {}        # explicitly exposed Param signals
         self.scales: dict = {}          # output index -> render scale (Chain.out(scale=...)); absent = 1
         self.probes: list = []          # live.Probe instances, updated after every frame

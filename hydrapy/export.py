@@ -12,6 +12,7 @@ import numpy as np
 
 from .core import Camera, Chain, DelayRef, FrameSource, Image, Output, Patch, Texture, Video, default_patch
 from .glsl import TmpRef, compile_patch
+from .noise import NOISE_TEXTURE_JS
 from .signals import JS_HELPERS, Audio, Fn, Seq, Signal, as_signal
 
 
@@ -467,6 +468,8 @@ def patch_to_python(patch: Optional[Patch] = None) -> str:
         head.append(f"set_frame_rate({patch.frame_rate:g})")
     if patch.composite_alpha:
         head.append("set_composite_alpha(True)")
+    if getattr(patch, "fast_noise", False):
+        head.append("set_fast_noise(True)")
     head.append("")
     tail = ["", f"render({patch.display.name})", ""]
     return "\n".join(head) + src + "\n".join(tail)
@@ -600,6 +603,7 @@ def build_spec(patch: Optional[Patch] = None, pixel_ratio: float = 1.0, size: Op
         "speed": patch.speed,
         "frameRate": patch.frame_rate,
         "compositeAlpha": patch.composite_alpha,
+        "fastNoise": bool(getattr(patch, "fast_noise", False)),
         "soundtrack": next((pr.spec() for pr in patch.probes if hasattr(pr, "chunks")), None),
         "outputs": outs,
         "history": history,
@@ -760,7 +764,8 @@ function hydrapyAudioQueue(size) {
 }
 """
 
-RUNTIME_JS = AUDIO_HELPERS_JS + r"""(function(){
+RUNTIME_JS = AUDIO_HELPERS_JS + NOISE_TEXTURE_JS + r"""
+(function(){
   var canvas = document.getElementById('c');
   var errEl = document.getElementById('err');
   function fail(msg){ errEl.style.display = 'block'; errEl.textContent += msg + "\n"; }
@@ -829,6 +834,16 @@ RUNTIME_JS = AUDIO_HELPERS_JS + r"""(function(){
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, el);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  }
+
+  // set_fast_noise(): noise() reads this lattice instead of computing simplex noise per pixel
+  var noiseTex = null;
+  if (SPEC.fastNoise) {
+    noiseTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, noiseTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 256, 0, gl.RGBA, gl.UNSIGNED_BYTE, noiseTexture());
+    [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER].forEach(function(k){ gl.texParameteri(gl.TEXTURE_2D, k, gl.NEAREST); });
+    [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T].forEach(function(k){ gl.texParameteri(gl.TEXTURE_2D, k, gl.REPEAT); });
   }
 
   // media sources
@@ -919,10 +934,11 @@ RUNTIME_JS = AUDIO_HELPERS_JS + r"""(function(){
     return {
       name: o.name,
       passes: o.passes.map(function(p){
-        var prog = program(isGL2 && p.source.indexOf('_texLod') >= 0 ? es3(p.source) : p.source);
+        var src = (SPEC.fastNoise ? '#define _NOISE_TEX\n' : '') + p.source;
+        var prog = program(isGL2 && p.source.indexOf('_texLod') >= 0 ? es3(src) : src);
         var locs = {};
         if (prog) {
-          ['time','resolution','mouse'].forEach(function(n){ locs[n] = gl.getUniformLocation(prog, n); });
+          ['time','resolution','mouse','_noiseTex'].forEach(function(n){ locs[n] = gl.getUniformLocation(prog, n); });
           o.floats.forEach(function(f){ locs[f.name] = gl.getUniformLocation(prog, f.name); });
           o.samplers.forEach(function(s){ locs[s.name] = gl.getUniformLocation(prog, s.name); });
         }
@@ -1196,6 +1212,11 @@ RUNTIME_JS = AUDIO_HELPERS_JS + r"""(function(){
           gl.bindTexture(gl.TEXTURE_2D, tex);
           gl.uniform1i(p.locs[s.name], i);
         });
+        if (noiseTex && p.locs._noiseTex) {
+          gl.activeTexture(gl.TEXTURE0 + o.samplers.length);
+          gl.bindTexture(gl.TEXTURE_2D, noiseTex);
+          gl.uniform1i(p.locs._noiseTex, o.samplers.length);
+        }
         gl.drawArrays(gl.TRIANGLES, 0, 3);
         if (p.mipmap) {                    // a mipblur reads this target's levels
           gl.bindTexture(gl.TEXTURE_2D, target.tex);
