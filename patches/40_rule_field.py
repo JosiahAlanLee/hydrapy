@@ -4,7 +4,7 @@
 map is itself alive at a coarser scale:
 
 * o2 is a coarse automaton, 80x45 cells at 1280x720 (scale 1/16), Brian's Brain run asynchronously: each cell
-  updates with probability 0.35 a frame, so it boils rather than ticks.
+  updates with probability 0.5 a frame, so it boils rather than ticks.
 * The fine field, o1 (320x180, scale 1/4), takes its rule from a tile map that drifts — each of
   the tiles (8x6 at 16:9) changes rule at its own moment — shifted by four wherever the coarse automaton is
   alive. Fronts form where rules meet: Day & Night eats Life, Coral grows into Seeds' static.
