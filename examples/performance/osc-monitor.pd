@@ -1,0 +1,11 @@
+#N canvas 120 120 720 360 12;
+#X text 32 18 Session monitor: receives OSC but opens no audio device or model.;
+#X obj 32 65 netreceive -u -b 57131;
+#X obj 32 105 oscparse;
+#X obj 32 145 list trim;
+#X obj 32 185 print hydrapy-session;
+#X text 32 235 /voice/gate 1 and /voice/gate 0 arrive from session.json.;
+#X text 32 270 Replace this monitor with a separately tested nn~ host later.;
+#X connect 1 0 2 0;
+#X connect 2 0 3 0;
+#X connect 3 0 4 0;

@@ -185,6 +185,9 @@ def main(argv=None):
     studio.add_argument("--fps", type=float, default=30.)
     studio.add_argument("--port", type=int, default=8765)
     studio.add_argument("--no-browser", action="store_true")
+    session = sub.add_parser("session", help="play or inspect a beat-timed OSC session")
+    from .session import add_arguments as session_arguments
+    session_arguments(session)
     sub.add_parser("devices", help="list audio devices and MIDI ports for CvIn/CvOut/Midi")
     nc = sub.add_parser("nca", help="neural cellular automata: train a texture rule from one image (needs torch)")
     nc.add_argument("action", choices=["train"])
@@ -200,6 +203,16 @@ def main(argv=None):
     nc.add_argument("--init", default=None, help="a trained .npz to fine-tune (e.g. with longer --steps 64 128 --lr 3e-4)")
 
     a = ap.parse_args(argv)
+
+    if a.cmd == "session":
+        from .session import execute
+        try:
+            execute(a)
+        except KeyboardInterrupt:
+            raise SystemExit(130)
+        except (ValueError, OSError, RuntimeError) as exc:
+            ap.exit(1, f"session: {exc}\n")
+        return
 
     if a.cmd == "studio":
         from .studio import serve
