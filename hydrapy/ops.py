@@ -7,6 +7,8 @@ scalar *or* an (H, W) array when a chain is plugged into that parameter.
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 from .core import Input, Op, register
@@ -1069,6 +1071,94 @@ register(Op("blur", "texture", [F("radius", 1, scalar=True), I("iterations", 1)]
   for (int i = -1; i <= 1; i++) for (int j = -1; j <= 1; j++)
     sum += texture2D(_tex, fract(_st + vec2(float(i), float(j))*px));
   return sum / 9.0;"""))
+
+
+def _mip_pyramid(tex, levels):
+    """A mip chain as GL builds it: each level floor-halves (never below 1), each texel the bilinear
+    sample of the level above at its centre (a 2x2 average for even sizes)."""
+    out = [tex]
+    for _ in range(levels):
+        a = out[-1]
+        h, w = a.shape[:2]
+        if h == w == 1:
+            break
+        h2, w2 = max(h // 2, 1), max(w // 2, 1)
+        if (h2 * 2, w2 * 2) == (h, w):
+            out.append((a[0::2, 0::2] + a[0::2, 1::2] + a[1::2, 0::2] + a[1::2, 1::2]) * np.float32(0.25))
+            continue
+        y = ((np.arange(h2, dtype=np.float32) + 0.5) / h2 * h - 0.5)[:, None]
+        x = ((np.arange(w2, dtype=np.float32) + 0.5) / w2 * w - 0.5)[None, :]
+        y0, x0 = np.floor(y), np.floor(x)
+        fy, fx = (y - y0)[..., None], (x - x0)[..., None]
+        y0i, x0i = np.clip(y0, 0, h - 1).astype(np.intp), np.clip(x0, 0, w - 1).astype(np.intp)
+        y1i, x1i = np.clip(y0 + 1, 0, h - 1).astype(np.intp), np.clip(x0 + 1, 0, w - 1).astype(np.intp)
+        out.append(a[y0i, x0i] * (1 - fx) * (1 - fy) + a[y0i, x1i] * fx * (1 - fy)
+                   + a[y1i, x0i] * (1 - fx) * fy + a[y1i, x1i] * fx * fy)
+    return out
+
+
+def _np_bspline(level, st, env):
+    """Cubic B-spline sample of one mip level in four bilinear taps (the GPU's trick, kept for parity)."""
+    h, w = level.shape[:2]
+    size = np.array([w, h], np.float32)
+    x = np.mod(st, 1.0) * size - 0.5
+    i = np.floor(x)
+    f = x - i
+    f2, f3 = f * f, f * f * f
+    w0, w1 = (1 - 3 * f + 3 * f2 - f3) / 6, (4 - 6 * f2 + 3 * f3) / 6
+    w2, w3 = (1 + 3 * f + 3 * f2 - 3 * f3) / 6, f3 / 6
+    g0, g1 = w0 + w1, w2 + w3
+    h0 = (i - 0.5 + w1 / g0) / size
+    h1 = (i + 1.5 + w3 / g1) / size
+    def tap(u, v):
+        return env.sample(level, np.stack([u, v], -1))
+    return ((tap(h0[..., 0], h0[..., 1]) * g0[..., 0:1] + tap(h1[..., 0], h0[..., 1]) * g1[..., 0:1]) * g0[..., 1:2]
+            + (tap(h0[..., 0], h1[..., 1]) * g0[..., 0:1] + tap(h1[..., 0], h1[..., 1]) * g1[..., 0:1]) * g1[..., 1:2])
+
+
+def _np_mipblur(tex, st, radius, env):
+    r = max(float(radius), 0.0)
+    if r == 0:
+        return env.sample(tex, st)
+    lod = math.log2(max(r, 1.0))
+    l0 = int(math.floor(lod))
+    pyramid = _mip_pyramid(tex, l0 + 1)
+    a = _np_bspline(pyramid[min(l0, len(pyramid) - 1)], st, env)
+    if r < 1:
+        return env.sample(tex, st) * np.float32(1 - r) + a * np.float32(r)
+    f = np.float32(lod - l0)
+    if f == 0:
+        return a
+    return a * (1 - f) + _np_bspline(pyramid[min(l0 + 1, len(pyramid) - 1)], st, env) * f
+
+
+MIPBLUR_HELPERS = """vec4 _mipbsp(sampler2D s, vec2 uv, float lod) {
+  vec2 size = max(floor(resolution / exp2(lod)), vec2(1.0));
+  vec2 x = fract(uv) * size - 0.5;
+  vec2 i = floor(x);
+  vec2 f = x - i;
+  vec2 f2 = f * f, f3 = f2 * f;
+  vec2 w0 = (1.0 - 3.0*f + 3.0*f2 - f3) / 6.0, w1 = (4.0 - 6.0*f2 + 3.0*f3) / 6.0;
+  vec2 w2 = (1.0 + 3.0*f + 3.0*f2 - 3.0*f3) / 6.0, w3 = f3 / 6.0;
+  vec2 g0 = w0 + w1, g1 = w2 + w3;
+  vec2 h0 = (i - 0.5 + w1 / g0) / size, h1 = (i + 1.5 + w3 / g1) / size;
+  return (_texLod(s, fract(vec2(h0.x, h0.y)), lod) * g0.x + _texLod(s, fract(vec2(h1.x, h0.y)), lod) * g1.x) * g0.y
+       + (_texLod(s, fract(vec2(h0.x, h1.y)), lod) * g0.x + _texLod(s, fract(vec2(h1.x, h1.y)), lod) * g1.x) * g1.y;
+}"""
+
+register(Op("mipblur", "texture", [F("radius", 8, scalar=True)], np=_np_mipblur, mipmaps=True, identity=("radius", 0.0),
+            glsl_helpers=MIPBLUR_HELPERS,
+            doc="A wide, smooth blur at a fixed price: a B-spline sample of the input's mip level for `radius` "
+                "pixels, blended between levels, so radius animates smoothly and costs the same at 2 or 200 "
+                "(radius 0 is no blur). WebGL1 pages have no mip levels and fall back to four sparse taps.",
+            glsl="""float r = max(radius, 0.0);
+  if (r <= 0.0) return _texLod(_tex, fract(_st), 0.0);
+  float lod = log2(max(r, 1.0));
+  float l0 = floor(lod);
+  vec4 a = _mipbsp(_tex, _st, l0);
+  if (r < 1.0) return mix(_texLod(_tex, fract(_st), 0.0), a, r);
+  if (lod == l0) return a;
+  return mix(a, _mipbsp(_tex, _st, l0 + 1.0), lod - l0);"""))
 
 
 def _np_sharpen(tex, st, amount, env):

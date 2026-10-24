@@ -124,6 +124,13 @@ def main(argv=None):
     h.add_argument("-o", "--out", default=None)
     h.add_argument("--size", type=parse_size, default=None, help="fixed canvas size (default: fills the window)")
     h.add_argument("--pixel-ratio", type=float, default=1.0)
+    h.add_argument("--phone", action="store_true",
+                   help="for phones: --precision mixed and --adaptive (add --fast-noise and --8bit for more)")
+    h.add_argument("--precision", choices=("highp", "mixed", "mediump"), default="highp",
+                   help="mixed: colour math in mediump, coordinates/time/noise in highp")
+    h.add_argument("--adaptive", nargs="?", type=float, const=0.35, default=None, metavar="MIN",
+                   help="render smaller while the page can't keep up with the display (down to MIN, default 0.35)")
+    h.add_argument("--8bit", dest="eight_bit", action="store_true", help="8-bit output buffers, as Hydra (no half floats)")
 
     for name, help_ in (("hydra", "print Hydra JavaScript"), ("glsl", "print the fragment shaders")):
         s = sub.add_parser(name, help=help_)
@@ -155,6 +162,9 @@ def main(argv=None):
     fh.add_argument("--pixel-ratio", type=float, default=1.0)
     fh.add_argument("--no-zip", action="store_true")
 
+    for sp in (r, h, lv, fh):
+        sp.add_argument("--fast-noise", action="store_true",
+                        help="GPU noise() from a texture lookup: cheaper, similar but not identical (set_fast_noise)")
     for sp in (r, h, lv, an, fh):
         sp.add_argument("--fxhash", default=None, help="the hash a Mint previews (sets FXHASH)")
         sp.add_argument("--fxparam", action="append", default=[], metavar="ID=VALUE",
@@ -270,7 +280,14 @@ def main(argv=None):
         return
 
     _mint_env(a)
-    patch = load_patch(a.patch)
+
+    def loaded(strict=True):
+        p = load_patch(a.patch, strict=strict)
+        if getattr(a, "fast_noise", False):
+            p.fast_noise = True
+        return p
+
+    patch = loaded()
 
     if a.cmd == "render":
         ext = os.path.splitext(a.out)[1].lower()
@@ -318,7 +335,8 @@ def main(argv=None):
     elif a.cmd == "html":
         from .export import to_html
         out = a.out or os.path.splitext(os.path.basename(a.patch))[0] + ".html"
-        to_html(patch, out, title=os.path.basename(a.patch), size=a.size, pixel_ratio=a.pixel_ratio)
+        to_html(patch, out, title=os.path.basename(a.patch), size=a.size, pixel_ratio=a.pixel_ratio,
+                precision=a.precision, adaptive=a.adaptive or False, float_buffers=not a.eight_bit, phone=a.phone)
         print("wrote", out)
 
     elif a.cmd == "fxhash":
@@ -345,7 +363,7 @@ def main(argv=None):
     elif a.cmd == "live":
         from .backend_gl import live
         live(patch, size=a.size, fullscreen=a.fullscreen, watch=None if a.no_watch else a.patch,
-             loader=lambda: load_patch(a.patch, strict=False))
+             loader=lambda: loaded(strict=False))
 
     elif a.cmd == "ansi":
         from .backend_np import Renderer

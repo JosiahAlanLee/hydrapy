@@ -715,3 +715,283 @@ def test_gl_variants_skip_faded_branches_and_match_the_full_program():
     skipped = next(v for (name, k), v in fast._variants.items() if name == "o0" and k)
     assert len(skipped) < len(fast._variants[("o0", None)])    # fewer passes while the branch is faded out
     fast.release(); full.release()
+
+
+@pytest.mark.skipif(not _gl_available(), reason="no OpenGL context")
+def test_prewarm_compiles_the_score_before_the_first_frame():
+    from hydrapy.backend_gl import GLRenderer
+    fade = Fn(lambda c: 0.0 if c.time < 0.5 or c.time > 1.0 else (c.time - 0.5) * 2)
+    p = Patch(size=(32, 18))
+    osc(8, 0.1, 1.2).add(noise(4, 0.3).blur(2, 2), fade).out(p.o0, patch=p)
+    r = GLRenderer(p, size=(32, 18), fps=10)
+    assert r.prewarm([i / 10 for i in range(16)]) == 1          # one variant: the blur faded out
+    def no_compiles(*a, **k):
+        raise AssertionError("compiled mid-render")
+    r._build = no_compiles
+    for i in range(16):
+        r.step(i / 10)
+    r.release()
+    # a gate on audio analysis can't be predicted, so it's left alone
+    q = Patch(size=(32, 18))
+    osc(8).add(noise(4), Fft(2)).out(q.o0, patch=q)
+    r = GLRenderer(q, size=(32, 18), fps=10)
+    assert r.prewarm([0.0, 1.0]) == 0
+    r.release()
+
+
+@pytest.mark.skipif(not _gl_available(), reason="no OpenGL context")
+def test_live_settle_skips_compiles_for_values_that_only_touch_zero():
+    from hydrapy.backend_gl import GLRenderer
+    # zero for one frame at t=0.3, then for good from t=1.0
+    amount = Fn(lambda c: 0.0 if abs(c.time - 0.3) < 0.01 or c.time >= 0.95 else 0.5)
+    def build():
+        p = Patch(size=(32, 18))
+        osc(8, 0.1, 1.2).add(noise(4, 0.3).blur(2, 2), amount).out(p.o0, patch=p)
+        return p
+    live, full = GLRenderer(build(), size=(32, 18), fps=10), GLRenderer(build(), size=(32, 18), fps=10)
+    live.settle, full.specialise = 4, False
+    for i in range(8):
+        live.step(i / 10), full.step(i / 10)
+        assert np.array_equal(live.read_rgba(), full.read_rgba()), i
+    assert [k for (name, k) in live._variants if name == "o0"] == [None]     # the blip compiled nothing
+    for i in range(8, 16):
+        live.step(i / 10), full.step(i / 10)
+        assert np.array_equal(live.read_rgba(), full.read_rgba()), i
+    assert len(live._variants) == 2 and live._active["o0"]                 # the lasting zero did, after 4 frames
+    live.release(); full.release()
+
+
+def test_mipblur_is_smooth_cheap_and_the_same_on_both_backends():
+    from hydrapy.glsl import gates
+    def base():
+        return shape(4, 0.3, 0.01).repeat(3, 3).add(osc(30, 0.1, 1.2).mask(shape(40, 0.2, 0.01)))
+    def chain(r):
+        return base().mipblur(r)
+    prog = compile_chain(chain(6))
+    assert [p.mipmap for p in prog.passes] == [True, False]
+    assert any(name == "mipblur" and v == 6 for name, v in [(tr.op.name, v) for tr, v, _ in gates(chain(6))])
+    sharp = chain(0).render(0.5, size=(64, 36))
+    assert np.allclose(sharp, base().render(0.5, size=(64, 36)))           # radius 0: no blur
+    soft = chain(12).render(0.5, size=(64, 36))
+    assert soft[..., :3].std() < sharp[..., :3].std() * 0.7
+    assert "_texLod(_tex" in prog.source and "#define _texLod(s, uv, l) texture2D(s, uv)" in prog.source
+    if _gl_available():
+        from hydrapy.backend_gl import GLRenderer
+        for r in (0.5, 3, 12, 40):
+            p = Patch(size=(64, 36)); chain(r).out(p.o0, patch=p)
+            g = GLRenderer(p, size=(64, 36), fps=10); g.step(0.5)
+            a = np.clip(g.read_rgba(), 0, 1); g.release()
+            b = np.clip(Renderer(p, size=(64, 36), fps=10).step(0.5), 0, 1)
+            assert np.abs(a - b).max() < 0.01, r
+
+
+def test_html_export_builds_mip_levels_for_mipblur():
+    p = Patch(size=(32, 18))
+    osc(10).mipblur(Lfo(0.2, lo=0, hi=20)).out(p.o0, patch=p)
+    html = H.to_html(p)
+    assert '"mipmap": true' in html and "generateMipmap" in html and "#version 300 es" in html
+
+
+def test_fast_noise_texture_is_the_same_in_python_and_javascript():
+    from hydrapy.noise import NOISE_TEXTURE_JS, noise_texture
+    tex = noise_texture()
+    assert tex.shape == (256, 256, 4) and tex.dtype == np.uint8
+    assert tex[0, 0, 1] == tex[0, 1, 0] and tex[0, 0, 2] == tex[1, 0, 0] and tex[255, 255, 3] == tex[0, 0, 0]
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    js = NOISE_TEXTURE_JS + "\nprocess.stdout.write(Buffer.from(noiseTexture()).toString('hex'));"
+    out = subprocess.run([node, "-e", js], capture_output=True, text=True, check=True).stdout
+    assert bytes.fromhex(out) == tex.tobytes()
+
+
+@pytest.mark.skipif(not _gl_available(), reason="no OpenGL context")
+def test_fast_noise_looks_like_noise_and_every_noise_op_compiles():
+    from hydrapy.backend_gl import GLRenderer
+    shots = {}
+    for fast in (False, True):
+        p = Patch(size=(96, 54)); p.fast_noise = fast
+        noise(4, 0.2).out(p.o0, patch=p)
+        g = GLRenderer(p, size=(96, 54), fps=10); g.step(1.0)
+        shots[fast] = g.read_rgba()[..., 0]; g.release()
+    assert not np.allclose(shots[True], shots[False])
+    assert 0.6 < shots[True].std() / shots[False].std() < 1.4
+    assert 0.6 < shots[True].mean() / shots[False].mean() < 1.4
+    users = [n for n, op in REGISTRY.items() if not op.cpu_only and "_noise(" in (op.glsl + op.glsl_helpers)]
+    assert len(users) >= 8
+    p = Patch(size=(32, 18)); p.fast_noise = True
+    chains = dict(every_op_chain())
+    for i, n in enumerate(users[:4]):
+        chains[n].out(p.outputs[i], patch=p)
+    g = GLRenderer(p, size=(32, 18), fps=10); g.step(0.5)
+    assert np.isfinite(g.read_rgba()).all(); g.release()
+    for n in users[4:]:
+        q = Patch(size=(32, 18)); q.fast_noise = True
+        chains[n].out(q.o0, patch=q)
+        g = GLRenderer(q, size=(32, 18), fps=10); g.step(0.5); g.release()
+
+
+def test_fast_noise_travels_with_the_patch():
+    p = Patch(size=(32, 18)); p.fast_noise = True
+    noise(3).out(p.o0, patch=p)
+    html = H.to_html(p)
+    assert '"fastNoise": true' in html and "_NOISE_TEX" in html and "function noiseTexture" in html
+    from hydrapy.export import patch_to_python
+    assert "set_fast_noise(True)" in patch_to_python(p)
+
+
+def test_phone_export_uses_mixed_precision_and_adapts_its_resolution():
+    p = Patch(size=(32, 18))
+    src(p.o0).scale(1.01).blend(osc(10).modulate(noise(3), 0.2), 0.1).out(p.o0, patch=p)
+    html = H.to_html(p, phone=True, float_buffers=False)
+    assert "precision mediump float;" in html and "uniform highp float time;" in html
+    assert "highp float _noise(highp vec3 v)" in html and "highp vec2 st = gl_FragCoord" in html
+    assert '"adaptive": {"min": 0.35, "step": 0.85}' in html and '"floatBuffers": false' in html
+    plain = H.to_html(p)
+    assert '"adaptive": null' in plain and "precision highp float;" in plain
+    if _gl_available():                                   # desktop GL accepts the qualifiers (and ignores them)
+        from hydrapy.backend_gl import GLRenderer
+        g = GLRenderer(p, size=(32, 18), fps=10, precision="mixed"); g.step(0.2)
+        assert np.isfinite(g.read_rgba()).all(); g.release()
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    from hydrapy.export import RUNTIME_JS
+    body = "function adapt(now){" + RUNTIME_JS.split("function adapt(now){", 1)[1].split("\n  }\n", 1)[0] + "\n  }"
+    js = """
+var SPEC = {}, dyn = 1, canvas = {dataset: {}}, allocs = 0;
+var adaptive = {min: 0.35, step: 0.85}, ivals = [], refresh = 1000 / 60, lastChange = 0, lastDown = -1e9, ceiling = 1, prevNow = null;
+function allocate(keep){ if (keep) allocs++; }
+""" + body + """
+var now = 0, trace = [];
+function run(ms, interval){ var end = now + ms; while (now < end) { now += interval; adapt(now); } trace.push(+dyn.toFixed(3)); }
+run(1000, 1000 / 60);            // keeping up: stays at 1
+run(6000, 100);                  // 10 fps: steps down
+var low = +dyn.toFixed(3);
+run(4000, 1000 / 60);            // headroom again, but the next size up was too slow: it holds
+run(25000, 1000 / 60);           // after 20 s it tries full size again
+console.log(JSON.stringify({trace: trace, low: low, allocs: allocs}));
+"""
+    out = json.loads(subprocess.run([node, "-e", js], capture_output=True, text=True, check=True).stdout)
+    t = out["trace"]
+    assert t[0] == 1 and out["low"] < 0.7 and t[2] == out["low"] and t[3] == 1 and out["allocs"] >= 4
+
+
+def test_repeated_subchains_are_computed_once_per_pass():
+    import hydrapy.glsl as G
+    def build():
+        n = noise(3, 0.2).color(0.3, 0.6, 0.9)
+        # the same chain object twice, and an equal chain built separately: one noise call each way
+        return osc(10).blend(n, 0.5).add(n.invert(), 0.3).mult(noise(3, 0.2).color(0.3, 0.6, 0.9), 0.4)
+    prog = compile_chain(build())
+    p = prog.passes[-1]
+    assert p.lets and p.source.count("noise(st") + p.source.count("noise(_st") <= 2
+    assert p.source.count("vec4 _s0 =") == 1
+    G.SHARE_SUBCHAINS = False
+    try:
+        plain = compile_chain(build())
+    finally:
+        G.SHARE_SUBCHAINS = True
+    assert not plain.passes[-1].lets
+    a = build().render(0.4, size=(32, 18))
+    if _gl_available():
+        from hydrapy.backend_gl import GLRenderer
+        outs = []
+        for share in (True, False):
+            G.SHARE_SUBCHAINS = share
+            try:
+                q = Patch(size=(32, 18)); build().out(q.o0, patch=q)
+                r = GLRenderer(q, size=(32, 18), fps=10); r.step(0.4); outs.append(r.read_rgba()); r.release()
+            finally:
+                G.SHARE_SUBCHAINS = True
+        assert np.array_equal(outs[0], outs[1])
+        assert np.abs(outs[0] - a).max() < 0.01
+
+
+def test_structurally_equal_signals_share_one_uniform():
+    l = Lfo(0.3)
+    ch = osc(10, l * 0.5 + 0.1).rotate(l * 0.5 + 0.1).kaleid(Lfo(0.3) * 2)
+    prog = compile_chain(ch)
+    assert len(prog.float_uniforms) == 2        # l*0.5+0.1 once; the second Lfo is another object
+
+
+# --- per-output resolution -------------------------------------------------------------------
+
+def _scaled_patch():
+    p = Patch(size=(64, 36))
+    noise(3, 0.2).color(0.9, 0.5, 0.2).blur(1).out(p.o1, patch=p, scale=0.25)
+    src(p.o2).scale(1.02).blend(osc(6, 0.1, 1.2), 0.2).out(p.o2, patch=p, scale=0.5)
+    src(p.o1).add(src(p.o2), 0.5).out(p.o0, patch=p)
+    return p
+
+
+def test_scaled_outputs_render_smaller_and_upscale_on_numpy():
+    p = _scaled_patch()
+    assert p.output_size(p.o1, (64, 36)) == (16, 9) and p.output_size("o2", (64, 36)) == (32, 18)
+    r = Renderer(p, size=(64, 36), fps=10)
+    for i in range(3):
+        img = r.step(i / 10)
+    assert img.shape == (36, 64, 4) and np.isfinite(img).all()
+    assert r.env.buffers[1].shape == (9, 16, 4) and r.env.buffers[2].shape == (18, 32, 4)
+    with pytest.raises(ValueError):
+        osc().out(p.o3, patch=p, scale=0)
+    from hydrapy.export import patch_to_python
+    assert "out(o1, scale=0.25)" in patch_to_python(p)
+
+
+@pytest.mark.skipif(not _gl_available(), reason="no GL")
+def test_scaled_outputs_on_gl_match_numpy_and_read_at_their_size():
+    from hydrapy.backend_gl import GLRenderer
+    rn, rg = Renderer(_scaled_patch(), size=(64, 36), fps=10), GLRenderer(_scaled_patch(), size=(64, 36), fps=10)
+    for i in range(4):
+        a = rn.step(i / 10)
+        rg.step(i / 10)
+    assert rg.outs["o1"]["ring"][0]["tex"].size == (16, 9) and rg.outs["o2"]["ring"][0]["tex"].size == (32, 18)
+    assert np.abs(np.clip(a[..., :3], 0, 1) - rg.read() / 255.0).mean() < 0.02
+    rg.patch.render(rg.patch.o1)
+    assert rg.read_rgba().shape == (9, 16, 4) and rg.read().shape == (36, 64, 3)
+    rg.release()
+
+
+def test_html_export_carries_output_scales():
+    from hydrapy.export import build_spec
+    spec = build_spec(_scaled_patch(), size=(64, 36))
+    assert spec["scales"] == {"o1": 0.25, "o2": 0.5}
+    from hydrapy.export import RUNTIME_JS
+    assert "function osz(n)" in RUNTIME_JS and "bindRef(s.ref, s.delay, o.name)" in RUNTIME_JS
+
+
+@pytest.mark.skipif(not _gl_available(), reason="no GL")
+def test_pipelined_readback_yields_the_same_frames():
+    from hydrapy.backend_gl import GLRenderer
+    def frames(pipelined):
+        p = Patch(size=(40, 24))
+        src(p.o0).scale(1.03).blend(osc(7, 0.2, 1.1).rotate(0, 0.3), 0.3).out(p.o0, patch=p)
+        r = GLRenderer(p, size=(40, 24), fps=12)
+        out = list(r.frames(9, pipelined=pipelined))
+        r.release()
+        return out
+    a, b = frames(False), frames(True)
+    assert len(a) == len(b) == 9 and all(np.array_equal(x, y) for x, y in zip(a, b))
+
+
+def test_frame_source_may_report_an_unchanged_frame():
+    calls = []
+    def draw(t):
+        calls.append(t)
+        if t >= 1.0:
+            return None
+        return np.full((4, 6, 4), int(t * 100), np.uint8)
+    fs = FrameSource(draw)
+    a = fs.frame_at(0.5)
+    v = fs.version
+    b = fs.frame_at(1.5)
+    assert b is a and fs.version == v and calls == [0.5, 1.5]
+    if _gl_available():
+        from hydrapy.backend_gl import GLRenderer
+        p = Patch(size=(6, 4)); src(fs).out(p.o0, patch=p)
+        r = GLRenderer(p, size=(6, 4), fps=10)
+        r.step(0.5); first = r.read_rgba().copy()
+        r.step(1.5)
+        assert np.array_equal(r.read_rgba(), first) and r.media[fs.name]["version"] == fs.version
+        r.release()

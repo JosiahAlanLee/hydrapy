@@ -98,6 +98,86 @@ multiple full-resolution outputs still cost work. 4K has four times as many
 pixels as 1080p. A `pixelate()` effect does not reduce that pixel count; reduce
 the actual render or simulation size when intentionally trading detail for speed.
 
+## Spending pixels where they show
+
+Most of a frame's cost is per pixel, so the biggest wins come from computing fewer of them, or
+computing each one more cheaply. These are opt-in, because each one trades something.
+
+**Per-output resolution.** `chain.out(o1, scale=0.25)` renders that output at a quarter of the
+frame's width and height (1/16 of the pixels); whatever samples it upsamples it bilinearly. Use it
+for soft material — out-of-focus grounds, blurs, feedback trails, simulations — and keep sharp
+lines at full size. Pixel-sized ops (`blur`, `rd`) work in that output's own pixels. Supported by
+the GL, NumPy and HTML renderers.
+
+```python
+ground = noise(3, 0.2).add(voronoi(6), 0.4).modulate(noise(2), 0.3).mipblur(4)
+ground.out(o1, scale=0.25)                     # soft: a quarter size is invisible
+src(o1).add(shape(4, 0.2, 0.002).repeat(4, 3), 0.8).out(o0)   # sharp: full size
+```
+
+**`mipblur(radius)`.** A wide blur at a fixed price: the input's mip levels are built after its
+pass, and each pixel takes a B-spline sample of the level for `radius`, blended between levels.
+`blur(r, iterations=n)` costs `n` full-size passes and grows with the radius; `mipblur` doesn't, and
+`radius` animates smoothly. WebGL1 pages have no mip levels and fall back to sparse taps.
+
+**`set_fast_noise()`** (`--fast-noise`). `noise()` and every op built on it read a 256×256 lattice
+texture in two fetches instead of computing 3D simplex noise per pixel. It is value noise matched
+to simplex's range and feature size: similar, not identical — thresholded noise shows axis-aligned
+creases. Desktop GL and HTML pages build the same texture; NumPy renders and compute kernels keep
+the exact noise, so CPU and GPU renders differ when it is on.
+
+**Phones** (`hydrapy html patch.py --phone`, `to_html(phone=True)`):
+
+* `precision="mixed"`: colour math in mediump (half precision, twice the rate on most phone GPUs);
+  time, uniforms, coordinates, scalars, and anything that hashes or computes noise stay highp. A
+  desktop or the software renderers here run mediump at full precision, so the visual effect of
+  this mode has to be checked on the phone itself.
+* `adaptive`: when frames arrive slower than the display refreshes, outputs render smaller (steps of
+  0.85, down to 0.35 of the size) and grow back when there is headroom, but not straight back to a
+  size that was too slow. Feedback is resampled into the new targets rather than cleared. The canvas
+  keeps its size. Pixel-sized ops look softer while it is scaled down.
+* Add `--8bit` for 8-bit output buffers (as Hydra; half the memory traffic of half floats, with
+  more banding in slow feedback) and `--fast-noise`. The page's default `--pixel-ratio 1` already
+  renders CSS pixels, not the 3× device pixels of a typical phone.
+
+## Work skipped automatically
+
+* **Faded layers cost nothing** (GL): each output's program is compiled in variants without the
+  transforms that are the identity this frame — a `blend`/`add`/`modulate` at 0, a `mipblur` at
+  radius 0 — see [rendering notes](rendering-and-export.md#backend-notes).
+  `iter_frames_gl` (and so `hydrapy render --gpu`) compiles every variant the render will need
+  before the first frame, for gates driven by predictable signals; live windows and Studio wait 12
+  frames before compiling a new combination, so a value touching zero never stalls the show.
+* **Shared sub-chains**: a chain (or an equal one built separately) used more than once at the same
+  coordinates in a pass is computed once into a local; equal signals share one uniform.
+* **Pipelined readback**: video export reads frame *n−1* through a pixel buffer while frame *n*
+  renders, instead of stalling the GPU each frame.
+* **Unchanged `FrameSource` frames**: a draw function may return `None` for "same as before"; the
+  frame isn't copied, compared or re-uploaded.
+
+Measured on Mesa llvmpipe (software OpenGL on two cores; relative numbers only), median ms/frame at
+1280×720, against `c195d65` (which already had the faded-layer variants):
+
+| Case | Before | After |
+| --- | ---: | ---: |
+| Patch 39 (Bullfrog layers) at 0:30 | 132.7 | 109.4 |
+| Patch 39 at 1:35 | 185.4 | 177.1 |
+| Patch 39 at 2:50 | 198.6 | 173.5 |
+| Patch 39 at 4:50 | 190.3 | 154.6 |
+| Offline `osc().kaleid()`, render + readback | 19.2 | 16.3 |
+
+| Option, same machine | Off | On |
+| --- | ---: | ---: |
+| Soft ground on o1 (noise, voronoi, blur), `scale=0.5` / `0.25` | 63.8 | 21.9 / 11.8 |
+| `blur(4, iterations=6)` → `mipblur(40)` (wider, smoother) | 157.3 | 49.7 |
+| Three noise layers and a modulation, `set_fast_noise()` | 18.2 | 7.4 |
+| Patch 39 at 2:50, `set_fast_noise()` | 157.9 | 126.8 |
+| Heavy feedback page, 960×540, SwiftShader, `--phone` | 4.5 fps | 20 fps (at 0.35) |
+
+Tried and dropped: uniform buffer objects for signal uniforms (no measurable change; per-frame
+Python overhead is already ~0.3 ms for 80 uniforms). The pipelined readback showed no change
+under software GL, where "GPU" and CPU are the same cores; its gain is overlap on a real GPU.
+
 ## Experimental compute simulations
 
 `rd()` and `bleed()` have optional tiled compute kernels for desktop OpenGL 4.3+.

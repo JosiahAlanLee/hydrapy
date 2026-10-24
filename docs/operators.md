@@ -160,6 +160,7 @@ Edit operator declarations, then regenerate this page.
 | op | args | origin | notes |
 |---|---|---|---|
 | `blur` | `radius=1, iterations=1` | **new** | 3x3 box blur with taps `radius` pixels apart; use iterations for a wider blur. |
+| `mipblur` | `radius=8` | **new** | A wide, smooth blur at a fixed price: a B-spline sample of the input's mip level for `radius` pixels, blended between levels, so radius animates smoothly and costs the same at 2 or 200 (radius 0 is no blur). WebGL1 pages have no mip levels and fall back to four sparse taps. |
 | `sharpen` | `amount=1` | **new** | Unsharp mask. |
 | `edge` | `amount=1` | **new** | Sobel edge magnitude. |
 | `emboss` | `amount=2` | **new** | Relief shading. |

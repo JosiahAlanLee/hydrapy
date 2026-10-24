@@ -10,12 +10,13 @@ intermediate target ``tmpN``; the op then samples ``tex_tmpN``.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 from .core import Camera, Chain, DelayRef, Image, Op, Output, Patch, Texture, Video, default_patch
 from .noise import GLSL_NOISE
-from .signals import Fn, Signal, as_signal
+from .signals import Const, Expr, Fn, Fn1, Signal, as_signal
 
 
 @dataclass
@@ -44,6 +45,8 @@ class Pass:
     expr: str                 # GLSL expression for gl_FragColor (functions/uniforms are shared)
     source: str = ""          # full fragment shader, filled in by Program.finish()
     compute: Optional[ComputeStep] = None
+    lets: list = field(default_factory=list)   # "vec4 _sN = ...;": sub-chains used more than once, computed once
+    mipmap: bool = False      # build this target's mip levels after drawing it (a mipmaps op samples it)
 
 
 @dataclass
@@ -90,24 +93,48 @@ class Program:
         return [p.target for p in self.passes if p.target.startswith("tmp")]
 
     def header(self) -> str:
-        lines = [f"precision {self.precision} float;", "uniform float time;", "uniform vec2 resolution;",
-                 "uniform vec2 mouse;"]
+        mixed = self.precision == "mixed"
+        lines = [f"precision {'mediump' if mixed else self.precision} float;", "uniform float time;",
+                 "uniform vec2 resolution;", "uniform vec2 mouse;"]
         for u in self.uniforms:
             lines.append(f"uniform {u.type} {u.name};")
         helpers = list(dict.fromkeys(op.glsl_helpers for op in self.functions if op.glsl_helpers))
-        return ("\n".join(lines) + "\n" + GLSL_NOISE + "\n" + "\n".join(helpers)
-                + "\n" + "\n".join(function_source(op) for op in self.functions))
+        if any(op.mipmaps for op in self.functions):
+            helpers.insert(0, TEXLOD)
+        functions = [function_source(op) for op in self.functions]
+        noise = GLSL_NOISE
+        if mixed:
+            lines = [lines[0]] + [highp(line) for line in lines[1:]]
+            noise = highp(noise, colours=True)
+            helpers = [highp(h, colours=bool(_HASHY.search(h))) for h in helpers]
+            functions = [highp(f, colours=bool(_HASHY.search(f))) for f in functions]
+        return ("\n".join(lines) + "\n" + noise + "\n" + "\n".join(helpers) + "\n" + "\n".join(functions))
 
     def finish(self):
         head = self.header()
+        st = "highp vec2" if self.precision == "mixed" else "vec2"
         for p in self.passes:
-            p.source = (head + "\nvoid main () {\n  vec2 st = gl_FragCoord.xy / resolution.xy;\n"
+            lets = "".join(f"  {line}\n" for line in p.lets)
+            p.source = (head + f"\nvoid main () {{\n  {st} st = gl_FragCoord.xy / resolution.xy;\n" + lets +
                         f"  gl_FragColor = {p.expr};\n}}\n")
         return self
 
     @property
     def source(self) -> str:
         return self.passes[-1].source
+
+
+# precision="mixed" (phones): colour math in mediump, everything that can grow or must be exact in
+# highp: time, uniforms, coordinates (Hydra's coordinates are vec2), scalars (an angle is speed*time),
+# and every value inside hashing and noise, which mediump destroys.
+_DECL = re.compile(r"(?<![\w.])(float|vec2|vec3|mat2|mat3|mat4)(?=\s+[A-Za-z_])")
+_DECL4 = re.compile(r"(?<![\w.])(float|vec2|vec3|vec4|mat2|mat3|mat4)(?=\s+[A-Za-z_])")
+_HASHY = re.compile(r"_noise|_hash|_h\d\d|_h11|43758|fract\s*\(\s*sin|sin\s*\(\s*dot")
+
+
+def highp(source: str, colours: bool = False) -> str:
+    """Qualify the declarations in ``source`` as highp (vec4 too when ``colours``); used by "mixed"."""
+    return (_DECL4 if colours else _DECL).sub(r"highp \1", source)
 
 
 def iterated(op: Op) -> bool:
@@ -165,6 +192,9 @@ def gates(chain: Chain) -> list:
     return out
 
 
+SHARE_SUBCHAINS = True      # compute a repeated sub-chain once per pass (glsl._Compiler.shared)
+
+
 def glsl_float(v: float) -> str:
     v = float(v)
     if not math.isfinite(v):
@@ -188,11 +218,48 @@ class _Compiler:
         self._float_ids: dict[int, Uniform] = {}
         self._sampler_names: dict[str, Uniform] = {}
         self._prefix_textures: dict[tuple, str] = {}
+        self._mode = None             # sharing: None (off), "count" or "emit", while a pass is generated
+        self._counts: dict = {}
+        self._names: dict = {}
+        self._lets: list = []
+        self._chain_keys: dict = {}
+
+    # -- structural keys: equal keys generate equal GLSL -----------------------
+    @staticmethod
+    def signal_key(sig):
+        if isinstance(sig, Const):
+            return ("c", sig.v)
+        if isinstance(sig, Expr):
+            return ("e", sig.op, _Compiler.signal_key(sig.a), _Compiler.signal_key(sig.b))
+        if isinstance(sig, Fn1):
+            return ("f", sig.fn, _Compiler.signal_key(sig.a), tuple(sig.extra))
+        return ("id", id(sig))        # anything else may carry state: one uniform per object
+
+    def arg_key(self, a):
+        if isinstance(a, Chain):
+            return self.chain_key(a)
+        if isinstance(a, Signal):
+            return self.signal_key(a)
+        if isinstance(a, bool):
+            return ("n", float(a))
+        if isinstance(a, (int, float)):
+            return ("n", float(a))
+        if isinstance(a, Texture):
+            return ("t", a.name)
+        return ("id", id(a))
+
+    def chain_key(self, chain: Chain):
+        key = self._chain_keys.get(id(chain))
+        if key is None:
+            key = tuple(("skip",) if id(tr) in self.skip else (tr.op.name, tuple(self.arg_key(a) for a in tr.args))
+                        for tr in chain.transforms)
+            self._chain_keys[id(chain)] = key
+        return key
 
     # -- uniforms --------------------------------------------------------
     def float_uniform(self, sig) -> str:
         sig = as_signal(sig)
-        key = id(sig)
+        key = self.signal_key(sig)    # structurally equal expressions share one uniform
         if key not in self._float_ids:
             u = Uniform(f"u_{len(self._float_ids)}", "float", sig)
             self._float_ids[key] = u
@@ -216,8 +283,38 @@ class _Compiler:
             self.p.functions.append(op)
 
     def add_pass(self, target: str, expr: Callable[[str], str]):
+        """Generate one pass. Argument chains that occur more than once at the same coordinates (the same
+        chain object, or an equal one) are computed once into a local: count them, then emit."""
         compute = expr.compute_step() if isinstance(expr, _TextureCall) else None
-        self.p.passes.append(Pass(target, expr("st"), compute=compute))
+        saved = (self._mode, self._counts, self._names, self._lets)
+        self._mode, self._counts = "count", {}
+        expr("st")
+        self._mode, self._names, self._lets = "emit", {}, []
+        code = expr("st")
+        lets = self._lets
+        self._mode, self._counts, self._names, self._lets = saved
+        self.p.passes.append(Pass(target, code, compute=compute, lets=lets))
+
+    def shared(self, key: tuple, frag: Callable[[str], str]) -> Callable[[str], str]:
+        """``frag`` (the GLSL of a chain, or of a chain's first k transforms, whose structural key is ``key``),
+        hoisted into a local when the same key is generated more than once at the same coordinates."""
+        if not SHARE_SUBCHAINS or isinstance(frag, _TextureCall):
+            return frag                                       # a _TextureCall keeps its compute eligibility
+
+        def f(uv):
+            k = (key, uv)
+            if self._mode == "count":
+                n = self._counts.get(k, 0)
+                self._counts[k] = n + 1
+                return frag(uv) if n == 0 else "_"           # nested uses are counted once per distinct site
+            if self._mode == "emit" and self._counts.get(k, 0) > 1:
+                if k not in self._names:
+                    code = frag(uv)
+                    self._names[k] = f"_s{len(self._lets)}"
+                    self._lets.append(f"vec4 {self._names[k]} = {code};")
+                return self._names[k]
+            return frag(uv)
+        return f
 
     # -- arguments -------------------------------------------------------
     def arg(self, a, inp) -> Callable[[str], str]:
@@ -248,9 +345,12 @@ class _Compiler:
     # -- chain -----------------------------------------------------------
     def gen(self, chain: Chain) -> Callable[[str], str]:
         frag: Optional[Callable[[str], str]] = None
+        parts: list = []                  # the structural key of the prefix generated so far
         for index, tr in enumerate(chain.transforms):
             if frag is not None and id(tr) in self.skip:
+                parts.append(("skip",))
                 continue
+            parts.append((tr.op.name, tuple(self.arg_key(a) for a in tr.args)))
             op, args = tr.op, list(tr.args)
             if op.cpu_only:
                 raise NotImplementedError(f".{op.name}() is CPU-only and cannot be compiled to GLSL")
@@ -307,11 +407,14 @@ class _Compiler:
                 # Longer iterations overwrite their input while ping-ponging.
                 # Give them a private target: an earlier branch may still
                 # sample a cached prefix in the final composite pass.
-                reusable = iterations <= 2
+                # A mipmapped prefix is private too: other ops sample with implicit LOD, and a seam in their
+                # coordinates (fract, kaleid) would pick a tiny mip level there.
+                reusable = iterations <= 2 and not op.mipmaps
                 tmp = self._prefix_textures.get(key) if reusable else None
                 if tmp is None:
                     tmp = self.new_tmp()
                     self.add_pass(tmp, f0)
+                    self.p.passes[-1].mipmap = op.mipmaps
                     if reusable:
                         self._prefix_textures[key] = tmp
                 tex = self.sampler_uniform(TmpRef(tmp))
@@ -327,6 +430,7 @@ class _Compiler:
                 frag = _TextureCall(op, tex, argfns, last)
             else:
                 raise ValueError(op.kind)
+            frag = self.shared(tuple(parts), frag)
         if frag is None:
             raise ValueError("empty chain")
         return frag
@@ -358,11 +462,17 @@ def compile_patch(patch: Optional[Patch] = None, precision: str = "highp") -> li
     return progs
 
 
+# Explicit-LOD sampling for mipmaps ops. GLSL 3 (desktop, WebGL2) defines _texLod as textureLod before
+# this; GLSL ES 1.00 can't choose a level in a fragment shader (and WebGL1 has no mip levels for
+# non-power-of-two targets), so there it samples the base level.
+TEXLOD = "#ifndef _texLod\n#define _texLod(s, uv, l) texture2D(s, uv)\n#endif"
+
+
 # Desktop-GL (moderngl) flavour of the same shader
-def to_desktop(source: str) -> str:
+def to_desktop(source: str, fast_noise: bool = False) -> str:
     body = "\n".join(l for l in source.splitlines() if not l.strip().startswith("precision "))
-    return ("#version 330 core\n#define texture2D texture\nout vec4 _fragColor;\n#define gl_FragColor _fragColor\n"
-            + body)
+    return ("#version 330 core\n#define texture2D texture\n#define _texLod textureLod\nout vec4 _fragColor;\n"
+            "#define gl_FragColor _fragColor\n" + ("#define _NOISE_TEX\n" if fast_noise else "") + body)
 
 
 VERTEX_ES = "attribute vec2 position;\nvoid main () { gl_Position = vec4(position, 0.0, 1.0); }\n"

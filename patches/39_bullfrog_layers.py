@@ -235,8 +235,14 @@ def captions(items, canvas=(1280, 720)):
     frame = np.zeros((canvas[1], canvas[0], 4), np.uint8)
     dirty = []
 
+    shown = [None]
+
     def draw(t):
         ctx = Ctx(time=t)
+        weights = tuple(round(float(weight(ctx)), 3) for weight, _, _ in rendered)
+        if weights == shown[0]:
+            return None                       # nothing moved: FrameSource keeps (and GL doesn't re-upload) the frame
+        shown[0] = weights
         for y0, y1, x0, x1 in dirty:
             frame[y0:y1, x0:x1] = 0
         dirty.clear()

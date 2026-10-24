@@ -261,7 +261,7 @@ var gl={FRAMEBUFFER:1,TRIANGLES:2,TEXTURE0:3,TEXTURE_2D:4,
 bindFramebuffer:function(_,fb){framebuffer=fb;},viewport:function(){},useProgram:function(){},
 uniform1f:function(){},uniform2f:function(){},uniform1i:function(){},activeTexture:function(){},bindTexture:function(){},
 drawArrays:function(){if(framebuffer===null)displays++;else draws++;}};
-var requestAnimationFrame=function(){},bindRef=function(){},stepNcas=function(){},stepSims=function(){};
+var requestAnimationFrame=function(){},bindRef=function(){},stepNcas=function(){},stepSims=function(){},noiseTex=null,adaptive=null,adapt=function(){};
 var outs={o0:{ring:[{fb:{},tex:{}},{fb:{},tex:{}}]}};
 var outputs=[{name:'o0',samplers:[],floats:[{name:'test',fn:function(t){times.push(t);return 1;}}],passes:[{prog:{},target:'o0',locs:{}}]}];
 """

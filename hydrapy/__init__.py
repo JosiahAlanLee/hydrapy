@@ -13,7 +13,7 @@ Combine:  add sub layer blend mult diff mask  +  lighten darken screen overlay w
 Modulate: modulate modulateRepeat modulateRepeatX modulateRepeatY modulateKaleid
           modulateScrollX modulateScrollY modulateScale modulatePixelate modulateRotate
           modulateHue  +  displace
-Texture:  blur sharpen edge emboss dilate erode life rd chroma bleed bake plane3d sphere3d cylinder3d pixelsort(CPU)
+Texture:  blur mipblur sharpen edge emboss dilate erode life rd chroma bleed bake plane3d sphere3d cylinder3d pixelsort(CPU)
 Paint:    stain alpha drops crackle veins scratches dust pan  (hydrapy.recipes: handpainted mothlight film)
 Textures: src(o0) prev() delay(o0, k) Image Video Camera Bank Quilt Text Lines
 Signals:  Lfo Seq Clock Env SH Drift Mouse Time Fn Fft Audio
@@ -141,6 +141,14 @@ def set_composite_alpha(on: bool = True):
     default_patch().composite_alpha = bool(on)
 
 
+def set_fast_noise(on: bool = True):
+    """GPU ``noise()`` (and every op built on it) from one texture lookup instead of 3D simplex noise
+    computed per pixel: cheaper on phones and integrated GPUs. It is value noise scaled to simplex's
+    range and feature size, so it looks alike but not identical. The desktop GL renderer and the HTML
+    export honour it; the NumPy renderer and GPU compute kernels keep the exact noise."""
+    default_patch().fast_noise = bool(on)
+
+
 def patch() -> Patch:
     return default_patch()
 
@@ -184,7 +192,7 @@ def describe(name: str) -> str:
 
 __all__ = (
     list(_sources) + [
-        "o0", "o1", "o2", "o3", "render", "hush", "set_bpm", "set_resolution", "set_frame_rate", "set_composite_alpha", "speed", "patch",
+        "o0", "o1", "o2", "o3", "render", "hush", "set_bpm", "set_resolution", "set_frame_rate", "set_composite_alpha", "set_fast_noise", "speed", "patch",
         "Chain", "Patch", "Output", "Image", "Video", "Camera", "Bank", "Quilt", "quilt", "NCA", "NCAModel", "Physarum", "Beats", "Flow", "XY", "Contours", "Harmonograph", "Lissajous", "Paths", "Rose", "chain_contours", "streamlines", "to_plotter_svg", "Text", "Lines", "plant", "meadow", "to_svg",
         "FrameSource", "Cellular", "CARule", "MultiCA1D", "WOLFRAM3", "WOLFRAM5", "subdivide", "fuzzy_paths", "flora_lines",
         "catmull_rom", "lathe_wire", "project_wire", "sweep_wire", "Track", "Timeline",

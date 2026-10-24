@@ -150,7 +150,7 @@ class Session:
     def _make_renderer(self, patch):
         self.backend_note = ''
         if self.backend in ('auto', 'gl'):
-            from .backend_gl import GLRenderer
+            from .backend_gl import LIVE_SETTLE, GLRenderer
             ctx = getattr(self.renderer, 'ctx', None)
             if self.backend == 'auto' and any(x['status'] == 'unavailable' for x in capabilities(patch, 'gl')['findings']):
                 self.backend_note = 'This patch contains CPU-only operations.'
@@ -165,7 +165,9 @@ class Session:
                             raise
                         self.backend_note = f'GL unavailable; using CPU: {exc}'
                 if ctx is not None:
-                    return GLRenderer(patch, size=self.size, fps=self.fps, ctx=ctx)
+                    r = GLRenderer(patch, size=self.size, fps=self.fps, ctx=ctx)
+                    r.settle = LIVE_SETTLE
+                    return r
         from .backend_np import Renderer
         return Renderer(patch, size=self.size, fps=self.fps)
 
@@ -194,7 +196,8 @@ class Session:
                     if hasattr(old, 'outs') and hasattr(new, 'outs'):
                         for name, output in old.outs.items():
                             for dst, src in zip(new.outs[name]['ring'], output['ring']):
-                                new.ctx.copy_framebuffer(dst['fbo'], src['fbo'])
+                                if dst['tex'].size == src['tex'].size:
+                                    new.ctx.copy_framebuffer(dst['fbo'], src['fbo'])
                     elif hasattr(old, 'env') and hasattr(new, 'env'):
                         new.env.buffers = dict(old.env.buffers)
                         new.env.rings = {k: list(v) for k, v in old.env.rings.items()}

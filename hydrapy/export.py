@@ -12,6 +12,7 @@ import numpy as np
 
 from .core import Camera, Chain, DelayRef, FrameSource, Image, Output, Patch, Texture, Video, default_patch
 from .glsl import TmpRef, compile_patch
+from .noise import NOISE_TEXTURE_JS
 from .signals import JS_HELPERS, Audio, Fn, Seq, Signal, as_signal
 
 
@@ -447,7 +448,8 @@ def patch_to_python(patch: Optional[Patch] = None) -> str:
     del _PY_NOTES[:]
     for o in patch.active_outputs():
         _externals(o.chain, ext)
-        body.append(f"{chain_to_python(o.chain)}.out({o.name})")
+        scale = getattr(patch, "scales", {}).get(o.index)
+        body.append(f"{chain_to_python(o.chain)}.out({o.name}" + (f", scale={scale:g})" if scale else ")"))
     src = "\n".join(body)
     head = ["import math", "from hydrapy import *", ""]
     if _PY_NOTES:
@@ -466,6 +468,8 @@ def patch_to_python(patch: Optional[Patch] = None) -> str:
         head.append(f"set_frame_rate({patch.frame_rate:g})")
     if patch.composite_alpha:
         head.append("set_composite_alpha(True)")
+    if getattr(patch, "fast_noise", False):
+        head.append("set_fast_noise(True)")
     head.append("")
     tail = ["", f"render({patch.display.name})", ""]
     return "\n".join(head) + src + "\n".join(tail)
@@ -560,8 +564,13 @@ def _mint_spec(programs, mint=None, preview_at=None):
 
 
 def build_spec(patch: Optional[Patch] = None, pixel_ratio: float = 1.0, size: Optional[tuple] = None,
-               precision: str = "highp", mint=None, preview_at: Optional[float] = None) -> dict:
-    """Everything the JS runtime needs, as plain data (what the HTML export embeds as ``SPEC``)."""
+               precision: str = "highp", mint=None, preview_at: Optional[float] = None,
+               adaptive: bool | float = False, float_buffers: bool = True) -> dict:
+    """Everything the JS runtime needs, as plain data (what the HTML export embeds as ``SPEC``).
+
+    ``adaptive``: render the outputs smaller while frames arrive slower than the display refreshes
+    (True, or the smallest scale to allow; True means 0.35). ``float_buffers=False``: 8-bit outputs
+    even where half-float targets exist, as Hydra does — half the memory traffic on a phone."""
     patch = patch or default_patch()
     programs = compile_patch(patch, precision=precision)
     images, videos, cameras, audios, banks = _collect_media(programs)
@@ -576,7 +585,8 @@ def build_spec(patch: Optional[Patch] = None, pixel_ratio: float = 1.0, size: Op
     for prog in programs:
         outs.append({
             "name": prog.output.name,
-            "passes": [{"target": p.target, "source": p.source} for p in prog.passes],
+            "passes": [dict(target=p.target, source=p.source, **({"mipmap": True} if p.mipmap else {}))
+                       for p in prog.passes],
             "floats": [{"name": u.name, "js": as_signal(u.source).js()} for u in prog.float_uniforms],
             "samplers": [({"name": u.name, "ref": u.source.output.name, "delay": u.source.frames}
                           if isinstance(u.source, DelayRef) else {"name": u.name, "ref": u.source.name})
@@ -598,6 +608,7 @@ def build_spec(patch: Optional[Patch] = None, pixel_ratio: float = 1.0, size: Op
         "speed": patch.speed,
         "frameRate": patch.frame_rate,
         "compositeAlpha": patch.composite_alpha,
+        "fastNoise": bool(getattr(patch, "fast_noise", False)),
         "soundtrack": next((pr.spec() for pr in patch.probes if hasattr(pr, "chunks")), None),
         "outputs": outs,
         "history": history,
@@ -611,6 +622,9 @@ def build_spec(patch: Optional[Patch] = None, pixel_ratio: float = 1.0, size: Op
         "pixelRatio": pixel_ratio,
         "size": list(size) if size else None,
         "mint": _mint_spec(programs, mint, preview_at),
+        "scales": {f"o{i}": s for i, s in getattr(patch, "scales", {}).items() if s != 1.0},
+        "adaptive": ({"min": 0.35 if adaptive is True else float(adaptive), "step": 0.85} if adaptive else None),
+        "floatBuffers": bool(float_buffers),
         "hydra": _try_hydra(patch),
     }
 
@@ -637,12 +651,21 @@ def _page(spec: dict, title: str, head: str = "", hud: bool = True) -> str:
 
 
 def to_html(patch: Optional[Patch] = None, path: Optional[str] = None, title: str = "hydrapy",
-            pixel_ratio: float = 1.0, size: Optional[tuple] = None, precision: str = "highp") -> str:
+            pixel_ratio: float = 1.0, size: Optional[tuple] = None, precision: str = "highp",
+            adaptive: bool | float = False, float_buffers: bool = True, phone: bool = False) -> str:
     """Compile the patch to a standalone HTML page (WebGL2 with WebGL1 fallback) and optionally write it.
 
     A patch with a ``Mint`` replays its draws from ``?fxhash=`` in the page's URL (default: the
-    preview hash); press n for another mint."""
-    spec = build_spec(patch, pixel_ratio=pixel_ratio, size=size, precision=precision)
+    preview hash); press n for another mint.
+
+    ``phone=True`` is ``precision="mixed"`` (colour math in mediump, coordinates, time and noise in
+    highp) plus ``adaptive=True`` (outputs render smaller while the page can't keep up). See
+    ``build_spec`` for ``adaptive`` and ``float_buffers``."""
+    if phone:
+        precision = "mixed" if precision == "highp" else precision
+        adaptive = adaptive or True
+    spec = build_spec(patch, pixel_ratio=pixel_ratio, size=size, precision=precision, adaptive=adaptive,
+                      float_buffers=float_buffers)
     html = _page(spec, title)
     if path:
         with open(path, "w", encoding="utf-8") as f:
@@ -757,7 +780,8 @@ function hydrapyAudioQueue(size) {
 }
 """
 
-RUNTIME_JS = AUDIO_HELPERS_JS + r"""(function(){
+RUNTIME_JS = AUDIO_HELPERS_JS + NOISE_TEXTURE_JS + r"""
+(function(){
   var canvas = document.getElementById('c');
   var errEl = document.getElementById('err');
   function fail(msg){ errEl.style.display = 'block'; errEl.textContent += msg + "\n"; }
@@ -768,6 +792,9 @@ RUNTIME_JS = AUDIO_HELPERS_JS + r"""(function(){
   var floatOK = isGL2 ? !!gl.getExtension('EXT_color_buffer_float') : false;
 
   var VERT = 'attribute vec2 position;\nvoid main(){ gl_Position = vec4(position, 0.0, 1.0); }';
+  var VERT3 = '#version 300 es\nin vec2 position;\nvoid main(){ gl_Position = vec4(position, 0.0, 1.0); }';
+  // passes that pick mip levels (_texLod) need GLSL ES 3.00; the rest stay 1.00
+  function es3(src){ return '#version 300 es\n#define texture2D texture\n#define _texLod textureLod\nout highp vec4 _fragColor;\n#define gl_FragColor _fragColor\n' + src; }
   function shader(type, src){
     var s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
     if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) { fail(gl.getShaderInfoLog(s) + "\n" + src.split("\n").map(function(l,i){return (i+1)+': '+l;}).join("\n")); return null; }
@@ -775,7 +802,8 @@ RUNTIME_JS = AUDIO_HELPERS_JS + r"""(function(){
   }
   function program(fs){
     var p = gl.createProgram();
-    var v = shader(gl.VERTEX_SHADER, VERT), f = shader(gl.FRAGMENT_SHADER, fs);
+    var v3 = fs.indexOf('#version 300 es') === 0;
+    var v = shader(gl.VERTEX_SHADER, v3 ? VERT3 : VERT), f = shader(gl.FRAGMENT_SHADER, fs);
     if (!v || !f) return null;
     gl.attachShader(p, v); gl.attachShader(p, f); gl.bindAttribLocation(p, 0, 'position'); gl.linkProgram(p);
     if (!gl.getProgramParameter(p, gl.LINK_STATUS)) { fail(gl.getProgramInfoLog(p)); return null; }
@@ -790,7 +818,7 @@ RUNTIME_JS = AUDIO_HELPERS_JS + r"""(function(){
   function makeTex(w, h){
     var t = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, t);
-    if (isGL2 && floatOK) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, null);
+    if (isGL2 && floatOK && SPEC.floatBuffers !== false) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, null);
     else gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
@@ -822,6 +850,16 @@ RUNTIME_JS = AUDIO_HELPERS_JS + r"""(function(){
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, el);
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  }
+
+  // set_fast_noise(): noise() reads this lattice instead of computing simplex noise per pixel
+  var noiseTex = null;
+  if (SPEC.fastNoise) {
+    noiseTex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, noiseTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 256, 0, gl.RGBA, gl.UNSIGNED_BYTE, noiseTexture());
+    [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER].forEach(function(k){ gl.texParameteri(gl.TEXTURE_2D, k, gl.NEAREST); });
+    [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T].forEach(function(k){ gl.texParameteri(gl.TEXTURE_2D, k, gl.REPEAT); });
   }
 
   // media sources
@@ -912,14 +950,15 @@ RUNTIME_JS = AUDIO_HELPERS_JS + r"""(function(){
     return {
       name: o.name,
       passes: o.passes.map(function(p){
-        var prog = program(p.source);
+        var src = (SPEC.fastNoise ? '#define _NOISE_TEX\n' : '') + p.source;
+        var prog = program(isGL2 && p.source.indexOf('_texLod') >= 0 ? es3(src) : src);
         var locs = {};
         if (prog) {
-          ['time','resolution','mouse'].forEach(function(n){ locs[n] = gl.getUniformLocation(prog, n); });
+          ['time','resolution','mouse','_noiseTex'].forEach(function(n){ locs[n] = gl.getUniformLocation(prog, n); });
           o.floats.forEach(function(f){ locs[f.name] = gl.getUniformLocation(prog, f.name); });
           o.samplers.forEach(function(s){ locs[s.name] = gl.getUniformLocation(prog, s.name); });
         }
-        return {target: p.target, prog: prog, locs: locs};
+        return {target: p.target, prog: prog, locs: locs, mipmap: !!p.mipmap && isGL2};
       }),
       floats: o.floats.map(function(f){
         try { return {name: f.name, fn: new Function('time','bpm','__mx','__my','__fft','__vol','__flux','dt', 'return (' + f.js + ');')}; }
@@ -932,6 +971,33 @@ RUNTIME_JS = AUDIO_HELPERS_JS + r"""(function(){
   var copyLocs = {tex: gl.getUniformLocation(copyProg, 'tex'), resolution: gl.getUniformLocation(copyProg, 'resolution')};
 
   var W = 0, H = 0, outs = {}, tmps = {}, lastRenderTime = null;
+  var dyn = 1;                       // adaptive render scale (SPEC.adaptive); 1 = full size
+  var rawCopy = program('precision mediump float; uniform sampler2D tex; uniform vec2 resolution;\nvoid main(){ gl_FragColor = texture2D(tex, gl_FragCoord.xy / resolution); }');
+  function freeTarget(t){ gl.deleteFramebuffer(t.fb); gl.deleteTexture(t.tex); }
+  function allocate(keep){
+    var old = outs, oldTmps = tmps;
+    outs = {}; tmps = {};
+    ['o0','o1','o2','o3'].forEach(function(n){
+      var depth = (SPEC.history && SPEC.history[n]) || 0, ring = [], sz = osz(n);
+      for (var k = 0; k < Math.max(2, depth + 2); k++) ring.push(makeFBO(sz[0], sz[1]));
+      outs[n] = {ring: ring, w: sz[0], h: sz[1]};   // ring[0] = latest completed frame, ring[ring.length-1] = written next
+      if (keep && old[n]) old[n].ring.forEach(function(fb, k){   // a new size keeps the feedback, resampled
+        if (k >= ring.length) return;
+        gl.bindFramebuffer(gl.FRAMEBUFFER, ring[k].fb); gl.viewport(0, 0, sz[0], sz[1]);
+        gl.useProgram(rawCopy); gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, fb.tex);
+        gl.uniform1i(gl.getUniformLocation(rawCopy, 'tex'), 0);
+        gl.uniform2f(gl.getUniformLocation(rawCopy, 'resolution'), sz[0], sz[1]);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+      });
+    });
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    Object.keys(old).forEach(function(n){ old[n].ring.forEach(freeTarget); });
+    Object.keys(oldTmps).forEach(function(k){ freeTarget(oldTmps[k]); });
+    // intermediate targets belong to one output and share its size (Chain.out(scale=...))
+    outputs.forEach(function(o){ var sz = osz(o.name); o.passes.forEach(function(p){
+      var key = o.name + ':' + p.target;
+      if (p.target.indexOf('tmp') === 0 && !tmps[key]) tmps[key] = makeFBO(sz[0], sz[1]); }); });
+  }
   function resize(){
     var pr = SPEC.pixelRatio || 1;
     var w = SPEC.size ? SPEC.size[0] : Math.floor(window.innerWidth * pr);
@@ -939,13 +1005,32 @@ RUNTIME_JS = AUDIO_HELPERS_JS + r"""(function(){
     if (w === W && h === H) return;
     W = w; H = h; canvas.width = W; canvas.height = H;
     lastRenderTime = null;
-    outs = {}; tmps = {};
-    ['o0','o1','o2','o3'].forEach(function(n){
-      var depth = (SPEC.history && SPEC.history[n]) || 0, ring = [];
-      for (var k = 0; k < Math.max(2, depth + 2); k++) ring.push(makeFBO(W, H));
-      outs[n] = {ring: ring};   // ring[0] = latest completed frame, ring[ring.length-1] = written next
-    });
-    outputs.forEach(function(o){ o.passes.forEach(function(p){ if (p.target.indexOf('tmp') === 0 && !tmps[p.target]) tmps[p.target] = makeFBO(W, H); }); });
+    allocate(false);
+  }
+  function osz(n){
+    var s = ((SPEC.scales && SPEC.scales[n]) || 1) * dyn;
+    return [Math.max(1, Math.round(W * s)), Math.max(1, Math.round(H * s))];
+  }
+  // SPEC.adaptive: when frames come slower than the display refreshes, render the outputs smaller
+  // (the canvas keeps its size and upsamples); when there is headroom again, grow back
+  var adaptive = SPEC.adaptive || null, ivals = [], refresh = 1000 / 60, lastChange = 0, lastDown = -1e9, ceiling = 1, prevNow = null;
+  function adapt(now){
+    if (prevNow !== null) { var iv = now - prevNow; if (iv > 0 && iv < 1000) ivals.push(iv); }
+    prevNow = now;
+    var span = 0; ivals.forEach(function(v){ span += v; });
+    if (ivals.length < 45 && (span < 1500 || ivals.length < 4)) return;   // 45 frames, or 1.5 s of slow ones
+    while (ivals.length > 45) ivals.shift();
+    var med = ivals.slice().sort(function(a, b){ return a - b; })[ivals.length >> 1];
+    refresh = Math.min(refresh, Math.max(med, 1000 / 240));   // a 90/120 Hz display shows itself
+    if (now - lastChange < 1500) return;
+    var next = dyn;
+    if (med > refresh * 1.45 && dyn > adaptive.min) { next = Math.max(adaptive.min, dyn * adaptive.step); ceiling = dyn; lastDown = now; }
+    else if (med < refresh * 1.12 && dyn < 1 && (dyn / adaptive.step < ceiling - 1e-6 || now - lastDown > 20000))
+      next = Math.min(1, dyn / adaptive.step);
+    if (next === dyn) return;
+    dyn = next; lastChange = now; ivals = [];
+    canvas.dataset.scale = dyn.toFixed(3);
+    allocate(true);
   }
   window.addEventListener('resize', resize);
   resize();
@@ -1130,9 +1215,9 @@ RUNTIME_JS = AUDIO_HELPERS_JS + r"""(function(){
     gl.viewport(0, 0, W, H);
   }
 
-  function bindRef(ref, delay){
+  function bindRef(ref, delay, owner){
     if (outs[ref]) { var ring = outs[ref].ring; return ring[Math.min(delay || 0, ring.length - 2)].tex; }
-    if (tmps[ref]) return tmps[ref].tex;
+    if (owner && tmps[owner + ':' + ref]) return tmps[owner + ':' + ref].tex;
     if (ncas[ref]) return ncas[ref].out.tex;
     if (sims[ref]) return sims[ref].out.tex;
     if (media[ref]) {
@@ -1148,6 +1233,7 @@ RUNTIME_JS = AUDIO_HELPERS_JS + r"""(function(){
     requestAnimationFrame(frame);
     if (t0 === null) t0 = now;
     if (paused) return;
+    if (adaptive) adapt(now);
     var time = ((now - t0) / 1000) * SPEC.speed;
     if (SPEC.frameRate) time = Math.floor(time * SPEC.frameRate + 1e-9) / SPEC.frameRate;
     var draw = !SPEC.frameRate || time !== lastRenderTime;
@@ -1165,23 +1251,34 @@ RUNTIME_JS = AUDIO_HELPERS_JS + r"""(function(){
     if (draw) outputs.forEach(function(o){
       if (!needed[o.name]) return;
       var vals = o.floats.map(function(f){ var v = f.fn(time, SPEC.bpm, mx, my, fft, vol, flux, dt); return isFinite(v) ? v : 0; });
+      var OW = outs[o.name].w, OH = outs[o.name].h;
       o.passes.forEach(function(p){
         if (!p.prog) return;
-        var target = p.target.indexOf('tmp') === 0 ? tmps[p.target] : outs[o.name].ring[outs[o.name].ring.length - 1];
+        var target = p.target.indexOf('tmp') === 0 ? tmps[o.name + ':' + p.target] : outs[o.name].ring[outs[o.name].ring.length - 1];
         gl.bindFramebuffer(gl.FRAMEBUFFER, target.fb);
-        gl.viewport(0, 0, W, H);
+        gl.viewport(0, 0, OW, OH);
         gl.useProgram(p.prog);
         gl.uniform1f(p.locs.time, time);
-        gl.uniform2f(p.locs.resolution, W, H);
-        gl.uniform2f(p.locs.mouse, mx * W, my * H);
+        gl.uniform2f(p.locs.resolution, OW, OH);
+        gl.uniform2f(p.locs.mouse, mx * OW, my * OH);
         o.floats.forEach(function(f, i){ gl.uniform1f(p.locs[f.name], vals[i]); });
         o.samplers.forEach(function(s, i){
-          var tex = bindRef(s.ref, s.delay);
+          var tex = bindRef(s.ref, s.delay, o.name);
           gl.activeTexture(gl.TEXTURE0 + i);
           gl.bindTexture(gl.TEXTURE_2D, tex);
           gl.uniform1i(p.locs[s.name], i);
         });
+        if (noiseTex && p.locs._noiseTex) {
+          gl.activeTexture(gl.TEXTURE0 + o.samplers.length);
+          gl.bindTexture(gl.TEXTURE_2D, noiseTex);
+          gl.uniform1i(p.locs._noiseTex, o.samplers.length);
+        }
         gl.drawArrays(gl.TRIANGLES, 0, 3);
+        if (p.mipmap) {                    // a mipblur reads this target's levels
+          gl.bindTexture(gl.TEXTURE_2D, target.tex);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+          gl.generateMipmap(gl.TEXTURE_2D);
+        }
       });
       outs[o.name].ring.unshift(outs[o.name].ring.pop());   // the frame just written becomes ring[0]
     });
@@ -1222,21 +1319,22 @@ RUNTIME_JS = AUDIO_HELPERS_JS + r"""(function(){
       // Bound catch-up after a suspended tab. Audio keeps holding the last complete strip.
       if (now - nextT > period * 6) nextT = now - period * 5;
       var col = lastCol;
-      if (dirty || !col || col.length !== H) {
-        var w = Math.min(Math.max(Math.round(cfg.width * W), 1), W);
-        var x0 = Math.min(Math.max(Math.floor(cfg.x * W - w / 2), 0), W - w);
-        var pix = useFloat ? new Float32Array(w * H * 4) : new Uint8Array(w * H * 4);
+      var TW = outs[cfg.output].w, TH = outs[cfg.output].h;
+      if (dirty || !col || col.length !== TH) {
+        var w = Math.min(Math.max(Math.round(cfg.width * TW), 1), TW);
+        var x0 = Math.min(Math.max(Math.floor(cfg.x * TW - w / 2), 0), TW - w);
+        var pix = useFloat ? new Float32Array(w * TH * 4) : new Uint8Array(w * TH * 4);
         gl.bindFramebuffer(gl.FRAMEBUFFER, outs[cfg.output].ring[0].fb);
-        gl.readPixels(x0, 0, w, H, gl.RGBA, useFloat ? gl.FLOAT : gl.UNSIGNED_BYTE, pix);
-        col = new Float64Array(H);
+        gl.readPixels(x0, 0, w, TH, gl.RGBA, useFloat ? gl.FLOAT : gl.UNSIGNED_BYTE, pix);
+        col = new Float64Array(TH);
         var scale = useFloat ? 1 : 1 / 255;
-        for (var y = 0; y < H; y++) {
+        for (var y = 0; y < TH; y++) {
           var s = 0;
           for (var xx = 0; xx < w; xx++) {
             var o = ((y * w) + xx) * 4;
             s += (pix[o] * 0.2125 + pix[o+1] * 0.7154 + pix[o+2] * 0.0721) * scale * (SPEC.compositeAlpha ? Math.max(0, Math.min(1, pix[o+3] * scale)) : 1);
           }
-          col[H - 1 - y] = s / w;
+          col[TH - 1 - y] = s / w;
         }
         dirty = false;
       }

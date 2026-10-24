@@ -173,12 +173,59 @@ def h31(p) -> np.ndarray:
     return np.mod((p3[..., 0] + p3[..., 1]) * p3[..., 2], 1.0)
 
 
+def _h32(x):
+    m = np.uint64(0xFFFFFFFF)
+    x = np.asarray(x, np.uint64) & m
+    x = ((x ^ (x >> np.uint64(16))) * np.uint64(0x7feb352d)) & m
+    x = ((x ^ (x >> np.uint64(15))) * np.uint64(0x846ca68b)) & m
+    return (x ^ (x >> np.uint64(16))) & m
+
+
+def noise_texture() -> np.ndarray:
+    """The 256x256 RGBA8 lattice ``set_fast_noise`` samples: each texel holds its cell's corners, the
+    random values at (x, y), (x+1, y), (x, y+1), (x+1, y+1). Integer hashing only, so the page builds
+    the identical texture (``NOISE_TEXTURE_JS``)."""
+    y, x = np.mgrid[0:256, 0:256]
+    r = (_h32(x + _h32(y + 0x9E3779B9)) >> np.uint64(24)).astype(np.uint8)
+    right, up = np.roll(r, -1, axis=1), np.roll(r, -1, axis=0)
+    return np.stack([r, right, up, np.roll(right, -1, axis=0)], -1)
+
+
+NOISE_TEXTURE_JS = r"""function noiseTexture(){
+  function h32(x){ x = Math.imul(x ^ (x >>> 16), 0x7feb352d) >>> 0; x = Math.imul(x ^ (x >>> 15), 0x846ca68b) >>> 0; return (x ^ (x >>> 16)) >>> 0; }
+  var r = new Uint8Array(65536), out = new Uint8Array(262144);
+  for (var y = 0; y < 256; y++) for (var x = 0; x < 256; x++) r[y*256 + x] = h32((x + h32((y + 0x9E3779B9) >>> 0)) >>> 0) >>> 24;
+  for (var y = 0; y < 256; y++) for (var x = 0; x < 256; x++) {
+    var i = (y*256 + x) * 4, x1 = (x + 1) & 255, y1 = (y + 1) & 255;
+    out[i] = r[y*256 + x]; out[i+1] = r[y*256 + x1]; out[i+2] = r[y1*256 + x]; out[i+3] = r[y1*256 + x1];
+  }
+  return out;
+}"""
+
+
 # Same functions in GLSL, prepended to every generated shader.
 GLSL_NOISE = r"""
 vec3 _mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
 vec4 _mod289(vec4 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
 vec4 _permute(vec4 x) { return _mod289(((x*34.0)+1.0)*x); }
 vec4 _taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
+#ifdef _NOISE_TEX
+// set_fast_noise(): value noise from a 256x256 lattice texture in two fetches (after Inigo Quilez's
+// trick: the next z slice is the same lattice shifted by (37, 17)). Each texel holds the four
+// corners of its cell, read unfiltered and blended in float, so slow gradients have no 8-bit
+// filtering steps. Scaled to simplex noise's range and feature size, not its exact pattern.
+uniform sampler2D _noiseTex;
+float _noise(vec3 v){
+  v *= 2.35;
+  vec3 p = floor(v);
+  vec3 f = v - p;
+  f = f * f * (3.0 - 2.0 * f);
+  vec2 base = mod(p.xy + vec2(37.0, 17.0) * p.z, 256.0);
+  vec4 c = mix(texture2D(_noiseTex, (base + 0.5) / 256.0),
+               texture2D(_noiseTex, (mod(base + vec2(37.0, 17.0), 256.0) + 0.5) / 256.0), f.z);
+  return 2.0 * (mix(mix(c.x, c.y, f.x), mix(c.z, c.w, f.x), f.y) - 0.5);
+}
+#else
 float _noise(vec3 v){
   const vec2 C = vec2(1.0/6.0, 1.0/3.0);
   const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
@@ -221,6 +268,7 @@ float _noise(vec3 v){
   m = m * m;
   return 42.0 * dot(m*m, vec4(dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3)));
 }
+#endif
 float _hash21(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 float _hash31(vec3 p) { return fract(sin(dot(p, vec3(127.1, 311.7, 74.7))) * 43758.5453); }
 vec2 _hash22(vec2 p) { return fract(sin(vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)))) * 43758.5453); }

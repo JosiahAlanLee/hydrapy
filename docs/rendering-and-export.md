@@ -141,7 +141,12 @@ GPU brightness probes reduce their regions before readback; audio strips are rea
   `ripple` at amplitude 0 — and caches the variants (`GLRenderer.specialise = False` turns it off).
   A long piece whose sections fade layers in and out on signals only pays for what's on screen.
   Custom ops can declare their own identity with `Op(..., identity=("amount", 0.0))`. Each signal is
-  also evaluated once per frame and shared by every pass that uses it.
+  also evaluated once per frame and shared by every pass that uses it. Offline renders compile the
+  variants they will need before the first frame (`GLRenderer.prewarm(times)`); live windows wait
+  `GLRenderer.settle` frames (12) before compiling a new one.
+* **Cheaper by choice**: `chain.out(o1, scale=0.25)` renders an output smaller, `mipblur` blurs wide
+  at a fixed cost, `set_fast_noise()` swaps simplex noise for a texture lookup, and
+  `hydrapy html --phone` makes a page for phones. See the [performance guide](PERFORMANCE.md#spending-pixels-where-they-show).
 * **Audio in the HTML export**: the file is embedded as base64 and analysed with an `AnalyserNode`
   using the same Bark/loudness pipeline, so what you tuned offline is what plays. The page waits for a
   click (autoplay policy). `Audio()` with no file uses the microphone.

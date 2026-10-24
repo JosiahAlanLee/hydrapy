@@ -39,6 +39,13 @@ class Env:
     def time(self) -> float:
         return self.ctx.time
 
+    def sized(self, width: int, height: int) -> "Env":
+        """An Env for an output rendered at another size (Chain.out(scale=...)), sharing every buffer."""
+        e = Env(width, height, bpm=self.bpm, filter=self.filter)
+        e.buffers, e.rings, e._frames_cache = self.buffers, self.rings, self._frames_cache
+        e.ctx = self.ctx
+        return e
+
     # -- textures ----------------------------------------------------------
     def history(self, ref: Output, frames: int) -> np.ndarray:
         """Output ``ref`` as it was ``frames`` frames before what src() gives (0 = same as src)."""
@@ -232,22 +239,36 @@ class Renderer:
         self.frame = 0
         self.clock = RenderClock(self.fps)
         self._compiled: dict[Output, Callable] = {}
+        self._envs: dict[int, Env] = {}      # outputs rendered at another size
         self.depth = _history_depth(self.patch)
+
+    def _env_for(self, o: Output) -> Env:
+        w, h = self.patch.output_size(o, self.size)
+        if (w, h) == tuple(self.size):
+            return self.env
+        e = self._envs.get(o.index)
+        if e is None or (e.w, e.h) != (w, h):
+            e = self._envs[o.index] = self.env.sized(w, h)
+        return e
 
     def _compile(self):
         for o in self.patch.active_outputs():
-            if o not in self._compiled or self._compiled[o][0] is not o.chain:
-                self._compiled[o] = (o.chain, build(o.chain, self.env))
+            env = self._env_for(o)
+            if o not in self._compiled or self._compiled[o][0] is not o.chain or self._compiled[o][2] is not env:
+                self._compiled[o] = (o.chain, build(o.chain, env), env)
 
     def step(self, t: Optional[float] = None) -> np.ndarray:
         """Render one frame at time ``t`` (default: frame / fps) and return the displayed output, row 0 = top."""
         self._compile()
         ctx, draw, wall_time = self.clock.next(self.patch, self.size, self.env.ctx.mouse, t)
         self.env.ctx = ctx
+        for e in self._envs.values():
+            e.ctx = ctx
         if draw:
             for o in self.patch.active_outputs():
-                self.env.current_output = o
-                self.env.push(o.index, self._compiled[o][1](self.env.base_st).astype(np.float32), self.depth.get(o.index, 0))
+                env = self._compiled[o][2]
+                env.current_output = o
+                self.env.push(o.index, self._compiled[o][1](env.base_st).astype(np.float32), self.depth.get(o.index, 0))
         self.frame += 1
         for pr in self.patch.probes:
             if hasattr(pr, "advance"):
@@ -257,7 +278,7 @@ class Renderer:
                     continue
             elif not draw:
                 continue
-            x0, y0, w, h = pr.region(self.env.w, self.env.h)
+            x0, y0, w, h = pr.region(*self.patch.output_size(pr.output, self.size))
             rgba = self.env.texture(pr.output)[y0:y0 + h, x0:x0 + w]
             if hasattr(pr, "advance"):
                 pr.update(rgba, wall_time, 1.0 / self.fps)
@@ -269,6 +290,8 @@ class Renderer:
 
     def displayed(self) -> np.ndarray:
         out = self.env.texture(self.patch.display)
+        if out.shape[:2] != (self.env.h, self.env.w):          # a scaled output, brought back to the frame
+            out = self.env.sample(out, self.env.base_st).astype(np.float32)
         return out[::-1]
 
     def frames(self, n: int, start: float = 0.0):

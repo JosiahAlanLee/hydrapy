@@ -33,6 +33,10 @@ def _create_context(compute=False):
     raise error
 
 
+class _MipTarget(str):
+    """A pass target whose mip levels are built after it is drawn (a mipmaps op samples it)."""
+
+
 class GLRenderer:
     """Renders a patch with moderngl. ``ctx`` may be an existing context.
 
@@ -42,7 +46,7 @@ class GLRenderer:
     """
 
     def __init__(self, patch: Optional[Patch] = None, size=None, ctx=None, fps: float = 60.0,
-                 precision: str = "highp", compute: bool = False):
+                 precision: str = "highp", compute: bool = False, fast_noise: Optional[bool] = None):
         import moderngl
         self.gl = moderngl
         self.patch = patch or default_patch()
@@ -62,6 +66,13 @@ class GLRenderer:
         self._reduce_targets = {}
         self._reduce_program = self._reduce_vao = None
         self.mouse = (0.5, 0.5)
+        self.fast_noise = self.patch.fast_noise if fast_noise is None else bool(fast_noise)
+        self._noise_tex = None
+        if self.fast_noise:
+            from .noise import noise_texture
+            self._noise_tex = self.ctx.texture((256, 256), 4, noise_texture().tobytes())
+            self._noise_tex.filter = (self.gl.NEAREST, self.gl.NEAREST)   # corners are blended in the shader
+            self._noise_tex.repeat_x = self._noise_tex.repeat_y = True
         self.programs = compile_patch(self.patch, precision=precision)
         self.vbo = self.ctx.buffer(np.array([-1, -1, 3, -1, -1, 3], dtype="f4").tobytes())
         # Each output is drawn by a variant of its program compiled without the transforms that are the
@@ -70,6 +81,8 @@ class GLRenderer:
         self._gates = {prog.output.name: gates(prog.output.chain) for prog in self.programs}
         self._variants: dict = {}
         self.specialise = True
+        self.settle = 0                      # frames a new idle set must hold before its variant compiles (live uses 12)
+        self._pending, self._active = {}, {}
         for prog in self.programs:
             self._variants[(prog.output.name, None)] = self._build(prog)
             self.compute_passes += sum(1 for _, _, vao, _, _ in self._variants[(prog.output.name, None)] if vao is None)
@@ -116,30 +129,98 @@ class GLRenderer:
                     passes.append((p.target, kernel, None, prog.float_uniforms,
                                    [u for u in prog.sampler_uniforms if u.name == p.compute.sampler]))
                     continue
+            source = to_desktop(p.source, fast_noise=self.fast_noise)
             try:
-                gprog = self.ctx.program(vertex_shader=VERTEX_DESKTOP, fragment_shader=to_desktop(p.source))
+                gprog = self.ctx.program(vertex_shader=VERTEX_DESKTOP, fragment_shader=source)
             except Exception as e:
-                numbered = "\n".join(f"{i + 1:4d}: {l}" for i, l in enumerate(to_desktop(p.source).splitlines()))
+                numbered = "\n".join(f"{i + 1:4d}: {l}" for i, l in enumerate(source.splitlines()))
                 raise RuntimeError(f"shader compile error in {prog.output.name}/{p.target}:\n{e}\n{numbered}")
             vao = self.ctx.vertex_array(gprog, [(self.vbo, "2f", "position")])
-            passes.append((p.target, gprog, vao, prog.float_uniforms, prog.sampler_uniforms))
-            if p.target.startswith("tmp") and hasattr(self, "tmps") and p.target not in self.tmps:
-                self.tmps[p.target] = self._fbo()         # a variant compiled after _alloc()
+            passes.append((_MipTarget(p.target) if p.mipmap else p.target, gprog, vao, prog.float_uniforms,
+                           prog.sampler_uniforms))
+            key = (prog.output.name, p.target)
+            if p.target.startswith("tmp") and hasattr(self, "tmps") and key not in self.tmps:
+                self.tmps[key] = self._fbo(self._osize(prog.output.name))   # a variant compiled after _alloc()
         return passes
 
-    def _variant(self, prog, value):
-        """The passes for ``prog`` this frame: compiled without its transforms at their identity value."""
-        key = None
-        if self.specialise:
-            off = frozenset(id(tr) for tr, v, ident in self._gates[prog.output.name]
-                            if (float(v) if isinstance(v, (int, float)) else value(v)) == ident)
-            key = off or None
+    def _idle(self, name, value):
+        return frozenset(id(tr) for tr, v, ident in self._gates[name]
+                         if (float(v) if isinstance(v, (int, float)) else value(v)) == ident) or None
+
+    def _compiled(self, prog, key):
         if (prog.output.name, key) not in self._variants:
             self._variants[(prog.output.name, key)] = self._build(
                 compile_output(prog.output, self.patch, precision=self.precision, skip=key))
         return self._variants[(prog.output.name, key)]
 
+    def _variant(self, prog, value):
+        """The passes for ``prog`` this frame: compiled without its transforms at their identity value.
+
+        With ``settle`` > 0 a set of idle transforms that hasn't been seen before must hold for that many
+        frames before its variant is compiled; meanwhile the last variant that is still valid (one that
+        skips a subset of what is idle now), or the full program, draws. A value that touches zero for a
+        frame never costs a compile, and a live set never stalls on a passing combination."""
+        name = prog.output.name
+        key = self._idle(name, value) if self.specialise else None
+        if key is not None and (name, key) not in self._variants and self.settle > 0:
+            seen, count = self._pending.get(name, (None, 0))
+            count = count + 1 if seen == key else 1
+            self._pending[name] = (key, count)
+            if count < self.settle:
+                last = self._active.get(name)
+                usable = last if last is not None and (name, last) in self._variants and last <= key else None
+                self._active[name] = usable
+                return self._variants[(name, usable)]
+        self._pending.pop(name, None)
+        self._active[name] = key
+        return self._compiled(prog, key)
+
+    def prewarm(self, times) -> int:
+        """Compile, now, the variants the score will need at ``times`` (seconds), so a render or a set
+        never compiles mid-way. Only gates driven by signals that can be evaluated at any time without
+        side effects are predicted (audio analysis and live inputs are not); returns the number compiled."""
+        from .controls import Param
+        from .signals import Fft, Signal
+
+        def pure(sig, depth=0):
+            # predictable: hydrapy's own time-driven signals (and Fn, which exports already sample at
+            # arbitrary times); not audio analysis, controls, live inputs, probes or unknown subclasses
+            if not isinstance(sig, Signal):
+                return True
+            mod = type(sig).__module__
+            if depth > 40 or isinstance(sig, (Fft, Param)) or not mod.startswith("hydrapy.") or mod == "hydrapy.live":
+                return False
+            for v in vars(sig).values():
+                for item in (v if isinstance(v, (list, tuple)) else (v,)):
+                    if isinstance(item, Signal) and not pure(item, depth + 1):
+                        return False
+            return True
+
+        before = len(self._variants)
+        for prog in self.programs:
+            name = prog.output.name
+            if not self.specialise or not self._gates[name]:
+                continue
+            if not all(isinstance(v, (int, float)) or pure(v) for _, v, _ in self._gates[name]):
+                continue
+            seen = set()
+            for t in times:
+                ctx = Ctx(time=float(t), frame=int(round(float(t) * self.fps)), width=self.size[0], height=self.size[1],
+                          bpm=self.patch.bpm, dt=1.0 / self.fps, fps=self.fps)
+                def value(sig, ctx=ctx):
+                    v = float(as_signal(sig)(ctx))
+                    return v if np.isfinite(v) else 0.0
+                key = self._idle(name, value)
+                if key not in seen:
+                    seen.add(key)
+                    self._compiled(prog, key)
+        return len(self._variants) - before
+
     # -- buffers -----------------------------------------------------------
+    def _osize(self, name) -> tuple:
+        """The pixel size an output renders at (Chain.out(scale=...))."""
+        return self.patch.output_size(name, self.size)
+
     def _fbo(self, size=None, dtype="f2"):
         tex = self.ctx.texture(size or self.size, 4, dtype=dtype)
         tex.filter = (self.gl.LINEAR, self.gl.LINEAR)
@@ -183,7 +264,10 @@ class GLRenderer:
                 fb["fbo"].release(); fb["tex"].release()
         self._ncas = {}
         self._copy_vao.release(); self._copy.release(); self.vbo.release(); self._blank.release()
+        if self._noise_tex is not None:
+            self._noise_tex.release(); self._noise_tex = None
         self.outs, self.tmps, self.media, self._variants = {}, {}, {}, {}
+        self._pending, self._active = {}, {}
 
     def _alloc(self):
         # each output keeps a ring of frames: ring[0] is the latest completed, ring[-1] is written next
@@ -198,13 +282,15 @@ class GLRenderer:
         for prog in self.programs:
             for k, v in prog.history.items():
                 depth[k] = max(depth.get(k, 0), v)
-        self.outs = {f"o{i}": {"ring": [self._fbo() for _ in range(max(2, depth.get(f"o{i}", 0) + 2))]} for i in range(4)}
-        self.tmps = {}
+        self.outs = {f"o{i}": {"ring": [self._fbo(self._osize(f"o{i}")) for _ in range(max(2, depth.get(f"o{i}", 0) + 2))]}
+                     for i in range(4)}
+        self.tmps = {}                      # (output name, tmpN) -> target at that output's size
         self._present = self._fbo(dtype="f1")
         for prog in self.programs:
             for p in prog.passes:
-                if p.target.startswith("tmp") and p.target not in self.tmps:
-                    self.tmps[p.target] = self._fbo()
+                key = (prog.output.name, p.target)
+                if p.target.startswith("tmp") and key not in self.tmps:
+                    self.tmps[key] = self._fbo(self._osize(prog.output.name))
 
     def resize(self, size):
         if tuple(size) == self.size:
@@ -227,7 +313,7 @@ class GLRenderer:
                         m["tex"].release()
                     m["tex"] = self.ctx.texture((a.shape[1], a.shape[0]), 4, dtype="f4")
                     m["tex"].filter = (self.gl.LINEAR, self.gl.LINEAR)
-                m["tex"].write(a.tobytes())
+                m["tex"].write(a)
                 m["frame"] = self.frame
             return m["tex"]
         if ref.name in self.media:
@@ -246,14 +332,17 @@ class GLRenderer:
                     raise RuntimeError("Camera sources in the GL backend need opencv-python (pip install opencv-python)")
         if isinstance(ref, FrameSource):
             if m.get("time") != self.ctx_time:
-                frame = np.ascontiguousarray(ref.frame_at(self.ctx_time)[::-1])
-                size = (frame.shape[1], frame.shape[0])
-                if m["tex"] is None or m["tex"].size != size:
-                    if m["tex"] is not None:
-                        m["tex"].release()
-                    m["tex"] = self.ctx.texture(size, 4)
-                m["tex"].write(frame.tobytes())
+                frame = ref.frame_at(self.ctx_time)
                 m["time"] = self.ctx_time
+                if m.get("version") != ref.version:        # upload only frames that changed
+                    frame = np.ascontiguousarray(frame[::-1])
+                    size = (frame.shape[1], frame.shape[0])
+                    if m["tex"] is None or m["tex"].size != size:
+                        if m["tex"] is not None:
+                            m["tex"].release()
+                        m["tex"] = self.ctx.texture(size, 4)
+                    m["tex"].write(frame)
+                    m["version"] = ref.version
             return m["tex"]
         if hasattr(ref, "array_at"):          # Bank, Quilt: one texture per frame, bound by index
             i = ref.index_at(self.ctx_time)
@@ -285,7 +374,7 @@ class GLRenderer:
         if isinstance(ref, Output):
             return self.outs[ref.name]["ring"][0]["tex"]
         if isinstance(ref, TmpRef):
-            return self.tmps[ref.name]["tex"]
+            return self.tmps[(current.name, ref.name)]["tex"]
         from .nca import NCA
         if isinstance(ref, NCA):
             return self._nca(ref)["view"]["tex"]
@@ -398,24 +487,28 @@ class GLRenderer:
 
         for prog in self.programs:
             output = prog.output
+            w, h = self._osize(output.name)
             for target, gprog, vao, floats, samplers in self._variant(prog, value):
-                dest = self.tmps[target] if target.startswith("tmp") else self.outs[output.name]["ring"][-1]
+                dest = self.tmps[(output.name, target)] if target.startswith("tmp") else self.outs[output.name]["ring"][-1]
                 if vao is not None:
                     dest["fbo"].use()
+                    self.ctx.viewport = (0, 0, w, h)
                 self._set(gprog, "time", ctx.time)
-                self._set(gprog, "resolution", (float(self.size[0]), float(self.size[1])))
-                self._set(gprog, "mouse", (self.mouse[0] * self.size[0], self.mouse[1] * self.size[1]))
+                self._set(gprog, "resolution", (float(w), float(h)))
+                self._set(gprog, "mouse", (self.mouse[0] * w, self.mouse[1] * h))
                 for u in floats:
                     self._set(gprog, u.name, value(u.source))
                 for i, u in enumerate(samplers):
                     tex = self._bind(u.source, output)
                     tex.use(location=i)
                     self._set(gprog, u.name, i)
+                if self._noise_tex is not None and vao is not None:
+                    self._noise_tex.use(location=len(samplers))
+                    self._set(gprog, "_noiseTex", len(samplers))
                 if vao is None:
                     from .compute import GROUP_SIZE
                     dest["tex"].bind_to_image(0, read=False, write=True)
-                    gprog.run((self.size[0] + GROUP_SIZE - 1) // GROUP_SIZE,
-                              (self.size[1] + GROUP_SIZE - 1) // GROUP_SIZE)
+                    gprog.run((w + GROUP_SIZE - 1) // GROUP_SIZE, (h + GROUP_SIZE - 1) // GROUP_SIZE)
                     # Publish image writes to later samplers, image writes, FBO
                     # operations (including readback), and texture read/copy APIs.
                     self.ctx.memory_barrier(self.gl.TEXTURE_FETCH_BARRIER_BIT |
@@ -424,6 +517,13 @@ class GLRenderer:
                                             self.gl.TEXTURE_UPDATE_BARRIER_BIT)
                 else:
                     vao.render(self.gl.TRIANGLES)
+                if isinstance(target, _MipTarget):
+                    dest["tex"].build_mipmaps()
+                    dest["tex"].filter = (self.gl.LINEAR_MIPMAP_LINEAR, self.gl.LINEAR)
+                    dest["mip"] = True
+                elif dest.get("mip"):                # the same tmp in another variant: plain sampling again
+                    dest["tex"].filter = (self.gl.LINEAR, self.gl.LINEAR)
+                    dest["mip"] = False
             self._swap(output)
         self._update_probes(wall_time)
         from .live import run_hooks
@@ -481,7 +581,7 @@ void main() {
                     continue
             if audio and not pr.needs_update(wall_time, 1.0 / self.fps):
                 continue
-            x0, y0, w, h = pr.region(self.size[0], self.size[1])
+            x0, y0, w, h = pr.region(*self._osize(pr.output.name))
             source = self.outs[pr.output.name]["ring"][0]
             if type(pr) is Probe:
                 rgba = self._probe_mean(source["tex"], (x0, y0, w, h))
@@ -509,20 +609,15 @@ void main() {
 
     def read(self) -> np.ndarray:
         """The displayed output over black as RGB, row 0 = top."""
-        self._present["fbo"].use()
-        self.ctx.viewport = (0, 0, *self.size)
-        self.displayed_texture().use(location=0)
-        self._set(self._copy, "tex", 0)
-        self._set(self._copy, "resolution", tuple(map(float, self.size)))
-        self._set(self._copy, "compositeAlpha", float(self.patch.composite_alpha))
-        self._copy_vao.render(self.gl.TRIANGLES)
+        self._present_frame()
         data = self._present["fbo"].read(components=3, dtype="f1")
         return np.frombuffer(data, dtype=np.uint8).reshape(self.size[1], self.size[0], 3)[::-1].copy()
 
     def read_rgba(self) -> np.ndarray:
         """Uncomposited straight RGBA, for analysis and transparent-layer tests."""
         fbo = self.outs[self.patch.display.name]["ring"][0]["fbo"]
-        return np.frombuffer(fbo.read(components=4, dtype="f4"), np.float32).reshape(self.size[1], self.size[0], 4)[::-1].copy()
+        w, h = self._osize(self.patch.display.name)    # a scaled display is read at its own size
+        return np.frombuffer(fbo.read(components=4, dtype="f4"), np.float32).reshape(h, w, 4)[::-1].copy()
 
     def blit_to_screen(self, screen_size):
         self.ctx.screen.use()
@@ -533,16 +628,46 @@ void main() {
         self._set(self._copy, "compositeAlpha", float(self.patch.composite_alpha))
         self._copy_vao.render(self.gl.TRIANGLES)
 
-    def frames(self, n: int, start: float = 0.0):
-        for i in range(n):
-            self.step(start + i / self.fps)
-            yield self.read()
+    def _present_frame(self):
+        self._present["fbo"].use()
+        self.ctx.viewport = (0, 0, *self.size)
+        self.displayed_texture().use(location=0)
+        self._set(self._copy, "tex", 0)
+        self._set(self._copy, "resolution", tuple(map(float, self.size)))
+        self._set(self._copy, "compositeAlpha", float(self.patch.composite_alpha))
+        self._copy_vao.render(self.gl.TRIANGLES)
+
+    def frames(self, n: int, start: float = 0.0, pipelined: bool = True):
+        """Yield n RGB frames (row 0 = top). ``pipelined``: each frame is read back through a pixel buffer
+        while the GPU renders the next one, instead of stalling on every frame (same frames, same order)."""
+        if not pipelined:
+            for i in range(n):
+                self.step(start + i / self.fps)
+                yield self.read()
+            return
+        w, h = self.size
+        pbos = [self.ctx.buffer(reserve=w * h * 3) for _ in range(2)]
+        try:
+            pending = None
+            for i in range(n):
+                self.step(start + i / self.fps)
+                self._present_frame()
+                self._present["fbo"].read_into(pbos[i % 2], components=3, alignment=1)
+                if pending is not None:
+                    yield np.frombuffer(pending.read(), np.uint8).reshape(h, w, 3)[::-1].copy()
+                pending = pbos[i % 2]
+            if pending is not None:
+                yield np.frombuffer(pending.read(), np.uint8).reshape(h, w, 3)[::-1].copy()
+        finally:
+            for b in pbos:
+                b.release()
 
 
 def iter_frames_gl(patch: Optional[Patch] = None, seconds: float = 4.0, fps: float = 30.0, size=None,
                    start: float = 0.0, warmup: int = 0, compute: bool = False):
     r = GLRenderer(patch, size=size, fps=fps, compute=compute)
     try:
+        r.prewarm([start + i / fps for i in range(-warmup, int(round(seconds * fps)))])
         for i in range(warmup):
             r.step(start - (warmup - i) / fps)
         from .live import clear_recordings
@@ -589,6 +714,7 @@ def live(patch: Optional[Patch] = None, size=(1280, 720), fps: float = 60.0, tit
     ctx = moderngl.create_context()
     fb = glfw.get_framebuffer_size(window)
     r = GLRenderer(patch, size=fb, ctx=ctx, fps=fps)
+    r.settle = LIVE_SETTLE
     transport = r.patch.transport
     state = {"paused": False, "t0": glfw.get_time(), "paused_at": 0.0}
 
@@ -671,6 +797,11 @@ def live(patch: Optional[Patch] = None, size=(1280, 720), fps: float = 60.0, tit
         transport.close()
 
 
+# live sets: an idle set must hold this many frames before its variant compiles, so a value crossing
+# zero never stalls the show on a shader compile
+LIVE_SETTLE = 12
+
+
 def _reload(old: "GLRenderer", loader, ctx, fps):
     """Build the edited patch; on success swap renderers, carrying each output's last frame over."""
     import traceback
@@ -682,10 +813,12 @@ def _reload(old: "GLRenderer", loader, ctx, fps):
             patch = loader()
             carry_controls(old.patch, patch)
             new = GLRenderer(patch, size=old.size, ctx=ctx, fps=fps, compute=old.compute)
+            new.settle = old.settle
             for name, o in old.outs.items():
                 if name in new.outs:
                     for dest, source in zip(new.outs[name]["ring"], o["ring"]):
-                        ctx.copy_framebuffer(dest["fbo"], source["fbo"])
+                        if dest["tex"].size == source["tex"].size:     # an edit may change an output's scale
+                            ctx.copy_framebuffer(dest["fbo"], source["fbo"])
             new.clock.calls, new.clock.updates = old.clock.calls, old.clock.updates
             new.clock.last_time, new.clock.last_key = old.clock.last_time, None
             new.frame, new.mouse = old.frame, old.mouse
