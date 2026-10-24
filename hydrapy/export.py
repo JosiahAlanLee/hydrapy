@@ -1004,6 +1004,7 @@ RUNTIME_JS = AUDIO_HELPERS_JS + NOISE_TEXTURE_JS + r"""
     var h = SPEC.size ? SPEC.size[1] : Math.floor(window.innerHeight * pr);
     if (w === W && h === H) return;
     W = w; H = h; canvas.width = W; canvas.height = H;
+    if (SPEC.size) canvas.style.objectFit = 'contain';     // a fixed size keeps its aspect, letterboxed
     lastRenderTime = null;
     allocate(false);
   }
