@@ -1,5 +1,9 @@
 # Bell Riots Pt 2
 
+The shorter [organic edit](bell-riots-organic.md) combines the closing six minutes
+with Physarum, mirrored botanical/farm drawings and painted film on independent
+clocks. This page documents the original full-track version.
+
 A full-track video for Anchor Rite's recording, built around the `pixelOsc`
 source and the per-pixel Life-like `ca()` operator. The composition uses ten
 visual systems: phase lattice, district field, mirrored glyphs, phase aperture,
