@@ -31,7 +31,10 @@ def find_holds(speed,step,cycle,window,max_rel=.7):
     smooth=np.real(np.fft.ifft(np.fft.fft(speed)*np.fft.fft(np.roll(np.r_[kernel,np.zeros(n-13)],-6))))
     w=max(1,int(round(window/step)));rel=smooth/smooth.mean();holds=[]
     for i in range(n):
-        if rel[i]<max_rel and rel[i]==rel[np.arange(i-w,i+w+1)%n].min():
+        # argmin keeps the first of equal samples: a minimum falling exactly between
+        # two samples is one hold, not two.
+        near=np.arange(i-w,i+w+1)%n
+        if rel[i]<max_rel and near[np.argmin(rel[near])]==i:
             holds.append(((i+.5)*step%cycle,float(rel[i])))
     return holds
 

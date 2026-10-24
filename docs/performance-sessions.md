@@ -92,8 +92,13 @@ Optional `processes` contain `name`, `argv` and `cwd` (relative to the session
 file). They run only with `--launch`, without a shell. A `{python}` argv entry
 uses the current Python interpreter. A child exiting stops the session; cleanup
 terminates only children/process groups started by this launcher, including on
-Ctrl-C or SIGTERM. A session
-file with child commands is executable project configuration.
+Ctrl-C, SIGTERM or a closed terminal (SIGHUP). Children run in their own process
+groups, so they never receive the terminal's hangup themselves; the runner's
+cleanup is what stops them. Further signals during cleanup are ignored, so
+resets and the SIGKILL fallback for a child that ignores SIGTERM still finish.
+Under `nohup` (or a background job that ignores Ctrl-C) those signals stay
+ignored and playback continues. A session file with child commands is
+executable project configuration.
 
 ## Capture Vortex into an editable clip
 
