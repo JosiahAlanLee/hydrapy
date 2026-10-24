@@ -1,0 +1,123 @@
+# Gorgon tracker: first connected workspace
+
+[Studio](studio.md) · [Performance sessions](performance-sessions.md)
+
+Gorgon connects the fullscreen tracker study's video and three automation lanes
+to a running HydraPy patch. It is an optional, local Studio workspace, using the
+same session token and loopback boundary. **Patch editor & export** opens the
+existing editor, connections, recording, snapshots and export tools.
+
+From a checkout with HydraPy installed (`pip install -e ".[gpu,video]"`):
+
+```sh
+hydrapy studio patches/gorgon_corridor.py --tracker --backend gl --size 1280x720 --fps 60
+# Smaller CPU alternative while a model trains:
+hydrapy studio patches/gorgon_corridor.py --tracker --backend cpu --size 320x180 --fps 20
+```
+
+Studio also has a **Gorgon tracker** link. Click the visual source card to load a
+workspace patch, then bind its named `Param` controls. Loading patch code keeps
+Studio's existing execution and hardware staging rules.
+
+## Control surface and displays
+
+- **Space** starts automation or pauses; **F** enters fullscreen; **B** blacks out
+  Gorgon's browser monitors. Blackout does not alter rendering, recording,
+  snapshots, exports, or an external video device.
+- Open **Program** and **Auxiliary**, move each window to its monitor, then press
+  **F**. Routing selects `o0`–`o3` independently. Program also selects Studio's
+  displayed/recorded output; Auxiliary never changes that selection.
+- Four patterns each contain 64 sixteenth-note rows. Click audio cells to toggle
+  browser synth hits. Select visual cells, then edit the curve or slider.
+  Hold changes at the exact key row; Linear and Smooth interpolate between keys.
+- Bind Dolly Z, Roll and Feedback to named patch parameters. Missing bindings are
+  marked in the selectors; empty bindings disconnect. Lane units are 0–1, degrees,
+  and 0–0.9; there is no hidden normalization to a parameter's range. Declared
+  modulation continues to add to the automated base value.
+- **Save session** writes `.hydrapy/tracker.json` and downloads JSON.
+  **Restore saved score** or **Import score** reloads it explicitly. Browser reload
+  reconnects to the server score. Edits are validated and revision-checked;
+  concurrent edits cannot silently overwrite a newer score. Restarting Studio
+  starts with the initial study until Restore is chosen. Transport and blackout
+  are not saved. Unpersisted edits disappear when Studio exits.
+
+The included patch maps Dolly Z to **2D scale**, Roll to rotation and Feedback to
+real recursive image memory. This is not Deforum depth reprojection. The left
+palette is explicitly **synth demo** audio generated in the control browser.
+Archive samples, Stable Audio, RAVE, Pd and model servers are not connected.
+Sound starts muted and requires a user gesture.
+
+## Timing, feedback and exports
+
+Python owns the playhead. The browser sends scores after edits (coalesced, with
+one edit request in flight), plus explicit transport commands. Automation is
+evaluated immediately before existing renderer steps; browser animation timers
+do not send per-frame slider updates.
+
+Tracker position is separate from simulation time. Seeking, looping and Stop
+move musical position without clearing feedback, replaying hardware hooks or
+seeking a Soundtrack. Pause freezes both; disabling automation leaves parameters
+at their last base values and does not change renderer pause. Resume rendering
+to see automation edits in a paused image. Tempo changes preserve tracker position
+and do not rewrite a patch's `bpm`, `speed` or simulation frame rate. The patch can
+therefore have an independent internal rhythm. An armed external clock and enabled
+tracker automation are mutually exclusive; other connections keep Studio's usual
+explicit arming behavior.
+
+With automation enabled, Studio MP4/GIF exports evaluate the visual score from
+its beginning (or the selected loop pattern), with fresh feedback history. PNG
+export evaluates the current score beat at the current simulation time with fresh
+history, matching the existing PNG export model. **Snapshot** saves the actual
+current framebuffer. Browser synth audio is not captured; existing audio-file
+and Soundtrack export behavior still applies. HTML export requires automation
+disabled and retains its static-control behavior.
+
+GPU export normally renders one frame ahead of its readback iterator. Tracker
+exports use explicit per-frame render/read steps so keys cannot slip relative to
+feedback or probe updates. Other exports keep the original pipeline. Neither
+renderer's clock implementation changes.
+
+Closing the controller stops its synth; Python rendering and automation continue,
+and output windows connect directly to Studio. Hidden viewers stop requesting
+preview frames. The browser synth uses a bounded lookahead scheduler and an
+estimated server playhead, not a native sample clock. Browser throttling and
+physical audio/video latency still require workstation testing.
+
+## Preview and measurements
+
+Program reuses Studio's bounded preview. Auxiliary has an additional encoder
+worker, one pending frame and one latest encoded frame. Readback stays on the
+render thread; JPEG and socket writes do not. Buses share readback when both ask
+for the selected output in the same iteration. Each viewer requests its next
+frame only after decoding/display scheduling. Inactive thumbnails retain their
+staggered lower refresh rate. Closed viewers stop demanding captures.
+
+`window.gorgonPreview` exposes up to 300 timing samples per browser: server render,
+readback and JPEG durations, plus browser request, body transfer, decode and
+display-scheduling durations. Program includes optional GPU timing when enabled
+in Studio's preview details. Frame-age estimates exclude first-byte transit;
+display scheduling measures the handoff to the canvas animation loop, not physical
+scanout or audio latency. The buses have independent sequence cursors.
+
+## Reproducible checks
+
+```sh
+python -m pytest -q tests/test_studio_tracker.py tests/test_studio.py tests/test_studio_preview.py
+python -m pip install playwright
+python -m playwright install chromium
+HYDRAPY_BROWSER_TESTS=1 python -m pytest -q tests/test_studio_tracker_browser.py tests/test_studio_preview_browser.py
+```
+
+Tests cover exact hold boundaries, interpolation, tempo continuity, loop/seek
+semantics, validation, revision rejection, persistence, authenticated routes,
+independent outputs, and CPU/GL export equivalence with feedback and a held
+simulation rate. Existing expensive four-output feedback/audio checks also
+exercise Auxiliary demand. Browser tests edit, save, import and reload scores;
+open both outputs; exercise blackout; close the controller; and slow decoding
+to verify one outstanding preview request per viewer.
+
+Automated GL checks use Mesa llvmpipe and synthetic sources. They do not validate
+the Ubuntu physical GPU, multiple monitors, fullscreen permissions, audio-device
+latency, ADAT/CV hardware, or model inference contention. On the workstation, test
+both outputs at the intended size/fps during training, inspect each timing stage,
+and compare an audible click with a visible flash before setting A/V compensation.

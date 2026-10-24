@@ -21,6 +21,7 @@ from urllib.parse import urlparse, parse_qs
 from .controls import apply_controls, carry_controls
 from .inspect import catalog, capabilities
 from .studio_preview import Preview
+from .studio_tracker import Tracker, number
 
 
 def digest(text):
@@ -101,6 +102,11 @@ class Session:
         self.last_wall, self.last_watch, self.stamp = time.monotonic(), 0., None
         self.state = {}
         self.preview = Preview()
+        self.aux_preview = Preview()
+        self.aux_preview.reset('o1')
+        self.tracker = Tracker()
+        self.tracker_state = {}
+        self.tracker_blackout = False
         self.preview_profile, self.gpu_query = False, None
         self.render_metrics, self.preview_error = {}, ''
         self.preview_dirty = True
@@ -182,6 +188,8 @@ class Session:
         try:
             with ResourceStage() as stage:
                 patch = load_patch(str(path), strict=False)
+                if self.tracker.enabled and requested_arm and patch.transport:
+                    raise ValueError('Disable tracker automation before enabling an external clock')
                 if same and old:
                     carry_controls(old.patch, patch)
                 new = self._make_renderer(patch)
@@ -207,12 +215,19 @@ class Session:
         if old and hasattr(old, 'release'):
             old.release()
         self.renderer, self.path, self.source, self.armed = new, path, source, requested_arm
+        # A patch's declared display remains authoritative when it is loaded.
+        if self.tracker.document['modes']['program'] != patch.display.name:
+            document = dict(self.tracker.document, modes=dict(self.tracker.document['modes'], program=patch.display.name))
+            self.tracker.replace(document, self.clock_time, self.tracker.revision)
         self.gpu_query = None
         self.preview.reset(patch.display.name)
+        self.aux_preview.reset(self.tracker.document['modes']['aux'])
         self.preview_dirty = True
         self.last_frame = None
         if not same:
             self.clock_time = 0.
+            self.tracker.enabled = False
+            self.tracker.seek(0., self.clock_time)
         self.last_wall = time.monotonic()
         self.error, self.notice = '', 'Loaded. Connections enabled.' if requested_arm else 'Loaded. Connections are disconnected.'
         relative = str(path.relative_to(self.root))
@@ -260,7 +275,39 @@ class Session:
         if not self.renderer:
             raise ValueError('Load a patch first')
         patch = self.renderer.patch
-        if action == 'pause':
+        if action == 'tracker_score':
+            self.tracker.replace(data['document'], self.clock_time, data['revision'])
+            modes = self.tracker.document['modes']
+            if patch.display.name != modes['program']:
+                patch.render(patch.outputs[int(modes['program'][1])])
+                self.preview.reset(patch.display.name)
+                self.preview_dirty = True
+            if self.aux_preview.output != modes['aux']:
+                self.aux_preview.reset(modes['aux'])
+            return self.tracker.snapshot(self.clock_time, not self.paused)
+        elif action == 'tracker_transport':
+            enabled = data.get('enabled', self.tracker.enabled)
+            playing = data.get('playing', not self.paused)
+            beat = number(data.get('beat', self.tracker.beat(self.clock_time)), 0, 64, 'Beat')
+            blackout = data.get('blackout', self.tracker_blackout)
+            if any(type(v) is not bool for v in (enabled, playing, blackout)):
+                raise ValueError('Transport states must be boolean')
+            if enabled and self.armed and patch.transport:
+                raise ValueError('Disconnect the external clock before enabling tracker automation')
+            self.tracker.seek(beat, self.clock_time)
+            self.tracker.enabled = enabled
+            self.tracker_blackout = blackout
+            if self.paused != (not playing):
+                self.last_wall = time.monotonic()
+            self.paused = not playing
+            return dict(self.tracker.snapshot(self.clock_time, not self.paused), blackout=self.tracker_blackout)
+        elif action == 'tracker_save':
+            if data.get('revision') != self.tracker.revision:
+                raise ValueError('Score changed in another window. Reload before saving.')
+            path = self.root / '.hydrapy' / 'tracker.json'
+            atomic_text(path, json.dumps(self.tracker.document, indent=2))
+            return dict(file=str(path.relative_to(self.root)))
+        elif action == 'pause':
             self.paused = bool(data.get('paused', not self.paused))
             self.last_wall = time.monotonic()
         elif action == 'output':
@@ -268,6 +315,8 @@ class Session:
             if not 0 <= index < 4:
                 raise ValueError('output must be 0–3')
             patch.render(patch.outputs[index])
+            document = dict(self.tracker.document, modes=dict(self.tracker.document['modes'], program=patch.display.name))
+            self.tracker.replace(document, self.clock_time, self.tracker.revision)
             self.preview.reset(patch.display.name)
             self.preview_dirty = True
             self._pictures(force=True)
@@ -291,6 +340,8 @@ class Session:
         elif action == 'restart':
             self._load(str(self.path.relative_to(self.root)), preserve=False)
         elif action == 'connections':
+            if data['armed'] and self.tracker.enabled and patch.transport:
+                raise ValueError('Disable tracker automation before enabling the external clock')
             self._load(str(self.path.relative_to(self.root)), armed=bool(data['armed']))
         elif action == 'check':
             return capabilities(patch, data.get('target', 'html'))
@@ -337,6 +388,8 @@ class Session:
         fmt = data.get('format', 'mp4')
         if fmt not in ('mp4', 'gif', 'png', 'html'):
             raise ValueError('format must be mp4/gif/png/html')
+        if self.tracker.enabled and fmt == 'html':
+            raise ValueError('Disable tracker automation for a static HTML export; use video for the score')
         backend = data.get('backend', 'gl' if hasattr(self.renderer, 'ctx') else 'cpu')
         if backend not in ('cpu', 'gl'):
             raise ValueError('backend must be cpu or gl')
@@ -365,6 +418,8 @@ class Session:
                     display=self.renderer.patch.display.index, output=str(output), format=fmt,
                     backend=backend, seconds=seconds, fps=fps, size=size, audio=audio,
                     time=self.clock_time, encoder=data.get('encoder', 'auto'))
+        if self.tracker.enabled:
+            spec['tracker'] = self.tracker.snapshot(self.clock_time, not self.paused)
         atomic_text(folder / 'job.json', json.dumps(spec))
         atomic_text(folder / 'status.json', json.dumps(dict(state='queued', progress=0)))
         with (folder / 'log.txt').open('w') as log:
@@ -384,6 +439,7 @@ class Session:
         main, thumbnail = self.preview.plan(now, changed=not self.paused or self.preview_dirty)
         chosen = r.patch.display
         frame = recorded[0] if recorded is not None else None
+        main_frame = frame
         metrics = dict(self.render_metrics)
         if main or force:
             started = time.monotonic()
@@ -396,6 +452,7 @@ class Session:
             if query is not None:
                 metrics['gpu_ms'] = query.elapsed / 1_000_000
             self.last_frame = frame
+            main_frame = frame
             cache = None
             if self.path and self.clock_time > 1:
                 cache = self.root / '.hydrapy' / 'previews' / (digest(str(self.path.relative_to(self.root)))[:16] + '.jpg')
@@ -409,6 +466,17 @@ class Session:
                     r.patch.display = r.patch.outputs[int(thumbnail[1])]
                     frame = self._read_frame()
                 self.preview.submit(thumbnail, frame, {'captured': time.monotonic()}, thumbnail=True)
+            finally:
+                r.patch.display = chosen
+        aux, _ = self.aux_preview.plan(now, changed=not self.paused or self.aux_preview.latest is None)
+        if aux:
+            try:
+                output = self.aux_preview.output
+                r.patch.display = r.patch.outputs[int(output[1])]
+                started = time.monotonic()
+                frame = main_frame if output == chosen.name and main_frame is not None else self._read_frame()
+                self.aux_preview.submit(output, frame, dict(self.render_metrics,
+                    readback_ms=(time.monotonic() - started) * 1000, captured=time.monotonic()))
             finally:
                 r.patch.display = chosen
 
@@ -440,6 +508,8 @@ class Session:
                      thumbnails=preview.pop('thumbnails'), preview=preview,
                      preview_generation=self.preview.generation, preview_profile=self.preview_profile,
                      preview_error=self.preview_error)
+        state['tracker_enabled'] = self.tracker.enabled
+        state['aux_preview'] = self.aux_preview.snapshot()
         with self.lock:
             self.state = state
 
@@ -484,6 +554,7 @@ class Session:
                                         self.preview_profile = False
                                 query = self.gpu_query
                             render_started = time.monotonic()
+                            self.tracker.apply(self.renderer.patch, self.clock_time)
                             with query if query is not None else nullcontext():
                                 self.renderer.step(self.clock_time)
                             self.render_metrics = dict(render_cpu_ms=(time.monotonic() - render_started) * 1000,
@@ -514,6 +585,15 @@ class Session:
                         # A transport failure must not pause synthesis or live hooks.
                         self.preview_error = f'{type(exc).__name__}: {exc}'
                 self.last_wall = now
+                with self.lock:
+                    self.tracker_state = self.tracker.snapshot(self.clock_time, not self.paused)
+                    self.tracker_state.update(sampled=time.monotonic(), blackout=self.tracker_blackout,
+                                              error=self.error or self.preview_error, fps=self.actual_fps, size=self.size,
+                                              backend='GL' if hasattr(self.renderer, 'ctx') else 'CPU',
+                                              output=self.renderer.patch.display.name if self.renderer else 'o0',
+                                              generation=self.preview.generation, aux_generation=self.aux_preview.generation,
+                                              path=str(self.path.relative_to(self.root)) if self.path else None,
+                                              controls=[x.describe() for x in self.renderer.patch.controls.values()] if self.renderer else [])
                 if now - sample_start >= .5:
                     self.actual_fps = frames / (now - sample_start)
                     sample_start, frames = now, 0
@@ -531,6 +611,7 @@ class Session:
             self.running = False
             self.gpu_query = None  # dispose timer on the GL context's thread
             self.preview.close()
+            self.aux_preview.close()
             if self.recorder:
                 try:
                     self.recorder.close()
@@ -588,10 +669,25 @@ def make_server(session, port=8765):
             parsed = urlparse(self.path)
             if parsed.path == '/':
                 return self._send(200, Path(__file__).with_name('studio.html').read_bytes(), 'text/html; charset=utf-8')
+            assets = {'/tracker/': ('index.html', 'text/html; charset=utf-8'),
+                      '/tracker/app.js': ('app.js', 'text/javascript; charset=utf-8'),
+                      '/tracker/backend.js': ('backend.js', 'text/javascript; charset=utf-8'),
+                      '/tracker/style.css': ('style.css', 'text/css; charset=utf-8')}
+            if parsed.path in assets:
+                name, mime = assets[parsed.path]
+                return self._send(200, Path(__file__).with_name('tracker').joinpath(name).read_bytes(), mime)
             if not self._authorized():
                 return self._send(403, {'error': 'Open the local URL printed by hydrapy studio.'})
             args = parse_qs(parsed.query)
             try:
+                if parsed.path == '/api/tracker':
+                    with session.lock:
+                        state = dict(session.tracker_state)
+                    state['server_now'] = time.monotonic()
+                    return self._send(200, state)
+                if parsed.path == '/api/tracker_saved':
+                    path = session.root / '.hydrapy' / 'tracker.json'
+                    return self._send(200, {'document': json.loads(path.read_text()) if path.exists() else None})
                 if parsed.path == '/api/state':
                     with session.lock:
                         state = dict(session.state)
@@ -604,7 +700,11 @@ def make_server(session, port=8765):
                         raise ValueError('output must be o0–o3')
                     after = int(args.get('after', ['-1'])[0])
                     started = time.monotonic()
-                    frame = session.preview.frame(output, after)
+                    bus = args.get('bus', ['program'])[0]
+                    if bus not in ('program', 'aux'):
+                        raise ValueError('bus must be program or aux')
+                    preview = session.aux_preview if bus == 'aux' else session.preview
+                    frame = preview.frame(output, after)
                     if frame is None:
                         return self._send(204, b'', 'image/jpeg')
                     sent = time.monotonic()
@@ -648,7 +748,7 @@ def make_server(session, port=8765):
     return server, token
 
 
-def serve(root='.', patch=None, backend='auto', size=(640, 360), fps=30, port=8765, open_browser=True):
+def serve(root='.', patch=None, backend='auto', size=(640, 360), fps=30, port=8765, open_browser=True, tracker=False):
     root = Path(root).resolve()
     # Match CLI patch execution: relative asset paths belong to the project.
     os.chdir(root)
@@ -656,7 +756,7 @@ def serve(root='.', patch=None, backend='auto', size=(640, 360), fps=30, port=87
     server = None
     try:
         server, token = make_server(session, port)
-        url = f'http://127.0.0.1:{server.server_port}/#{token}'
+        url = f'http://127.0.0.1:{server.server_port}/' + ('tracker/' if tracker else '') + f'#{token}'
         print(f'HydraPy Studio: {url}', flush=True)
         if open_browser:
             import webbrowser

@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101414">
+  <title>Gorgon — A/V Tracker</title>
+  <meta name="description" content="A fullscreen audiovisual tracker study. Compose sound, camera movement and visual changes on one musical timeline, with separate output windows.">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="studio" class="studio">
+  <header class="topbar">
+    <div class="brand"><svg width="28" height="28" viewBox="0 0 28 28" aria-hidden="true"><path d="M14 2 25 8v12l-11 6-11-6V8Z M14 7l7 4v6l-7 4-7-4v-6Z M14 12l3 2-3 2-3-2Z" fill="none" stroke="currentColor" stroke-width="1.3"/></svg><strong>GORGON</strong><span>A/V TRACKER</span></div>
+    <div class="project-name"><span class="muted">PROJECT /</span> Performance <span class="version">HYDRAPY</span></div>
+    <div class="top-actions"><span id="savedState" class="saved"><i></i> Connecting…</span><button id="saveBtn" class="text-button" title="Download the current session as JSON">Save session <span>↓</span></button><button id="helpBtn" class="icon-button" aria-label="Help and keyboard shortcuts">?</button><button id="fullscreenBtn" class="icon-button" aria-label="Fullscreen workspace" title="Fullscreen · F">⛶</button></div>
+  </header>
+
+  <section class="transport" aria-label="Transport">
+    <div class="transport-controls"><button id="playBtn" class="play-button" aria-label="Play" title="Play / pause · Space"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m6 3 11 7-11 7Z" fill="currentColor"/></svg></button><button id="stopBtn" class="icon-button stop-button" aria-label="Stop and return to pattern start" title="Stop"><span></span></button><button id="loopBtn" class="icon-button" aria-label="Loop selected pattern" aria-pressed="false" title="Loop selected pattern">↻</button></div>
+    <div class="position-block"><div id="position" class="position">001<span>:</span>01<span>:</span>00</div><div class="micro">BAR <span>BEAT</span> STEP</div></div>
+    <div class="tempo-block"><label for="tempo">TEMPO</label><div><input id="tempo" type="number" min="60" max="200" value="138" aria-label="Tempo in BPM"><span>BPM</span></div></div>
+    <div class="key-block"><label for="key">KEY</label><select id="key" aria-label="Musical key"><option value="2">D minor</option><option value="0">C minor</option><option value="5">F minor</option><option value="7">G minor</option></select></div>
+    <div class="audio-control"><button id="audioBtn" aria-pressed="true" title="Toggle synthesized demo audio"><span id="audioIcon">◖))</span> <span id="audioLabel">Sound off</span></button><div class="meter" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
+    <div class="output-launchers"><button id="programBtn" class="output-button"><span class="screen-icon">02</span><span>Program<small id="programStatus">Open output</small></span><b>↗</b></button><button id="auxBtn" class="output-button"><span class="screen-icon">03</span><span>Auxiliary<small id="auxStatus">Open output</small></span><b>↗</b></button><button id="blackoutBtn" class="blackout-button" aria-pressed="false" title="Blackout both outputs · B">BLACK<br>OUT</button></div>
+  </section>
+
+  <section class="arrangement" aria-label="Arrangement">
+    <div class="arrangement-label"><span class="section-index">01</span><h2>Arrangement</h2><span class="micro">16 BARS · 4/4</span></div>
+    <div id="patterns" class="patterns"></div>
+    <div class="arrangement-end"><span class="micro">LENGTH</span><strong id="duration">00:27.8</strong><span class="micro">4 PATTERNS</span></div>
+  </section>
+
+  <main class="work-area">
+    <aside class="library panel">
+      <div class="panel-heading"><h2>Instruments</h2><span class="micro">04</span></div>
+      <div class="library-intro">SOUND PALETTE <span>DEMO</span></div>
+      <div id="instruments" class="instruments"></div>
+      <div class="source-note"><span class="tiny-dot"></span> Synthesized sound sources</div>
+      <div class="scene-heading"><h2>Visual source</h2><span class="micro">01</span></div>
+      <button id="sceneBtn" class="scene-card" title="Change visual scene"><canvas id="sceneThumb" aria-label="Procedural scene thumbnail"></canvas><span><strong id="sceneName">Folded corridor</strong><small>HYDRAPY / LIVE</small></span><b>↗</b></button>
+      <div class="score-actions"><a id="studioLink" href="/">Patch editor & export ↗</a><label class="small-button">Import score<input id="importFile" type="file" accept=".json,application/json" hidden></label><button id="restoreBtn" class="small-button">Restore saved score</button></div><div class="library-bottom"><span class="micro">WORKSPACE</span><div><span class="tiny-dot mint"></span> 01 &nbsp; Control surface</div><div><span id="routeProgram" class="tiny-dot"></span> 02 &nbsp; Program output</div><div><span id="routeAux" class="tiny-dot"></span> 03 &nbsp; Auxiliary output</div></div>
+    </aside>
+
+    <section class="editor-stack">
+      <div class="tracker panel">
+        <div class="panel-heading tracker-heading"><div><span class="section-index">02</span><h2>Pattern</h2><span id="patternTitle" class="pattern-title">01 / DRIFT</span></div><div><span class="micro">64 ROWS</span><button id="followBtn" class="small-button active" aria-pressed="true">Follow</button></div></div>
+        <div id="trackHeaders" class="track-headers"></div>
+        <div id="trackerScroll" class="tracker-scroll"><div id="trackerRows" class="tracker-rows" role="grid" aria-label="Pattern editor"></div></div>
+        <div class="tracker-legend"><span><i class="legend-square mint"></i> Audio events</span><span><i class="legend-square amber"></i> Visual keyframes</span><span class="edit-hint">Click to edit · Enter to toggle · Del to clear</span></div>
+      </div>
+      <section class="automation panel">
+        <div class="panel-heading"><div><span class="section-index">03</span><h2>Automation</h2></div><div id="curveTabs" class="curve-tabs"><button data-curve="z" class="active">Dolly Z</button><button data-curve="roll">Roll</button><button data-curve="feedback">Feedback</button></div></div>
+        <div class="curve-body"><canvas id="curveCanvas" aria-label="Camera automation curve; click to add or move a keyframe" tabindex="0"></canvas><div class="curve-side"><span class="micro">INTERPOLATION</span><div id="easeButtons" class="segmented"><button data-ease="hold">Hold</button><button data-ease="linear">Linear</button><button data-ease="smooth" class="active">Smooth</button></div><div class="curve-value"><span id="curveValue">0.35</span><small id="curveUnit">DEPTH</small></div><span class="curve-tip">Click the curve to set a key.</span></div></div>
+      </section>
+    </section>
+
+    <aside class="inspector panel">
+      <div class="panel-heading"><h2>Program monitor</h2><span class="live-label"><i></i> PREVIEW</span></div>
+      <div class="monitor-wrap"><canvas id="previewCanvas" aria-label="Live audiovisual output preview"></canvas><div class="monitor-corner">02 <span>PROGRAM</span></div><button id="expandPreview" class="monitor-expand" aria-label="Open program output">↗</button><div id="blackoutBadge" hidden>BLACKOUT</div></div>
+      <div class="monitor-meta"><span id="sceneMeta">FOLDED CORRIDOR</span><span id="resolution">16:9</span></div>
+      <div class="inspector-section"><button id="automationBtn" class="small-button" aria-pressed="false">Automation off</button><div class="inspector-title"><h2>Parameter automation</h2><span id="keyLocation" class="micro">KEY / 00</span></div><p class="inspector-description">Automate named patch controls. Seeking preserves feedback.</p>
+        <label class="slider-label" for="zSlider"><span><i class="axis-dot"></i>Dolly Z</span><output id="zValue">0.35</output></label><input id="zSlider" class="slider" type="range" min="0" max="1" step="0.01" value="0.35">
+        <label class="slider-label" for="rollSlider"><span><i class="axis-dot teal"></i>Roll</span><output id="rollValue">0°</output></label><input id="rollSlider" class="slider teal" type="range" min="-45" max="45" step="1" value="0">
+        <label class="slider-label" for="feedbackSlider"><span><i class="axis-dot pale"></i>Feedback</span><output id="feedbackValue">0.25</output></label><input id="feedbackSlider" class="slider pale" type="range" min="0" max="0.9" step="0.01" value="0.25">
+      </div>
+      <div class="bindings"><span class="micro">PATCH BINDINGS</span><label>Dolly Z<select id="bind_z" aria-label="Bind Dolly Z"></select></label><label>Roll<select id="bind_roll" aria-label="Bind Roll"></select></label><label>Feedback<select id="bind_feedback" aria-label="Bind Feedback"></select></label></div><div class="selected-event"><span class="micro">SELECTED CELL</span><div><strong id="selectedTrack">Dolly Z</strong><span id="selectedRow">ROW 00</span></div><p id="selectedHint">Move a slider to write a keyframe.</p><button id="clearCellBtn" class="small-button">Clear cell <span>⌫</span></button></div>
+      <div class="output-settings"><div class="inspector-title"><h2>Output routing</h2><span class="micro">2 BUSSES</span></div><label>Program <select id="programMode" aria-label="Program output"><option value="o0">Output o0</option><option value="o1">Output o1</option><option value="o2">Output o2</option><option value="o3">Output o3</option></select></label><label>Auxiliary <select id="auxMode" aria-label="Auxiliary output"><option value="o0">Output o0</option><option value="o1">Output o1</option><option value="o2">Output o2</option><option value="o3">Output o3</option></select></label><p>Open an output, move it to your display, then press F for fullscreen.</p></div>
+    </aside>
+  </main>
+
+  <footer class="statusbar"><div><span id="transportDot" class="tiny-dot"></span><span id="transportStatus">STOPPED</span><span class="footer-divider"></span><span><span id="backendStatus">Connecting to Studio</span></span></div><div><span><kbd>SPACE</kbd> Play / pause</span><span><kbd>F</kbd> Fullscreen</span><span><kbd>B</kbd> Blackout</span><button id="resetBtn">Reset demo</button></div></footer>
+</div>
+
+<div id="outputView" class="output-view" hidden><canvas id="outputCanvas"></canvas><div class="output-hud"><div class="output-brand">GORGON <span id="outputName">PROGRAM / 02</span></div><div><span id="connectionStatus">Waiting for control surface</span><button id="outputFullscreen">Fullscreen ⛶</button></div></div><div id="outputWelcome" class="output-welcome"><span class="micro">DEDICATED OUTPUT</span><h1 id="outputWelcomeTitle">Program / 02</h1><p>Move this window to your output display.<br>Press F or click below to enter fullscreen.</p><button id="outputEnter">Enter fullscreen <span>↗</span></button><button id="outputDismiss" class="text-button">Continue in window</button></div></div>
+
+<dialog id="helpDialog"><div class="dialog-heading"><div><span class="micro">GORGON / FIRST INTEGRATION</span><h1>A score for sound and movement.</h1></div><button id="closeHelp" class="icon-button" aria-label="Close help">×</button></div>
+<p>Video comes from the running HydraPy patch. Three automation lanes control the named parameters you bind. Audio is a browser synth sketch; archive samples, Stable Audio and Deforum inference are not connected.</p>
+<div class="help-grid"><div><h2>Compose</h2><p>Click audio cells to edit hits. Select visual cells and use the sliders or curve to write keys. Hold, Linear and Smooth choose interpolation. The included patch maps Dolly Z to 2D zoom and Roll to rotation.</p></div><div><h2>Perform</h2><p>Space starts automation or pauses. F enters fullscreen. B blacks out browser monitors. Seeking moves the score only: simulation time and feedback continue. Disable automation to return control of parameters to Studio.</p></div><div><h2>More displays</h2><p>Program and Auxiliary each show a real output. Open a window, move it to its monitor, then press F. The renderer keeps running when the control window closes. Browser audio comes only from the control surface and stops when it closes.</p></div><div><h2>Save & export</h2><p>Save writes a workspace score and downloads JSON. Import accepts a saved score; Restore loads the workspace copy. Studio video exports include enabled visual automation, but do not include the browser synth. Recording and snapshots use the actual selected output.</p></div></div>
+<div class="help-footer">Studio owns timing and hardware connections · GPU and physical monitor validation pending</div></dialog>
+<dialog id="patchDialog"><div class="dialog-heading"><h1>Load a HydraPy patch</h1><button id="closePatch" class="icon-button" aria-label="Close patch picker">×</button></div><p>Choose a workspace patch. Loading a different patch disables automation and starts its simulation.</p><select id="patchSelect" aria-label="Workspace patch"></select><button id="loadPatch">Load patch</button></dialog>
+<div id="toast" class="toast" role="status"></div>
+<script type="module" src="app.js"></script>
+</body>
+</html>

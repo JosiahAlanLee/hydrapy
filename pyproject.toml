@@ -31,6 +31,7 @@ hydrapy = "hydrapy.cli:main"
 
 [tool.setuptools]
 packages = ["hydrapy"]
+include-package-data = false
 
 [tool.setuptools.package-data]
-hydrapy = ["studio.html"]
+hydrapy = ["studio.html", "tracker/*.html", "tracker/*.css", "tracker/*.js", "tracker/*.json"]

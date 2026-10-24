@@ -8,7 +8,7 @@
 </style>
 </head>
 <body>
-<header><div class="brand">HydraPy <span>Studio</span></div><div class="transport"><span class="clock" id="time">00:00.0</span><button id="play" title="Space to pause">Pause <span class="shortcut">Space</span></button><button id="restart" title="Restart simulation and clear feedback">Restart</button><button id="snapshot" title="Save current frame">Snapshot <span class="shortcut">S</span></button><button id="record">Record video</button></div></header>
+<header><div class="brand">HydraPy <span>Studio</span></div><div class="transport"><a id="tracker-link" href="/tracker/">Gorgon tracker ↗</a><span class="clock" id="time">00:00.0</span><button id="play" title="Space to pause">Pause <span class="shortcut">Space</span></button><button id="restart" title="Restart simulation and clear feedback">Restart</button><button id="snapshot" title="Save current frame">Snapshot <span class="shortcut">S</span></button><button id="record">Record video</button></div></header>
 <div class="layout">
 <aside class="library" id="library"><div class="eyebrow">Patch library</div><input id="search" aria-label="Search patches" placeholder="Search a technique or patch…"><select id="category" aria-label="Filter patches by task"><option value="">All tasks</option><option>Recent</option></select><div class="count" id="count"></div><div id="patches"></div></aside>
 <main class="main"><div class="title-row"><button class="library-toggle" id="browse">Patches</button><h1 id="patch-title">Choose a patch</h1><button id="fullscreen" class="small">Fullscreen <span class="shortcut">F</span></button></div>
@@ -27,6 +27,7 @@
 'use strict';
 const $ = id => document.getElementById(id),
   token = location.hash.slice(1);
+$('tracker-link').href = '/tracker/#' + token;
 let state = {},
   entries = [],
   editorPath = null,
@@ -481,6 +482,7 @@ async function poll() {
     $('patch-title').textContent = state.path ? state.path.split('/').pop() : 'Choose a patch';
     $('empty').classList.toggle('hidden', !!state.path);
     $('notice').textContent = state.notice || '';
+    if (state.tracker_enabled) $('notice').textContent += ' Gorgon automation is driving its bound base values.';
     const error = [state.error, state.preview_error, state.preview && state.preview.error].filter(Boolean).join('\n');
     $('error').textContent = error;
     $('error').classList.toggle('hidden', !error);

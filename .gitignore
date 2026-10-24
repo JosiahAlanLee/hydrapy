@@ -18,5 +18,6 @@ __pycache__/
 media/
 
 !hydrapy/studio.html
+!hydrapy/tracker/*.html
 !docs/studio/*.jpg
 !docs/studio/*.png

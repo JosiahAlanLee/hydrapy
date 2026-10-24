@@ -2,6 +2,9 @@
 
 [Documentation](README.md) · [Project home](../README.md)
 
+For a fullscreen score and separate Program/Auxiliary windows, see the optional
+[Gorgon tracker workspace](gorgon-tracker.md) (`hydrapy studio … --tracker`).
+
 ```sh
 python -m pip install -e ".[gpu,video]"
 hydrapy studio patches/studio_feedback.py

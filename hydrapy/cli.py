@@ -185,6 +185,7 @@ def main(argv=None):
     studio.add_argument("--fps", type=float, default=30.)
     studio.add_argument("--port", type=int, default=8765)
     studio.add_argument("--no-browser", action="store_true")
+    studio.add_argument("--tracker", action="store_true", help="open the Gorgon tracker workspace")
     session = sub.add_parser("session", help="play or inspect a beat-timed OSC session")
     from .session import add_arguments as session_arguments
     session_arguments(session)
@@ -216,7 +217,7 @@ def main(argv=None):
 
     if a.cmd == "studio":
         from .studio import serve
-        serve(a.root, a.patch, a.backend, a.size, a.fps, a.port, not a.no_browser)
+        serve(a.root, a.patch, a.backend, a.size, a.fps, a.port, not a.no_browser, tracker=a.tracker)
         return
 
     if a.cmd == "check":
