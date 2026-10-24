@@ -35,6 +35,7 @@ from . import ops_stroke as _ops_stroke  # noqa: F401  (harmonograph/wave/arc/da
 from . import ops_marble as _ops_marble  # noqa: F401  (inkdrop/tine/swirl/ripple/disc)
 from . import ops_fields as _ops_fields  # noqa: F401  (orbitVoronoi, signed distance fields)
 from . import ops_material as _ops_material  # noqa: F401  (normals, lighting, reflections)
+from . import ops_phase as _ops_phase  # noqa: F401  (independent pixel oscillators)
 from .core import (REGISTRY, Bank, Camera, Chain, Ctx, External, FrameSource, Image, Input, Op, Output, Patch, Texture, Transform, Video,
                    default_patch, normalize_args, reset_patch)
 from .cellular import CARule, Cellular, MultiCA1D, WOLFRAM3, WOLFRAM5
