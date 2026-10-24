@@ -715,3 +715,41 @@ def test_gl_variants_skip_faded_branches_and_match_the_full_program():
     skipped = next(v for (name, k), v in fast._variants.items() if name == "o0" and k)
     assert len(skipped) < len(fast._variants[("o0", None)])    # fewer passes while the branch is faded out
     fast.release(); full.release()
+
+
+def test_repeated_subchains_are_computed_once_per_pass():
+    import hydrapy.glsl as G
+    def build():
+        n = noise(3, 0.2).color(0.3, 0.6, 0.9)
+        # the same chain object twice, and an equal chain built separately: one noise call each way
+        return osc(10).blend(n, 0.5).add(n.invert(), 0.3).mult(noise(3, 0.2).color(0.3, 0.6, 0.9), 0.4)
+    prog = compile_chain(build())
+    p = prog.passes[-1]
+    assert p.lets and p.source.count("noise(st") + p.source.count("noise(_st") <= 2
+    assert p.source.count("vec4 _s0 =") == 1
+    G.SHARE_SUBCHAINS = False
+    try:
+        plain = compile_chain(build())
+    finally:
+        G.SHARE_SUBCHAINS = True
+    assert not plain.passes[-1].lets
+    a = build().render(0.4, size=(32, 18))
+    if _gl_available():
+        from hydrapy.backend_gl import GLRenderer
+        outs = []
+        for share in (True, False):
+            G.SHARE_SUBCHAINS = share
+            try:
+                q = Patch(size=(32, 18)); build().out(q.o0, patch=q)
+                r = GLRenderer(q, size=(32, 18), fps=10); r.step(0.4); outs.append(r.read_rgba()); r.release()
+            finally:
+                G.SHARE_SUBCHAINS = True
+        assert np.array_equal(outs[0], outs[1])
+        assert np.abs(outs[0] - a).max() < 0.01
+
+
+def test_structurally_equal_signals_share_one_uniform():
+    l = Lfo(0.3)
+    ch = osc(10, l * 0.5 + 0.1).rotate(l * 0.5 + 0.1).kaleid(Lfo(0.3) * 2)
+    prog = compile_chain(ch)
+    assert len(prog.float_uniforms) == 2        # l*0.5+0.1 once; the second Lfo is another object

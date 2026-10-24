@@ -15,7 +15,7 @@ from typing import Callable, Optional
 
 from .core import Camera, Chain, DelayRef, Image, Op, Output, Patch, Texture, Video, default_patch
 from .noise import GLSL_NOISE
-from .signals import Fn, Signal, as_signal
+from .signals import Const, Expr, Fn, Fn1, Signal, as_signal
 
 
 @dataclass
@@ -44,6 +44,7 @@ class Pass:
     expr: str                 # GLSL expression for gl_FragColor (functions/uniforms are shared)
     source: str = ""          # full fragment shader, filled in by Program.finish()
     compute: Optional[ComputeStep] = None
+    lets: list = field(default_factory=list)   # "vec4 _sN = ...;": sub-chains used more than once, computed once
 
 
 @dataclass
@@ -101,7 +102,8 @@ class Program:
     def finish(self):
         head = self.header()
         for p in self.passes:
-            p.source = (head + "\nvoid main () {\n  vec2 st = gl_FragCoord.xy / resolution.xy;\n"
+            lets = "".join(f"  {line}\n" for line in p.lets)
+            p.source = (head + "\nvoid main () {\n  vec2 st = gl_FragCoord.xy / resolution.xy;\n" + lets +
                         f"  gl_FragColor = {p.expr};\n}}\n")
         return self
 
@@ -165,6 +167,9 @@ def gates(chain: Chain) -> list:
     return out
 
 
+SHARE_SUBCHAINS = True      # compute a repeated sub-chain once per pass (glsl._Compiler.shared)
+
+
 def glsl_float(v: float) -> str:
     v = float(v)
     if not math.isfinite(v):
@@ -188,11 +193,48 @@ class _Compiler:
         self._float_ids: dict[int, Uniform] = {}
         self._sampler_names: dict[str, Uniform] = {}
         self._prefix_textures: dict[tuple, str] = {}
+        self._mode = None             # sharing: None (off), "count" or "emit", while a pass is generated
+        self._counts: dict = {}
+        self._names: dict = {}
+        self._lets: list = []
+        self._chain_keys: dict = {}
+
+    # -- structural keys: equal keys generate equal GLSL -----------------------
+    @staticmethod
+    def signal_key(sig):
+        if isinstance(sig, Const):
+            return ("c", sig.v)
+        if isinstance(sig, Expr):
+            return ("e", sig.op, _Compiler.signal_key(sig.a), _Compiler.signal_key(sig.b))
+        if isinstance(sig, Fn1):
+            return ("f", sig.fn, _Compiler.signal_key(sig.a), tuple(sig.extra))
+        return ("id", id(sig))        # anything else may carry state: one uniform per object
+
+    def arg_key(self, a):
+        if isinstance(a, Chain):
+            return self.chain_key(a)
+        if isinstance(a, Signal):
+            return self.signal_key(a)
+        if isinstance(a, bool):
+            return ("n", float(a))
+        if isinstance(a, (int, float)):
+            return ("n", float(a))
+        if isinstance(a, Texture):
+            return ("t", a.name)
+        return ("id", id(a))
+
+    def chain_key(self, chain: Chain):
+        key = self._chain_keys.get(id(chain))
+        if key is None:
+            key = tuple(("skip",) if id(tr) in self.skip else (tr.op.name, tuple(self.arg_key(a) for a in tr.args))
+                        for tr in chain.transforms)
+            self._chain_keys[id(chain)] = key
+        return key
 
     # -- uniforms --------------------------------------------------------
     def float_uniform(self, sig) -> str:
         sig = as_signal(sig)
-        key = id(sig)
+        key = self.signal_key(sig)    # structurally equal expressions share one uniform
         if key not in self._float_ids:
             u = Uniform(f"u_{len(self._float_ids)}", "float", sig)
             self._float_ids[key] = u
@@ -216,8 +258,38 @@ class _Compiler:
             self.p.functions.append(op)
 
     def add_pass(self, target: str, expr: Callable[[str], str]):
+        """Generate one pass. Argument chains that occur more than once at the same coordinates (the same
+        chain object, or an equal one) are computed once into a local: count them, then emit."""
         compute = expr.compute_step() if isinstance(expr, _TextureCall) else None
-        self.p.passes.append(Pass(target, expr("st"), compute=compute))
+        saved = (self._mode, self._counts, self._names, self._lets)
+        self._mode, self._counts = "count", {}
+        expr("st")
+        self._mode, self._names, self._lets = "emit", {}, []
+        code = expr("st")
+        lets = self._lets
+        self._mode, self._counts, self._names, self._lets = saved
+        self.p.passes.append(Pass(target, code, compute=compute, lets=lets))
+
+    def shared(self, key: tuple, frag: Callable[[str], str]) -> Callable[[str], str]:
+        """``frag`` (the GLSL of a chain, or of a chain's first k transforms, whose structural key is ``key``),
+        hoisted into a local when the same key is generated more than once at the same coordinates."""
+        if not SHARE_SUBCHAINS or isinstance(frag, _TextureCall):
+            return frag                                       # a _TextureCall keeps its compute eligibility
+
+        def f(uv):
+            k = (key, uv)
+            if self._mode == "count":
+                n = self._counts.get(k, 0)
+                self._counts[k] = n + 1
+                return frag(uv) if n == 0 else "_"           # nested uses are counted once per distinct site
+            if self._mode == "emit" and self._counts.get(k, 0) > 1:
+                if k not in self._names:
+                    code = frag(uv)
+                    self._names[k] = f"_s{len(self._lets)}"
+                    self._lets.append(f"vec4 {self._names[k]} = {code};")
+                return self._names[k]
+            return frag(uv)
+        return f
 
     # -- arguments -------------------------------------------------------
     def arg(self, a, inp) -> Callable[[str], str]:
@@ -248,9 +320,12 @@ class _Compiler:
     # -- chain -----------------------------------------------------------
     def gen(self, chain: Chain) -> Callable[[str], str]:
         frag: Optional[Callable[[str], str]] = None
+        parts: list = []                  # the structural key of the prefix generated so far
         for index, tr in enumerate(chain.transforms):
             if frag is not None and id(tr) in self.skip:
+                parts.append(("skip",))
                 continue
+            parts.append((tr.op.name, tuple(self.arg_key(a) for a in tr.args)))
             op, args = tr.op, list(tr.args)
             if op.cpu_only:
                 raise NotImplementedError(f".{op.name}() is CPU-only and cannot be compiled to GLSL")
@@ -327,6 +402,7 @@ class _Compiler:
                 frag = _TextureCall(op, tex, argfns, last)
             else:
                 raise ValueError(op.kind)
+            frag = self.shared(tuple(parts), frag)
         if frag is None:
             raise ValueError("empty chain")
         return frag
