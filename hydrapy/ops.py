@@ -1050,14 +1050,14 @@ register(Op("displace", "combineCoord", [Input("tex", "chain"), F("amount", 0.1)
 # samples it around `_st`.  NumPy twins get the rendered prefix as `tex` (H, W, 4).
 
 def _taps(env, tex, st, offsets):
-    return [env.sample(tex, st + np.asarray(o, dtype=np.float32) / env.res) for o in offsets]
+    return [env.sample_offset(tex, st, o) for o in offsets]
 
 
 def _np_blur(tex, st, radius, env):
     acc = None
     for i in (-1, 0, 1):
         for j in (-1, 0, 1):
-            s = env.sample(tex, st + np.array([i, j], dtype=np.float32) * radius / env.res)
+            s = env.sample_offset(tex, st, (i * radius, j * radius))
             acc = s if acc is None else acc + s
     return acc / 9.0
 
@@ -1125,7 +1125,7 @@ def _np_dilate(tex, st, radius, env):
     out = None
     for i in (-1, 0, 1):
         for j in (-1, 0, 1):
-            s = env.sample(tex, st + np.array([i, j], dtype=np.float32) * radius / env.res)
+            s = env.sample_offset(tex, st, (i * radius, j * radius))
             out = s if out is None else np.maximum(out, s)
     return out
 
@@ -1143,7 +1143,7 @@ def _np_erode(tex, st, radius, env):
     out = None
     for i in (-1, 0, 1):
         for j in (-1, 0, 1):
-            s = env.sample(tex, st + np.array([i, j], dtype=np.float32) * radius / env.res)
+            s = env.sample_offset(tex, st, (i * radius, j * radius))
             out = s if out is None else np.minimum(out, s)
     return out
 
@@ -1193,7 +1193,7 @@ def _np_rd(tex, st, feed, kill, da, db, env):
     lapB = -B
     for (i, j), w in (((-1, 0), 0.2), ((1, 0), 0.2), ((0, -1), 0.2), ((0, 1), 0.2),
                       ((-1, -1), 0.05), ((1, -1), 0.05), ((-1, 1), 0.05), ((1, 1), 0.05)):
-        s = env.sample(tex, st + np.array([i, j], dtype=np.float32) / env.res)
+        s = env.sample_offset(tex, st, (i, j))
         a, b = ab(s)
         lapA = lapA + w * a
         lapB = lapB + w * b

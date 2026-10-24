@@ -6,7 +6,7 @@
 
 Two backends evaluate the same chain:
 
-* **NumPy** — runs anywhere, deterministic, slow (≈1–5 fps at 320×180 for feedback patches). Home of
+* **NumPy** — runs anywhere; speed depends on the operators and resolution. Home of
   the CPU-only ops (`pixelsort`).
 * **GLSL** — the chain compiles to fragment shaders exactly the way Hydra compiles it (same nesting,
   same function bodies). Used by the HTML export (WebGL2, with a WebGL1 fallback) and by the
@@ -131,8 +131,9 @@ GPU brightness probes reduce their regions before readback; audio strips are rea
   else 8-bit — reaction–diffusion looks best with float buffers. Hydra itself uses 8-bit.
 * **Resolution**: the CPU default is 320×180 (`set_resolution`, `Patch(size=...)`, `--size`). Signals
   that use `ctx.width` adapt.
-* **Speed**: on this machine's software GL, `rd(iterations=8)` at 320×180 renders ~25 fps on the
-  GPU path and ~1 fps on NumPy; a real GPU is far faster. Use `--gpu` for anything long.
+* **Speed**: use `--gpu` for long or high-resolution renders. See the
+  [performance guide](PERFORMANCE.md) for reproducible CPU/GL benchmarks and
+  measured 1080p/4K improvements. Check the renderer name: software OpenGL still uses the CPU.
 * **Audio in the HTML export**: the file is embedded as base64 and analysed with an `AnalyserNode`
   using the same Bark/loudness pipeline, so what you tuned offline is what plays. The page waits for a
   click (autoplay policy). `Audio()` with no file uses the microphone.

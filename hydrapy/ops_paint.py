@@ -71,7 +71,8 @@ def _np_drops(st, scale, size, density, stretch, rim, softness, wobble, texture,
     cov = np.zeros(st.shape[:2], dtype=np.float32)
     rimv = np.zeros_like(cov)
     best = np.full_like(cov, 1e9)   # nearest drop (in radius units) owns the pixel's colour
-    col = np.ones(st.shape[:2] + (3,), dtype=np.float32)
+    chosen = np.zeros(st.shape[:2], bool)
+    chosen_hue = np.zeros(st.shape[:2], np.float32)
     wob = wobble * snoise3(np.stack([p[..., 0] * 2.0, p[..., 1] * 2.0, seed], axis=-1))
     tex = 1.0 - texture * (0.5 + 0.5 * snoise3(np.stack([p[..., 0] * 6.0, p[..., 1] * 6.0, seed + 5.0], axis=-1)))
     for y in (-2, -1, 0, 1, 2):
@@ -92,11 +93,14 @@ def _np_drops(st, scale, size, density, stretch, rim, softness, wobble, texture,
             cv = (1.0 - smoothstep(1.0 - softness, 1.0 + softness, dist)) * exists
             rm = smoothstep(0.8, 1.0, dist) * cv
             better = exists & (cv > 0.0) & (dist < best)
-            hsv = np.stack([hue + hueSpread * (h / np.maximum(density, 1e-3) - 0.5), bc(sat, st), ones_like_hw(st)], axis=-1)
-            col = np.where(better[..., None], hsv_to_rgb(hsv), col)
+            chosen_hue = np.where(better, h, chosen_hue)
+            chosen |= better
             best = np.where(better, dist, best)
             cov = np.maximum(cov, cv)
             rimv = np.maximum(rimv, rm)
+    hsv = np.stack([hue + hueSpread * (chosen_hue / np.maximum(density, 1e-3) - 0.5),
+                    bc(sat, st), ones_like_hw(st)], axis=-1)
+    col = np.where(chosen[..., None], hsv_to_rgb(hsv), 1.0)
     return np.concatenate([col, (cov * (1.0 + rim * rimv) * tex)[..., None]], axis=-1).astype(np.float32)
 
 
@@ -320,7 +324,7 @@ def _np_bleed(tex, st, grow, softness, roughness, env):
     for y in (-1, 0, 1):
         for x in (-1, 0, 1):
             w = 2.0 if (x == 0 and y == 0) else 1.0
-            s = env.sample(tex, st + np.array([x, y], dtype=np.float32) * 1.5 / env.res)
+            s = env.sample_offset(tex, st, (x * 1.5, y * 1.5))
             pm = np.concatenate([s[..., :3] * s[..., 3:4], s[..., 3:4]], axis=-1) * w
             acc = pm if acc is None else acc + pm
             wsum += w

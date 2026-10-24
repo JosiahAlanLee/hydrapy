@@ -13,7 +13,7 @@ python docs/bullfrog_demo.py "/path/to/Bullfrog.flac" -o bullfrog.mp4
 
 The default is 1280×720 at 24 fps. ffmpeg is required for FLAC decoding and audio
 muxing. The MP4 contains the original stereo track, encoded as AAC. The command
-prints the encoder selected on your machine. Desktop GL rendering can also run
+prints the renderer and encoder selected on your machine. Desktop GL rendering can also run
 on Mesa software rendering when no GPU is available.
 
 Use `--seconds 20 --size 640x360` for an opening excerpt,
@@ -35,6 +35,11 @@ Each transition lasts ten seconds. Both renderers keep advancing throughout the
 dissolve; feedback and simulation state remain live on the outgoing scene. Low,
 mid and high audio bands drive different visual properties within each scene.
 The chapter schedule is composed, not an automatic musical-section detector.
+
+Dissolves and fades run on the GPU with one frame download for encoding. Only
+the feedback, NCA and Physarum scenes need simulation warm-up. Output resolution
+and simulation settings are preserved. For 1080p/4K timings and a repeatable
+benchmark command, see [rendering performance](PERFORMANCE.md).
 
 ## Perform a scene in Studio
 

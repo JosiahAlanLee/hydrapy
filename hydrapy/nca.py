@@ -89,14 +89,16 @@ class NCAModel:
 def perceive(state: np.ndarray) -> np.ndarray:
     """(h, w, C) -> (h, w, 4C) with feature index c * 4 + f, circular boundaries."""
     h, w, c = state.shape
-    feats = np.zeros((h, w, c, 4), np.float32)
-    for dy in (-1, 0, 1):
-        for dx in (-1, 0, 1):
-            # image row r + dy is GL row r' - dy; np.roll(a, k)[i] == a[i - k]
-            nb = np.roll(np.roll(state, dy, axis=0), -dx, axis=1)
-            k = FILTERS[:, dy + 1, dx + 1]
-            if np.any(k):
-                feats += nb[..., None] * k[None, None, None, :]
+    feats = np.empty((h, w, c, 4), np.float32)
+    feats[..., 0] = state
+    left, right = np.roll(state, 1, 1), np.roll(state, -1, 1)
+    up, down = np.roll(state, 1, 0), np.roll(state, -1, 0)
+    dx, dy = right - left, up - down
+    feats[..., 1] = np.roll(dx, 1, 0) + 2 * dx + np.roll(dx, -1, 0)
+    feats[..., 2] = np.roll(dy, 1, 1) + 2 * dy + np.roll(dy, -1, 1)
+    feats[..., 3] = (np.roll(left, 1, 0) + np.roll(right, 1, 0)
+                     + np.roll(left, -1, 0) + np.roll(right, -1, 0)
+                     + 2 * (left + right + up + down) - 12 * state)
     return feats.reshape(h, w, 4 * c)
 
 
@@ -104,13 +106,14 @@ def step_np(model: NCAModel, state: np.ndarray, step_index: int, rate: float = 0
             seed: float = 0.0, damage: Optional[np.ndarray] = None, paint: Optional[np.ndarray] = None,
             paint_amount: float = 0.5) -> np.ndarray:
     h, w, c = state.shape
-    f = perceive(state)
-    hid = np.maximum(f @ model.w1.T + model.b1, 0.0)
-    dx = hid @ model.w2.T
     iy, ix = np.mgrid[0:h, 0:w].astype(np.float32)
     s = np.float32(step_index) + np.float32(seed) * np.float32(131.0)
-    fire = (h31(np.stack([ix, iy, np.full_like(ix, s)], axis=-1)) < rate).astype(np.float32)
-    new = np.clip(state + dx * fire[..., None], -CLAMP, CLAMP)
+    fire = h31(np.stack([ix, iy, np.full_like(ix, s)], axis=-1)) < rate
+    new = np.clip(state, -CLAMP, CLAMP)
+    if np.any(fire):
+        f = perceive(state)[fire]
+        hid = np.maximum(f @ model.w1.T + model.b1, 0.0)
+        new[fire] = np.clip(state[fire] + hid @ model.w2.T, -CLAMP, CLAMP)
     if perturb:
         for ch in range(3, c):
             n = h31(np.stack([ix, iy, np.full_like(ix, s * np.float32(3.1) + np.float32(ch + 0.37))], axis=-1))
@@ -146,17 +149,34 @@ def _v4(vals) -> str:
 
 
 def step_glsl(model: NCAModel, k: int) -> str:
-    """Fragment shader computing state texture ``k`` (channels 4k..4k+3) for one step."""
+    """Portable single-target shader, also used by the browser renderer."""
+    return _step_glsl(model, (k,), mrt=False)
+
+
+def step_mrt_glsl(model: NCAModel) -> str:
+    """Desktop multi-target update: perception and hidden activations are shared."""
+    return _step_glsl(model, tuple(range(model.textures)), mrt=True)
+
+
+def _step_glsl(model, outputs, mrt):
     T = model.textures
     lines = [
         "uniform vec2 res;",
         "uniform float stepIndex, rate, perturb, seed, paintAmount, damageOn, paintOn;",
         "uniform sampler2D damage, paint;",
-    ] + [f"uniform sampler2D s{t};" for t in range(T)] + [
+    ] + [f"uniform sampler2D s{t};" for t in range(T)]
+    if mrt:
+        lines += [f"layout(location={k}) out vec4 nca_out{k};" for k in outputs]
+    lines += [
         "void main() {",
         "  vec2 px = 1.0 / res;",
         "  vec2 uv = gl_FragCoord.xy * px;",
+        "  vec2 cell = floor(gl_FragCoord.xy);",
+        "  float s = stepIndex + seed * 131.0;",
+        "  bool fire = _h31(vec3(cell, s)) < rate;",
     ]
+    lines += [f"  vec4 o{k} = vec4(0.0);" for k in outputs]
+    lines.append("  if (fire) {")
     # taps: image offset (dy, dx) is GL offset (dx, -dy)
     for t in range(T):
         lines.append(f"  vec4 F{t}_0 = vec4(0.0), F{t}_1 = vec4(0.0), F{t}_2 = vec4(0.0), F{t}_3 = vec4(0.0);")
@@ -171,44 +191,47 @@ def step_glsl(model: NCAModel, k: int) -> str:
                     if ks[fi]:
                         lines.append(f"    F{t}_{fi} += {_f(ks[fi])} * n;")
                 lines.append("  }")
-    lines.append("  vec4 o = vec4(0.0);")
     for j in range(model.hidden):
+        weights = {k: [model.w2[4 * k + i, j] for i in range(4)] for k in outputs}
+        if not any(any(w) for w in weights.values()):
+            continue
         terms = []
         for t in range(T):
             for fi in range(4):
                 wv = [model.w1[j, (4 * t + i) * 4 + fi] for i in range(4)]
                 if any(wv):
                     terms.append(f"dot(F{t}_{fi}, {_v4(wv)})")
-        out_w = [model.w2[4 * k + i, j] for i in range(4)]
-        if not any(out_w):
-            continue
-        lines.append(f"  o += max(0.0, {_f(model.b1[j])} + {' + '.join(terms) or '0.0'}) * {_v4(out_w)};")
-    lines += [
-        "  vec2 cell = floor(gl_FragCoord.xy);",
-        "  float s = stepIndex + seed * 131.0;",
-        "  float fire = _h31(vec3(cell, s)) < rate ? 1.0 : 0.0;",
-        f"  vec4 x = clamp(texture2D(s{k}, uv) + o * fire, {_f(-CLAMP)}, {_f(CLAMP)});",
-        "  if (perturb != 0.0) {",
-        "    vec4 n = vec4(" + ", ".join(f"_h31(vec3(cell, s * 3.1 + {_f(4 * k + i + 0.37)}))" for i in range(4)) + ") - 0.5;",
-        "    x += perturb * n" + (" * vec4(0.0, 0.0, 0.0, 1.0)" if k == 0 else "") + ";",
-        "  }",
-    ]
-    if k == 0:
+        lines.append(f"  float h{j} = max(0.0, {_f(model.b1[j])} + {' + '.join(terms) or '0.0'});")
+        for k, w in weights.items():
+            if any(w):
+                lines.append(f"  o{k} += h{j} * {_v4(w)};")
+    lines.append("  }")
+    for k in outputs:
         lines += [
-            "  if (paintOn > 0.5) {",
-            "    vec4 p = texture2D(paint, uv);",
-            "    float cov = clamp(max(p.r, max(p.g, p.b)), 0.0, 1.0) * paintAmount;",
-            "    x.rgb = x.rgb * (1.0 - cov) + (p.rgb - 0.5) * cov;",
+            "  {",
+            f"  vec4 x = clamp(texture2D(s{k}, uv) + o{k}, {_f(-CLAMP)}, {_f(CLAMP)});",
+            "  if (perturb != 0.0) {",
+            "    vec4 n = vec4(" + ", ".join(f"_h31(vec3(cell, s * 3.1 + {_f(4 * k + i + 0.37)}))" for i in range(4)) + ") - 0.5;",
+            "    x += perturb * n" + (" * vec4(0.0, 0.0, 0.0, 1.0)" if k == 0 else "") + ";",
             "  }",
         ]
-    lines += [
-        "  if (damageOn > 0.5) {",
-        "    float d = _luminance(texture2D(damage, uv).rgb);",
-        "    x *= 1.0 - smoothstep(0.4, 0.6, d);",
-        "  }",
-        "  gl_FragColor = x;",
-        "}",
-    ]
+        if k == 0:
+            lines += [
+                "  if (paintOn > 0.5) {",
+                "    vec4 p = texture2D(paint, uv);",
+                "    float cov = clamp(max(p.r, max(p.g, p.b)), 0.0, 1.0) * paintAmount;",
+                "    x.rgb = x.rgb * (1.0 - cov) + (p.rgb - 0.5) * cov;",
+                "  }",
+            ]
+        lines += [
+            "  if (damageOn > 0.5) {",
+            "    float d = _luminance(texture2D(damage, uv).rgb);",
+            "    x *= 1.0 - smoothstep(0.4, 0.6, d);",
+            "  }",
+            f"  {'nca_out' + str(k) if mrt else 'gl_FragColor'} = x;",
+            "  }",
+        ]
+    lines.append("}")
     return "\n".join(lines) + "\n"
 
 

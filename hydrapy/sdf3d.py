@@ -123,6 +123,52 @@ def _distance(plan, p, args):
     return e * (1-h) + d*h - k*h*(1-h)
 
 
+def _bound(plan, args):
+    """Radius R such that distance(p) >= length(p) - R.
+
+    This bounds the epsilon shell as well as the zero surface, including
+    folded fields and smooth unions. It is only used to reject certain misses;
+    surviving rays keep their original start and marching budget.
+    """
+    kind, indices, children, iterations = plan
+    a = [float(np.float32(args[i])) for i in indices]
+    b = [_bound(c, args) for c in children]
+    if kind == "sphere": return abs(a[0])
+    if kind == "box": return math.sqrt(sum(v*v for v in a))
+    if kind == "torus": return abs(a[0]) + abs(a[1])
+    if kind == "translate": return b[0] + math.sqrt(sum(v*v for v in a))
+    if kind == "rotate": return b[0]
+    if kind == "scale": return b[0] * max(abs(a[0]), 1e-4)
+    if kind == "fold":
+        radius, shift = b[0], math.sqrt(sum(v*v for v in a[1:4]))
+        for _ in range(iterations):
+            radius = (radius + shift) / max(abs(a[0]), 1.001)
+        return radius
+    if kind == "intersect": return min(b)
+    if kind == "subtract": return b[0]
+    return max(b) + max(a[0], 1e-8) * .25
+
+
+def _shader_bound(plan):
+    kind, indices, children, iterations = plan
+    a = [f"v{i}" for i in indices]
+    b = [_shader_bound(c) for c in children]
+    if kind == "sphere": return f"abs({a[0]})"
+    if kind == "box": return f"length(vec3({','.join(a)}))"
+    if kind == "torus": return f"(abs({a[0]})+abs({a[1]}))"
+    if kind == "translate": return f"({b[0]}+length(vec3({','.join(a)})))"
+    if kind == "rotate": return b[0]
+    if kind == "scale": return f"({b[0]}*max(abs({a[0]}),.0001))"
+    if kind == "fold":
+        radius = b[0]
+        for _ in range(iterations):
+            radius = f"(({radius}+length(vec3({','.join(a[1:4])})))/max(abs({a[0]}),1.001))"
+        return radius
+    if kind == "intersect": return f"min({b[0]},{b[1]})"
+    if kind == "subtract": return b[0]
+    return f"(max({b[0]},{b[1]})+max({a[0]},1.e-8)*.25)"
+
+
 _CAMERA = [("rotX", .25), ("rotY", .3), ("rotZ", 0), ("distance", 3), ("fov", 45),
            ("steps", 96), ("epsilon", .001), ("far", 10), ("mode", 0)]
 
@@ -139,19 +185,28 @@ def _np_march(plan, count, st, args, env):
     rotation = _rot3(rx, ry, rz)
     ro = np.array([0, 0, distance], np.float32) @ rotation
     rd = rd @ rotation
-    t = np.zeros(st.shape[:2], np.float32)
-    hit = np.zeros(st.shape[:2], bool)
+    shape = st.shape[:2]
+    rd = rd.reshape(-1, 3)
+    t = np.zeros(len(rd), np.float32)
+    hit = np.zeros(len(rd), bool)
+    radius = _bound(plan, field_args)
+    radius += eps + 1e-4 * max(1, radius)  # account for float32 transforms
+    closest = np.clip(-(rd @ ro), 0, far)
+    active = np.flatnonzero(np.linalg.norm(ro + rd * closest[:, None], axis=-1) <= radius)
     for _ in range(int(np.clip(np.floor(steps), 1, 256))):
-        d = _distance(plan, ro + rd*t[..., None], field_args)
-        active = ~hit & (t <= far)
-        hit |= active & (np.abs(d) <= eps)
-        active &= ~hit
-        if not np.any(active): break
-        t += np.where(active, np.maximum(np.abs(d)*.85, eps*.25), 0)
+        if not len(active):
+            break
+        d = _distance(plan, ro + rd[active] * t[active, None], field_args)
+        arrived = np.abs(d) <= eps
+        hit[active[arrived]] = True
+        active, d = active[~arrived], d[~arrived]
+        t[active] += np.maximum(np.abs(d) * .85, eps * .25)
+        active = active[t[active] <= far]
+    rgb = np.zeros((len(rd), 3), np.float32)
     if mode >= 1.5:
-        rgb = np.repeat(np.clip(t/far, 0, 1)[..., None], 3, axis=-1)
-    else:
-        pos = ro + rd*t[..., None]
+        rgb[hit] = np.clip(t[hit] / far, 0, 1)[:, None]
+    elif np.any(hit):
+        pos = ro + rd[hit] * t[hit, None]
         grad = []
         for axis in np.eye(3, dtype=np.float32) * eps:
             grad.append(_distance(plan, pos+axis, field_args) - _distance(plan, pos-axis, field_args))
@@ -159,14 +214,14 @@ def _np_march(plan, count, st, args, env):
         n /= np.maximum(np.linalg.norm(n, axis=-1, keepdims=True), 1e-8)
         n = n @ rotation.T
         if mode >= .5:
-            rgb = .5 + .5*n
+            rgb[hit] = .5 + .5*n
         else:
             light = np.array([.4, .6, 1], np.float32); light /= np.linalg.norm(light)
             half = light + np.array([0, 0, 1], np.float32); half /= np.linalg.norm(half)
             lam = np.maximum(n @ light, 0)
             shade = .15 + .7*lam + .25*np.maximum(n @ half, 0)**32*(lam > 0)
-            rgb = np.repeat(shade[..., None], 3, axis=-1)
-    return np.concatenate([rgb * hit[..., None], hit[..., None]], axis=-1).astype(np.float32)
+            rgb[hit] = shade[..., None]
+    return np.concatenate([rgb, hit[..., None]], axis=-1).reshape(*shape, 4).astype(np.float32)
 
 
 def _shader_map(plan, name, count):
@@ -233,6 +288,10 @@ def _op(plan, count):
   vec3 origin=vec3(0.,0.,distance);
   vec3 ro=vec3(dot(origin,r[0]),dot(origin,r[1]),dot(origin,r[2]));
   rd=vec3(dot(rd,r[0]),dot(rd,r[1]),dot(rd,r[2]));
+  float radius=BOUND;
+  radius+=eps+.0001*max(1.,radius);
+  float closest=clamp(-dot(ro,rd),0.,limit);
+  if(length(ro+rd*closest)>radius)return vec4(0.);
   float t=0.; bool hit=false;
   for(int i=0;i<256;i++) {
     if(float(i)>=clamp(floor(steps),1.,256.)||t>limit)break;
@@ -253,6 +312,7 @@ def _op(plan, count):
   float shade=.15+.7*lam+.25*pow(max(dot(n,h),0.),32.)*(lam>0.?1.:0.);
   return vec4(vec3(shade),1.);
 """
+    glsl = glsl.replace("BOUND", _shader_bound(plan))
     # MAP is only a Python template marker, never a GLSL macro. Balance nested
     # parentheses to replace every call without assuming a particular argument.
     while "MAP(" in glsl:
