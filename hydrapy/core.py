@@ -45,6 +45,7 @@ class Op:
     hydra: bool = False            # part of Hydra's own op set (exportable to Hydra JS)
     glsl_helpers: str = ""         # optional op-specific functions before the body
     python_source: Optional[Callable] = None  # (args, formatter) -> constructor expression
+    compute: Optional[str] = None  # opt-in desktop kernel for a whole, unwarped texture pass
 
     @property
     def returns(self) -> str:

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 import time as _time
+import warnings
 from typing import Optional
 
 import numpy as np
@@ -20,25 +21,42 @@ from .glsl import VERTEX_DESKTOP, TmpRef, compile_patch, to_desktop
 from .signals import as_signal
 
 
-def _create_context():
+def _create_context(compute=False):
     import moderngl
-    try:
-        return moderngl.create_standalone_context()
-    except Exception:
-        return moderngl.create_standalone_context(backend="egl")
+    error = None
+    for version in ((430, 330) if compute else (330,)):
+        for options in ({}, {"backend": "egl"}):
+            try:
+                return moderngl.create_standalone_context(require=version, **options)
+            except Exception as exc:
+                error = exc
+    raise error
 
 
 class GLRenderer:
-    """Renders a patch with moderngl. ``ctx`` may be an existing context (e.g. from a window)."""
+    """Renders a patch with moderngl. ``ctx`` may be an existing context.
 
-    def __init__(self, patch: Optional[Patch] = None, size=None, ctx=None, fps: float = 60.0, precision: str = "highp"):
+    ``compute=True`` opts into experimental rd/bleed kernels on OpenGL 4.3+.
+    Unsupported contexts or rejected kernels retain fragment rendering, with a
+    warning. ``compute_passes`` reports the number actually selected.
+    """
+
+    def __init__(self, patch: Optional[Patch] = None, size=None, ctx=None, fps: float = 60.0,
+                 precision: str = "highp", compute: bool = False):
         import moderngl
         self.gl = moderngl
         self.patch = patch or default_patch()
         self.size = tuple(size or self.patch.size)
         self.fps = float(fps)
-        self.ctx = ctx or _create_context()
+        self.ctx = ctx or _create_context(compute=compute)
         self.precision = precision
+        self.compute = compute
+        self.compute_passes = 0
+        self.compute_fallbacks = []
+        use_compute = compute and self.ctx.version_code >= 430
+        if compute and not use_compute:
+            self.compute_fallbacks.append("OpenGL 4.3 is required; using fragment shaders")
+        failed_kernels = set()
         self.frame = 0
         self.clock = RenderClock(self.fps)
         self._reduce_targets = {}
@@ -49,6 +67,19 @@ class GLRenderer:
         self._passes = []     # list of (output_name, target, program, vao, float_uniforms, sampler_uniforms)
         for prog in self.programs:
             for p in prog.passes:
+                gprog = None
+                if use_compute and p.compute and p.compute.kernel not in failed_kernels:
+                    from .compute import source
+                    try:
+                        gprog = self.ctx.compute_shader(source(p.compute, prog.float_uniforms))
+                    except Exception as e:
+                        failed_kernels.add(p.compute.kernel)
+                        self.compute_fallbacks.append(f"{p.compute.kernel} compute compilation failed; using fragment shaders: {e}")
+                if gprog is not None:
+                    self._passes.append((prog.output, p.target, gprog, None, prog.float_uniforms,
+                                         [u for u in prog.sampler_uniforms if u.name == p.compute.sampler]))
+                    self.compute_passes += 1
+                    continue
                 try:
                     gprog = self.ctx.program(vertex_shader=VERTEX_DESKTOP, fragment_shader=to_desktop(p.source))
                 except Exception as e:
@@ -56,6 +87,8 @@ class GLRenderer:
                     raise RuntimeError(f"shader compile error in {prog.output.name}/{p.target}:\n{e}\n{numbered}")
                 vao = self.ctx.vertex_array(gprog, [(self.vbo, "2f", "position")])
                 self._passes.append((prog.output, p.target, gprog, vao, prog.float_uniforms, prog.sampler_uniforms))
+        for reason in self.compute_fallbacks:
+            warnings.warn(reason, RuntimeWarning, stacklevel=2)
         self._copy = self.ctx.program(
             vertex_shader=VERTEX_DESKTOP,
             fragment_shader="#version 330 core\nuniform sampler2D tex; uniform vec2 resolution; uniform float compositeAlpha; out vec4 f;\n"
@@ -103,7 +136,9 @@ class GLRenderer:
             for t in m.get("texs", {}).values():
                 t.release()
         for _, _, gprog, vao, _, _ in self._passes:
-            vao.release(); gprog.release()
+            if vao is not None:
+                vao.release()
+            gprog.release()
         for sim in getattr(self, "_sims", []):
             sim.gl_release(self)
         for n in getattr(self, "_ncas", {}).values():
@@ -325,7 +360,8 @@ class GLRenderer:
                 self._swap(current)
             current = output
             dest = self.tmps[target] if target.startswith("tmp") else self.outs[output.name]["ring"][-1]
-            dest["fbo"].use()
+            if vao is not None:
+                dest["fbo"].use()
             self._set(gprog, "time", ctx.time)
             self._set(gprog, "resolution", (float(self.size[0]), float(self.size[1])))
             self._set(gprog, "mouse", (self.mouse[0] * self.size[0], self.mouse[1] * self.size[1]))
@@ -336,7 +372,19 @@ class GLRenderer:
                 tex = self._bind(u.source, output)
                 tex.use(location=i)
                 self._set(gprog, u.name, i)
-            vao.render(self.gl.TRIANGLES)
+            if vao is None:
+                from .compute import GROUP_SIZE
+                dest["tex"].bind_to_image(0, read=False, write=True)
+                gprog.run((self.size[0] + GROUP_SIZE - 1) // GROUP_SIZE,
+                          (self.size[1] + GROUP_SIZE - 1) // GROUP_SIZE)
+                # Publish image writes to later samplers, image writes, FBO
+                # operations (including readback), and texture read/copy APIs.
+                self.ctx.memory_barrier(self.gl.TEXTURE_FETCH_BARRIER_BIT |
+                                        self.gl.SHADER_IMAGE_ACCESS_BARRIER_BIT |
+                                        self.gl.FRAMEBUFFER_BARRIER_BIT |
+                                        self.gl.TEXTURE_UPDATE_BARRIER_BIT)
+            else:
+                vao.render(self.gl.TRIANGLES)
         if current is not None:
             self._swap(current)
         self._update_probes(wall_time)
@@ -454,8 +502,8 @@ void main() {
 
 
 def iter_frames_gl(patch: Optional[Patch] = None, seconds: float = 4.0, fps: float = 30.0, size=None,
-                   start: float = 0.0, warmup: int = 0):
-    r = GLRenderer(patch, size=size, fps=fps)
+                   start: float = 0.0, warmup: int = 0, compute: bool = False):
+    r = GLRenderer(patch, size=size, fps=fps, compute=compute)
     try:
         for i in range(warmup):
             r.step(start - (warmup - i) / fps)
@@ -470,8 +518,8 @@ def iter_frames_gl(patch: Optional[Patch] = None, seconds: float = 4.0, fps: flo
 
 
 def render_frames_gl(patch: Optional[Patch] = None, seconds: float = 4.0, fps: float = 30.0, size=None,
-                     start: float = 0.0, warmup: int = 0) -> list[np.ndarray]:
-    return list(iter_frames_gl(patch, seconds, fps, size, start, warmup))
+                     start: float = 0.0, warmup: int = 0, compute: bool = False) -> list[np.ndarray]:
+    return list(iter_frames_gl(patch, seconds, fps, size, start, warmup, compute))
 
 
 def live(patch: Optional[Patch] = None, size=(1280, 720), fps: float = 60.0, title: str = "hydrapy",
@@ -595,7 +643,7 @@ def _reload(old: "GLRenderer", loader, ctx, fps):
         with ResourceStage() as stage:
             patch = loader()
             carry_controls(old.patch, patch)
-            new = GLRenderer(patch, size=old.size, ctx=ctx, fps=fps)
+            new = GLRenderer(patch, size=old.size, ctx=ctx, fps=fps, compute=old.compute)
             for name, o in old.outs.items():
                 if name in new.outs:
                     for dest, source in zip(new.outs[name]["ring"], o["ring"]):
