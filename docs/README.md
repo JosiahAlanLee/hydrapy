@@ -19,6 +19,7 @@ guide for the work you want to make. Run commands from the repository root.
 | [Animated thi.ng adaptations](TOXI_ANIMATION_SOURCES.md) | Cellular rules, Voronoi fields, curves, vegetation, export limits and source provenance |
 | [Pixel clocks](pixel-oscillators.md) | Independent pixel oscillators, two-color moiré, Studio controls and a live browser study |
 | [Bell Riots video](bell-riots-video.md) | Full-track edit combining rule fields, pixel clocks, thi.ng cellular patterns and entropy locking |
+| [Bell Riots: Unfolding edit](bell-riots-sparse.md) | Closing six minutes with sparse two-layer composition and kick-triggered recursive folds |
 
 ## Reference and development
 
