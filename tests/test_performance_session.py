@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import runpy
+import shutil
 import signal
 import socket
 import subprocess
@@ -262,32 +263,113 @@ def test_failed_launch_cleans_up_earlier_child(tmp_path):
     assert all(child.poll() is not None for _, child in children.children)
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group shutdown")
-def test_cli_sigterm_resets_route_and_reaps_its_child(tmp_path):
-    from pythonosc.osc_message import OscMessage
-    receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    receiver.bind(("127.0.0.1", 0))
-    receiver.settimeout(5)
-    pid_path = tmp_path / "child.pid"
-    code = ("import os,time; from pathlib import Path; "
-            f"Path({str(pid_path)!r}).write_text(str(os.getpid())); time.sleep(60)")
-    session = score([Event(0, "voice", "/gate", (1,))], beats=128,
-                    routes={"voice": Route(receiver.getsockname()[1], reset=(Message("/gate", (0,)),))},
-                    processes=(Process("owned", ("{python}", "-c", code)),))
-    path = tmp_path / "session.json"
-    path.write_text(session.to_json())
-    process = subprocess.Popen([sys.executable, "-m", "hydrapy.session", str(path),
-                                "--launch", "--lead-in", ".2"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+POSIX = pytest.mark.skipif(os.name != "posix", reason="POSIX signals and process-group shutdown")
+
+
+def _running(pid):
     try:
-        assert OscMessage(receiver.recv(4096)).params == [1]
-        process.send_signal(signal.SIGTERM)
-        assert OscMessage(receiver.recv(4096)).params == [0]
-        process.communicate(timeout=5)
-        assert process.returncode == 128 + signal.SIGTERM
-        with pytest.raises(ProcessLookupError):
-            os.kill(int(pid_path.read_text()), 0)
-    finally:
-        if process.poll() is None:
-            process.kill()
-            process.communicate(timeout=5)
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _inherited_ignore(name):
+    """SIGINT/SIGHUP ignored by whatever started pytest stay ignored in the runner, by design."""
+    return signal.getsignal(getattr(signal, name)) == signal.SIG_IGN
+
+
+@pytest.fixture
+def launched(tmp_path):
+    """Start ``python -m hydrapy.session --launch`` on a long score with one owned child.
+
+    Returns (runner, recv, child_pid) after the first gate message has arrived and the
+    child is up; ``recv(timeout)`` reads the next OSC message's args from the route.
+    """
+    from pythonosc.osc_message import OscMessage
+    started = []
+
+    def start(child_setup="", prefix=()):
+        receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        receiver.bind(("127.0.0.1", 0))
+        pid_path = tmp_path / "child.pid"
+        code = ("import os,signal,time; from pathlib import Path; " + child_setup +
+                f"Path({str(pid_path)!r}).write_text(str(os.getpid())); time.sleep(60)")
+        session = score([Event(0, "voice", "/gate", (1,))], beats=128,
+                        routes={"voice": Route(receiver.getsockname()[1], reset=(Message("/gate", (0,)),))},
+                        processes=(Process("owned", ("{python}", "-c", code)),))
+        path = tmp_path / "session.json"
+        path.write_text(session.to_json())
+        runner = subprocess.Popen([*prefix, sys.executable, "-m", "hydrapy.session", str(path),
+                                   "--launch", "--lead-in", ".2"], stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        started.append((runner, receiver, pid_path))
+
+        def recv(timeout=5):
+            receiver.settimeout(timeout)
+            return OscMessage(receiver.recv(4096)).params
+
+        assert recv() == [1]
+        deadline = time.monotonic() + 5
+        while not (pid_path.exists() and pid_path.read_text()) and time.monotonic() < deadline:
+            time.sleep(.01)
+        return runner, recv, int(pid_path.read_text())
+
+    yield start
+    for runner, receiver, pid_path in started:
+        # Child first: a leaked child holds the runner's pipes open.
+        text = pid_path.read_text() if pid_path.exists() else ""
+        if text:
+            try:
+                os.kill(int(text), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if runner.poll() is None:
+            runner.kill()
+            runner.communicate(timeout=5)
         receiver.close()
+
+
+@POSIX
+@pytest.mark.parametrize("name", ["SIGTERM", "SIGINT", "SIGHUP"])
+def test_cli_signal_resets_route_and_reaps_its_child(launched, name):
+    if name != "SIGTERM" and _inherited_ignore(name):
+        pytest.skip(f"{name} is ignored by whatever started pytest")
+    sig = getattr(signal, name)
+    runner, recv, child = launched()
+    runner.send_signal(sig)
+    assert recv() == [0]
+    runner.communicate(timeout=5)
+    assert runner.returncode == 128 + sig
+    assert not _running(child)
+
+
+@POSIX
+@pytest.mark.parametrize("second", ["SIGTERM", "SIGINT"])
+def test_repeated_signal_does_not_cancel_kill_escalation(launched, second):
+    if second == "SIGINT" and _inherited_ignore("SIGINT"):
+        pytest.skip("SIGINT is ignored by whatever started pytest")
+    # This child ignores SIGTERM, so only the runner's SIGKILL fallback can stop it.
+    runner, recv, child = launched("signal.signal(signal.SIGTERM, signal.SIG_IGN); ")
+    runner.send_signal(signal.SIGTERM)
+    assert recv() == [0]              # resets are out; the runner now waits 2 s on the child
+    time.sleep(.3)
+    runner.send_signal(getattr(signal, second))
+    runner.communicate(timeout=10)
+    assert runner.returncode == 128 + signal.SIGTERM
+    assert not _running(child)
+
+
+@POSIX
+@pytest.mark.skipif(shutil.which("nohup") is None, reason="needs nohup")
+def test_nohup_session_plays_through_hangup(launched):
+    runner, recv, child = launched(prefix=("nohup",))
+    runner.send_signal(signal.SIGHUP)
+    with pytest.raises(socket.timeout):
+        recv(.5)                      # no reset: the hangup was ignored
+    assert runner.poll() is None and _running(child)
+    runner.send_signal(signal.SIGTERM)
+    assert recv() == [0]
+    runner.communicate(timeout=5)
+    assert runner.returncode == 128 + signal.SIGTERM
+    assert not _running(child)

@@ -235,10 +235,17 @@ def execute(args):
         return
     with ExitStack() as stack:
         if threading.current_thread() is threading.main_thread():
+            # Kill, Ctrl-C and a closed terminal (SIGHUP) share one teardown; repeats are
+            # ignored once it starts so they cannot cut off resets or SIGKILL escalation.
+            # SIGINT/SIGHUP already ignored by the launcher (a background job, nohup) stay so.
+            caught = [signal.SIGTERM] + [s for s in (signal.SIGINT, getattr(signal, "SIGHUP", None))
+                                         if s is not None and signal.getsignal(s) != signal.SIG_IGN]
             def terminate(signum, frame):
+                for s in caught:
+                    signal.signal(s, signal.SIG_IGN)
                 raise SystemExit(128 + signum)
-            previous = signal.signal(signal.SIGTERM, terminate)
-            stack.callback(signal.signal, signal.SIGTERM, previous)
+            for s in caught:
+                stack.callback(signal.signal, s, signal.signal(s, terminate))
         log = stack.enter_context(open(args.record, "x", encoding="utf-8")) if args.record else None
         if log:
             log.write(json.dumps(dict(type="session", session=session.to_dict(), repeats=args.repeat)) + "\n")
