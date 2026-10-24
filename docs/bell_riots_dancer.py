@@ -138,7 +138,8 @@ DANCER_FRAGMENT=FRAGMENT.replace('uniform sampler2D cells,',
 
 
 class DancerRenderer(CounterpointRenderer):
-    def __init__(self,*args,matte,**kwargs):
+    def __init__(self,*args,matte,title_scale=1.,**kwargs):
+        self.title_scale=title_scale
         super().__init__(*args,**kwargs)
         self.dance_clock=DanceClock(self.score.clock.times)
         self.dancer=DelayedDancer(matte,self.dance_clock,self.ctx)
@@ -162,8 +163,8 @@ class DancerRenderer(CounterpointRenderer):
         self.dancer.release();super().release()
 
 
-def frames(score,size,fps,offset,length,report,art_root,cache,matte,checkpoints=None):
-    r=DancerRenderer(score,size,art_root,cache,matte=matte)
+def frames(score,size,fps,offset,length,report,art_root,cache,matte,checkpoints=None,title_scale=1.):
+    r=DancerRenderer(score,size,art_root,cache,matte=matte,title_scale=title_scale)
     report['renderer']=r.ctx.info['GL_RENDERER'];wall=last=time.monotonic()
     count=math.ceil(length*fps);dark=[]
     if checkpoints:checkpoints.mkdir(parents=True,exist_ok=True)
@@ -192,10 +193,12 @@ def main():
     p.add_argument('--fps',type=float,default=30.);p.add_argument('--offset',type=float,default=0.)
     p.add_argument('--seconds',type=float);p.add_argument('--bitrate',default='7M')
     p.add_argument('--encoder',default='auto');p.add_argument('--checkpoints',type=Path)
+    p.add_argument('--title-scale',type=float,default=1.,help='title type size; about 2.5 reads on a phone')
     a=p.parse_args();size=tuple(map(int,a.size.lower().split('x')))
     if len(size)!=2 or min(size)<96 or any(x%2 for x in size):p.error('Use even dimensions >=96')
     if not math.isfinite(a.fps) or a.fps<=0 or not math.isfinite(a.offset) or a.offset<0:p.error('Invalid fps/offset')
     if a.seconds is not None and (not math.isfinite(a.seconds) or a.seconds<=0):p.error('Invalid duration')
+    if not math.isfinite(a.title_scale) or not .5<=a.title_scale<=4:p.error('title scale must be 0.5-4')
     with np.load(a.controls) as z:controls={k:z[k] for k in z.files}
     with np.load(a.kicks) as z:score=CounterpointScore(controls,z['times'],z['strength'])
     offset=round(a.offset*a.fps)/a.fps
@@ -209,11 +212,11 @@ def main():
         clock='measured kicks assigned to score beat numbers; missing beats interpolated',
         delay_operator='HydraPy delay(o0, frames)',delay_ticks=DELAY_TICKS,
         ticks_per_half_beat=30,delay_half_beats=[1,2,3],delay_gains=DELAY_GAINS,
-        paint_matte_seconds=sum(c['end']-c['start'] for c in score.cues if c['mode']==1))
+        title_scale=a.title_scale,paint_matte_seconds=sum(c['end']-c['start'] for c in score.cues if c['mode']==1))
     print(f'{score.duration:.6f}s | dancer at {HALF_BPM:g} BPM half time | HydraPy delay',flush=True)
     with tempfile.TemporaryDirectory(prefix='bell-dancer-',dir=a.out.parent) as tmp:
         tmp=Path(tmp)
-        H.save_mp4(frames(score,size,a.fps,offset,length,report,a.art_root,a.assets_cache,a.matte,a.checkpoints),
+        H.save_mp4(frames(score,size,a.fps,offset,length,report,a.art_root,a.assets_cache,a.matte,a.checkpoints,a.title_scale),
             tmp/'video.mp4',fps=a.fps,bitrate=a.bitrate,encoder=a.encoder,
             on_encoder=lambda e:print('Encoder:',e.name,flush=True))
         subprocess.run(['ffmpeg','-v','error','-i',str(tmp/'video.mp4'),'-ss',str(offset),'-t',str(length),'-i',str(a.mix),
