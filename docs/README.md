@@ -22,6 +22,7 @@ guide for the work you want to make. Run commands from the repository root.
 | [Bell Riots: Unfolding edit](bell-riots-sparse.md) | Closing six minutes with sparse two-layer composition and kick-triggered recursive folds |
 | [Bell Riots: counterpoint mix / edit 4](bell-riots-counterpoint.md) | Mix the external Pd score and drive paired visuals from hats, cowbell and FM stabs |
 | [Bell Riots: half-time dancer / edit 5](bell-riots-dancer.md) | Kick-locked Body Roll footage through HydraPy delay, used as a paint matte over moiré |
+| [Bell Riots: alternate-edit handoff](bell-riots-handoff.md) | Edit 5 measured against the grid, a hat re-score to its cuts, and the open choices for an alternate version |
 
 ## Reference and development
 
