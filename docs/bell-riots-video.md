@@ -1,5 +1,8 @@
 # Bell Riots Pt 2
 
+The [Unfolding edit](bell-riots-sparse.md) uses the closing six minutes with a
+strict two-layer limit, sparse accents and kick-triggered folds.
+
 The shorter [organic edit](bell-riots-organic.md) combines the closing six minutes
 with Physarum, mirrored botanical/farm drawings and painted film on independent
 clocks. This page documents the original full-track version.

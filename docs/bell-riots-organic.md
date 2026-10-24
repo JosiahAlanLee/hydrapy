@@ -1,5 +1,8 @@
 # Bell Riots Pt 2 — organic edit
 
+The later [Unfolding edit](bell-riots-sparse.md) revisits these materials one at
+a time, with more negative space and a strict two-layer limit.
+
 A second composition using the final approximately six minutes of the original
 recording. The new edit begins at **434.461896 seconds (7:14.462)** and preserves
 the tail at 795.554694 seconds: **361.092798 seconds (6:01.093)**. The start is the
