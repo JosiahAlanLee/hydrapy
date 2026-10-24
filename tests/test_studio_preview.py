@@ -123,6 +123,8 @@ def test_preview_drops_preserve_feedback_timing_and_audio(backend, multi):
         r = renderer(backend, p)
         session = Session.__new__(Session)
         session.renderer, session.preview = r, Preview()
+        session.aux_preview = Preview()
+        session.aux_preview.reset('o1')
         session.path, session.paused, session.preview_dirty = None, False, True
         session.clock_time, session.render_metrics = 0., {}
         hooks = []
@@ -134,6 +136,8 @@ def test_preview_drops_preserve_feedback_timing_and_audio(backend, multi):
                     # A slow consumer: ask for only every seventh frame.
                     if i % 7 == 0:
                         session.preview.frame('o0', timeout=0)
+                    if i % 5 == 0:
+                        session.aux_preview.frame('o1', timeout=0)
                     session._pictures()
             buffers = []
             for o in p.active_outputs():
@@ -141,7 +145,7 @@ def test_preview_drops_preserve_feedback_timing_and_audio(backend, multi):
                 buffers.append(r.read_rgba() if hasattr(r, 'read_rgba') else r.displayed().copy())
             return buffers, r.frame, r.clock.updates, hooks, sound.samples.copy()
         finally:
-            clear_hooks(); session.preview.close(); release(r)
+            clear_hooks(); session.preview.close(); session.aux_preview.close(); release(r)
     baseline, preview = run(False), run(True)
     assert baseline[1:4] == preview[1:4]
     assert baseline[1:3] == (60, 12)

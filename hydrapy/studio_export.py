@@ -46,6 +46,14 @@ def run(job_path):
                 seconds = 1 / spec['fps'] if spec['format'] == 'png' else spec['seconds']
                 start = spec['time'] if spec['format'] == 'png' else 0
                 iterator = render(patch, seconds=seconds, fps=spec['fps'], size=tuple(spec['size']), start=start)
+                if spec.get('tracker'):
+                    from .studio_tracker import Tracker
+                    score = spec['tracker']
+                    tracker = Tracker(score['document'])
+                    tracker.enabled = True
+                    beat = score['beat'] if spec['format'] == 'png' else 0.
+                    iterator = tracker.frames(patch, seconds=seconds, fps=spec['fps'], size=tuple(spec['size']),
+                                              backend=spec['backend'], start=start, beat=beat)
                 total = max(1, round(seconds * spec['fps']))
                 selected = ''
                 def encoder(e):
