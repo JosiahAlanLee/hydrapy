@@ -88,6 +88,8 @@ class FrameSource(Texture):
     Works in the NumPy and desktop GL renderers. Unlike Bank, GL updates one
     texture instead of keeping every past frame. The callable must produce a
     deterministic result for the requested time, including a backwards seek.
+    ``draw`` may return ``None`` when nothing changed since its last frame: the previous
+    frame stands and nothing is copied or uploaded (``version`` only moves on a new frame).
     Live HTML/Hydra JS export requires baking a finite sequence into a Bank.
     """
     _counter = 0
@@ -98,19 +100,25 @@ class FrameSource(Texture):
         self.draw = draw
         self._time = None
         self._frame = self._array = None
+        self.version = 0
 
     def frame_at(self, t):
         t = float(t)
         if not math.isfinite(t):
             raise ValueError("frame time must be finite")
         if self._time != t:
-            frame = np.asarray(self.draw(t))
+            frame = self.draw(t)
+            self._time = t
+            if frame is None and self._frame is not None:
+                return self._frame                     # unchanged: no copy, no new version
+            frame = np.asarray(frame)
             if frame.dtype != np.uint8 or frame.ndim != 3 or frame.shape[2] not in (3, 4) or min(frame.shape[:2]) < 1:
                 raise ValueError("FrameSource.draw must return a nonempty uint8 RGB/RGBA image")
             if frame.shape[2] == 3:
                 frame = np.concatenate([frame, np.full(frame.shape[:2] + (1,), 255, np.uint8)], axis=-1)
             self._frame = np.array(frame, copy=True, order="C")
-            self._time, self._array = t, None
+            self._array = None
+            self.version += 1
         return self._frame
 
     def array_at(self, t):

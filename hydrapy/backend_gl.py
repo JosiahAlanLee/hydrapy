@@ -116,10 +116,11 @@ class GLRenderer:
                     passes.append((p.target, kernel, None, prog.float_uniforms,
                                    [u for u in prog.sampler_uniforms if u.name == p.compute.sampler]))
                     continue
+            source = to_desktop(p.source)
             try:
-                gprog = self.ctx.program(vertex_shader=VERTEX_DESKTOP, fragment_shader=to_desktop(p.source))
+                gprog = self.ctx.program(vertex_shader=VERTEX_DESKTOP, fragment_shader=source)
             except Exception as e:
-                numbered = "\n".join(f"{i + 1:4d}: {l}" for i, l in enumerate(to_desktop(p.source).splitlines()))
+                numbered = "\n".join(f"{i + 1:4d}: {l}" for i, l in enumerate(source.splitlines()))
                 raise RuntimeError(f"shader compile error in {prog.output.name}/{p.target}:\n{e}\n{numbered}")
             vao = self.ctx.vertex_array(gprog, [(self.vbo, "2f", "position")])
             passes.append((p.target, gprog, vao, prog.float_uniforms, prog.sampler_uniforms))
@@ -234,7 +235,7 @@ class GLRenderer:
                         m["tex"].release()
                     m["tex"] = self.ctx.texture((a.shape[1], a.shape[0]), 4, dtype="f4")
                     m["tex"].filter = (self.gl.LINEAR, self.gl.LINEAR)
-                m["tex"].write(a.tobytes())
+                m["tex"].write(a)
                 m["frame"] = self.frame
             return m["tex"]
         if ref.name in self.media:
@@ -253,14 +254,17 @@ class GLRenderer:
                     raise RuntimeError("Camera sources in the GL backend need opencv-python (pip install opencv-python)")
         if isinstance(ref, FrameSource):
             if m.get("time") != self.ctx_time:
-                frame = np.ascontiguousarray(ref.frame_at(self.ctx_time)[::-1])
-                size = (frame.shape[1], frame.shape[0])
-                if m["tex"] is None or m["tex"].size != size:
-                    if m["tex"] is not None:
-                        m["tex"].release()
-                    m["tex"] = self.ctx.texture(size, 4)
-                m["tex"].write(frame.tobytes())
+                frame = ref.frame_at(self.ctx_time)
                 m["time"] = self.ctx_time
+                if m.get("version") != ref.version:        # upload only frames that changed
+                    frame = np.ascontiguousarray(frame[::-1])
+                    size = (frame.shape[1], frame.shape[0])
+                    if m["tex"] is None or m["tex"].size != size:
+                        if m["tex"] is not None:
+                            m["tex"].release()
+                        m["tex"] = self.ctx.texture(size, 4)
+                    m["tex"].write(frame)
+                    m["version"] = ref.version
             return m["tex"]
         if hasattr(ref, "array_at"):          # Bank, Quilt: one texture per frame, bound by index
             i = ref.index_at(self.ctx_time)
@@ -517,13 +521,7 @@ void main() {
 
     def read(self) -> np.ndarray:
         """The displayed output over black as RGB, row 0 = top."""
-        self._present["fbo"].use()
-        self.ctx.viewport = (0, 0, *self.size)
-        self.displayed_texture().use(location=0)
-        self._set(self._copy, "tex", 0)
-        self._set(self._copy, "resolution", tuple(map(float, self.size)))
-        self._set(self._copy, "compositeAlpha", float(self.patch.composite_alpha))
-        self._copy_vao.render(self.gl.TRIANGLES)
+        self._present_frame()
         data = self._present["fbo"].read(components=3, dtype="f1")
         return np.frombuffer(data, dtype=np.uint8).reshape(self.size[1], self.size[0], 3)[::-1].copy()
 
@@ -542,10 +540,39 @@ void main() {
         self._set(self._copy, "compositeAlpha", float(self.patch.composite_alpha))
         self._copy_vao.render(self.gl.TRIANGLES)
 
-    def frames(self, n: int, start: float = 0.0):
-        for i in range(n):
-            self.step(start + i / self.fps)
-            yield self.read()
+    def _present_frame(self):
+        self._present["fbo"].use()
+        self.ctx.viewport = (0, 0, *self.size)
+        self.displayed_texture().use(location=0)
+        self._set(self._copy, "tex", 0)
+        self._set(self._copy, "resolution", tuple(map(float, self.size)))
+        self._set(self._copy, "compositeAlpha", float(self.patch.composite_alpha))
+        self._copy_vao.render(self.gl.TRIANGLES)
+
+    def frames(self, n: int, start: float = 0.0, pipelined: bool = True):
+        """Yield n RGB frames (row 0 = top). ``pipelined``: each frame is read back through a pixel buffer
+        while the GPU renders the next one, instead of stalling on every frame (same frames, same order)."""
+        if not pipelined:
+            for i in range(n):
+                self.step(start + i / self.fps)
+                yield self.read()
+            return
+        w, h = self.size
+        pbos = [self.ctx.buffer(reserve=w * h * 3) for _ in range(2)]
+        try:
+            pending = None
+            for i in range(n):
+                self.step(start + i / self.fps)
+                self._present_frame()
+                self._present["fbo"].read_into(pbos[i % 2], components=3, alignment=1)
+                if pending is not None:
+                    yield np.frombuffer(pending.read(), np.uint8).reshape(h, w, 3)[::-1].copy()
+                pending = pbos[i % 2]
+            if pending is not None:
+                yield np.frombuffer(pending.read(), np.uint8).reshape(h, w, 3)[::-1].copy()
+        finally:
+            for b in pbos:
+                b.release()
 
 
 def iter_frames_gl(patch: Optional[Patch] = None, seconds: float = 4.0, fps: float = 30.0, size=None,

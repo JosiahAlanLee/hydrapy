@@ -799,3 +799,39 @@ def test_html_export_carries_output_scales():
     assert spec["scales"] == {"o1": 0.25, "o2": 0.5}
     from hydrapy.export import RUNTIME_JS
     assert "function osz(n)" in RUNTIME_JS and "bindRef(s.ref, s.delay, o.name)" in RUNTIME_JS
+
+
+@pytest.mark.skipif(not _gl_available(), reason="no GL")
+def test_pipelined_readback_yields_the_same_frames():
+    from hydrapy.backend_gl import GLRenderer
+    def frames(pipelined):
+        p = Patch(size=(40, 24))
+        src(p.o0).scale(1.03).blend(osc(7, 0.2, 1.1).rotate(0, 0.3), 0.3).out(p.o0, patch=p)
+        r = GLRenderer(p, size=(40, 24), fps=12)
+        out = list(r.frames(9, pipelined=pipelined))
+        r.release()
+        return out
+    a, b = frames(False), frames(True)
+    assert len(a) == len(b) == 9 and all(np.array_equal(x, y) for x, y in zip(a, b))
+
+
+def test_frame_source_may_report_an_unchanged_frame():
+    calls = []
+    def draw(t):
+        calls.append(t)
+        if t >= 1.0:
+            return None
+        return np.full((4, 6, 4), int(t * 100), np.uint8)
+    fs = FrameSource(draw)
+    a = fs.frame_at(0.5)
+    v = fs.version
+    b = fs.frame_at(1.5)
+    assert b is a and fs.version == v and calls == [0.5, 1.5]
+    if _gl_available():
+        from hydrapy.backend_gl import GLRenderer
+        p = Patch(size=(6, 4)); src(fs).out(p.o0, patch=p)
+        r = GLRenderer(p, size=(6, 4), fps=10)
+        r.step(0.5); first = r.read_rgba().copy()
+        r.step(1.5)
+        assert np.array_equal(r.read_rgba(), first) and r.media[fs.name]["version"] == fs.version
+        r.release()
