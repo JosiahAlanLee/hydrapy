@@ -171,3 +171,31 @@ def test_cli_compute_selects_gpu_without_gpu_flag(monkeypatch, tmp_path):
     monkeypatch.setattr(export, "save_png", lambda *args, **kwargs: None)
     cli.main(["render", str(patch), "--compute", "--out", str(tmp_path / "frame.png")])
     assert called["compute"] is True
+
+
+def test_compute_kernels_live_inside_specialised_variants(glctx):
+    """A faded-out branch drops its rd passes; when it fades in, the kernels run; results match fragments."""
+    from hydrapy.backend_gl import GLRenderer
+    fade = H.Fn(lambda c: 0.0 if c.time < 0.2 else 0.6)
+    def build():
+        p = H.Patch(size=(40, 24))
+        seeded = H.src(p.o1).add(H.shape(4, 0.2).color(0, 1, 0), 0.1)
+        seeded.rd(iterations=4).out(p.o1, patch=p)
+        H.osc(5, 0.1, 0.8).blend(H.src(p.o1).rd(iterations=3), fade).out(p.o0, patch=p)
+        return p
+    compute = GLRenderer(build(), fps=10, ctx=glctx, compute=True)
+    fragment = GLRenderer(build(), fps=10, ctx=glctx)
+    try:
+        if not compute.compute_passes:
+            pytest.skip("no OpenGL 4.3 compute here: " + "; ".join(compute.compute_fallbacks))
+        full_count = compute.compute_passes
+        for i in range(6):
+            compute.step(i / 10), fragment.step(i / 10)
+            np.testing.assert_allclose(compute.read_rgba(), fragment.read_rgba(), atol=0.004)
+        variants = {k: v for (name, k), v in compute._variants.items() if name == "o0"}
+        idle = next(v for k, v in variants.items() if k)                    # fade == 0: the branch is gone
+        assert sum(vao is None for _, _, vao, _, _ in idle) == 0
+        assert sum(vao is None for _, _, vao, _, _ in variants[None]) >= 2   # fade > 0: kernels in the branch
+        assert compute.compute_passes == full_count                        # counts the full programs only
+    finally:
+        compute.release(); fragment.release()
