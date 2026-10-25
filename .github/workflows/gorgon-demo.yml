@@ -1,0 +1,64 @@
+name: Gorgon video capture
+on:
+  push:
+    branches: ['codex/gorgon-video-demo']
+    paths: ['tools/gorgon_demo/**', '.github/workflows/gorgon-demo.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  capture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: JosiahAlanLee/DSP_Emulation
+          ref: b42c3e00a4577d5d346a0f008cd9a29f7b1808c3
+          path: .demo-dsp
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.12'
+      - name: Install recording dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends xvfb openbox xdotool pulseaudio ffmpeg libjack-jackd2-0 libpulse0 libjansson-dev libgl1-mesa-dri libegl1 zstd zenity
+          python -m pip install -e '.[gpu,video]' playwright==1.51.0 mss
+          python -m playwright install --with-deps chromium
+          curl --fail --location https://vcvrack.com/downloads/Rack-SDK-2.6.4-lin-x64.zip -o /tmp/sdk.zip
+          unzip -q /tmp/sdk.zip -d /tmp
+          curl --fail --location https://vcvrack.com/downloads/RackFree-2.6.4-lin-x64.zip -o /tmp/rack.zip
+          unzip -q /tmp/rack.zip -d /tmp
+      - name: Build Gorgon and the recording fixture
+        run: python tools/gorgon_demo/capture.py --prepare
+      - name: Record the actual tracker and Rack patch
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+          OPENBLAS_NUM_THREADS: '1'
+          OMP_NUM_THREADS: '1'
+        run: |
+          Xvfb :99 -screen 0 1600x900x24 -ac > /tmp/xvfb.log 2>&1 &
+          sleep 1
+          DISPLAY=:99 openbox > /tmp/openbox.log 2>&1 &
+          pulseaudio --start --exit-idle-time=-1
+          pactl load-module module-null-sink sink_name=demo
+          pactl set-default-sink demo
+          pactl set-default-source demo.monitor
+          python tools/gorgon_demo/capture.py
+      - name: Upload capture and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gorgon-demo-capture
+          path: |
+            demo_capture/*.mp4
+            demo_capture/*.webm
+            demo_capture/*.wav
+            demo_capture/*.png
+            demo_capture/*.json
+            demo_capture/*.csv
+            demo_capture/*.vcv
+            demo_capture/rack-user/log.txt
+            demo_capture/rack.stdout
+          retention-days: 7
