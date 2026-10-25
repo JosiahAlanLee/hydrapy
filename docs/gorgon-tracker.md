@@ -235,8 +235,11 @@ the driver. CV is not included in video/audio exports.
 
 ## VCV Rack bridge
 
-The [Gorgon module](https://github.com/JosiahAlanLee/DSP_Emulation/tree/main/vcv/gorgon)
-for VCV Rack 2 links Rack to Studio with no configuration. On start Studio writes
+The [Gorgon module](https://github.com/JosiahAlanLee/Gorgon/tree/main/rack)
+for VCV Rack 2 links Rack to Studio with no configuration. The endpoints below,
+the score format and the signal semantics are specified in the Gorgon
+repository's [`spec/`](https://github.com/JosiahAlanLee/Gorgon/tree/main/spec);
+this page describes Studio's implementation of them. On start Studio writes
 `~/.hydrapy/studio.json` (port, session token, root; readable only by you) and
 removes it on exit if it is still its own. Set `HYDRAPY_STUDIO_FILE` to use another
 path. The module reads that file and polls Studio on loopback.
@@ -266,7 +269,7 @@ The endpoints are local and need the session token like every other route:
 independently of the score revision. Ordinary score edits do not restart a
 follower's reset pulse or discard held notes. The browser endpoint and transport
 replies also include it. The Gorgon integration workflow runs real Chromium
-tests and connects the VCV bridge from DSP_Emulation's `main` to this Studio.
+tests and connects the Rack module from the Gorgon repository's `main` to this Studio.
 
 ## Preview and measurements
 
