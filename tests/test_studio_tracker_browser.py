@@ -175,3 +175,25 @@ def test_download_uses_exact_saved_score_after_studio_output_sync(workspace):
     saved = json.loads(Path(download.value.path()).read_text())
     assert saved == json.loads((root/'.hydrapy/tracker.json').read_text())
     assert saved['modes']['program'] == 'o1'
+
+
+def test_browser_synth_continues_across_repeated_pattern_wraps(workspace):
+    session, page, context, root = workspace
+    document = json.loads(json.dumps(session.tracker.document))
+    document.update(bpm=200, loop=True, pattern=0)
+    for pattern in document['patterns']:
+        pattern['audio'] = [[None] * 64 for _ in range(4)]
+    document['patterns'][0]['audio'][1][0] = {'note': 'A-4', 'vel': 100}
+    file = root/'loop.json'; file.write_text(json.dumps(document))
+    page.locator('#importFile').set_input_files(file)
+    page.wait_for_function("document.getElementById('toast').textContent.startsWith('Score loaded')")
+    page.evaluate('''() => {
+      window.synthOscillators=0;
+      const create=AudioContext.prototype.createOscillator;
+      AudioContext.prototype.createOscillator=function(){synthOscillators++;return create.call(this);};
+    }''')
+    page.locator('#audioBtn').click()
+    page.get_by_role('button', name='Play', exact=True).click()
+    # Two oscillators per FM note, once per 4.8-second loop.
+    page.wait_for_function('synthOscillators>=6', timeout=17000)
+    assert page.evaluate('synthOscillators') == 6

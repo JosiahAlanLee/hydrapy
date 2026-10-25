@@ -73,6 +73,7 @@ function toast(message){$('toast').textContent=message;$('toast').classList.add(
 let remote = null, revision = 0, pendingScore = null, scoreRequest = null, scoreTimer;
 let transportQueue = Promise.resolve(), conflicted = false;
 let transportPending = 0, transportEpoch = 0;
+let transportRevision = null;
 const preview = new PreviewStream(outputType === 'aux' ? 'aux' : 'program');
 window.gorgonPreview = preview.stats;
 const escapeHTML = value => String(value).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -104,10 +105,17 @@ async function flushScore(){
   if (pendingScore) return flushScore();
 }
 function adoptTransport(result, elapsed=0){
-  const old = nowBeat();
+  const old = rawBeat(), length = state.loop ? 16 : 64;
   const next = normalizeBeat(result.beat + (result.playing ? elapsed * state.bpm / 60 : 0));
-  if (playing !== result.playing || Math.abs(next-old) > .6) stopVoices();
-  anchorBeat=next; anchorTime=performance.now(); playing=result.playing;
+  // Keep the audio scheduler on an unwrapped beat across ordinary loop wraps.
+  // Explicit seeks still cancel its lookahead, even for a short seek.
+  const error = mod(next-normalizeBeat(old)+length/2,length)-length/2;
+  const discontinuity = playing !== result.playing || Math.abs(error) > .6 ||
+    (result.transport_revision !== undefined && result.transport_revision !== transportRevision);
+  if (discontinuity) stopVoices();
+  anchorBeat=discontinuity ? next : old+error;
+  anchorTime=performance.now(); playing=result.playing;
+  transportRevision=result.transport_revision ?? transportRevision;
   if (result.blackout !== undefined) blackout=result.blackout;
   $('blackoutBadge').hidden=!blackout;
   $('blackoutBtn').setAttribute('aria-pressed',blackout);
