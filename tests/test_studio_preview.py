@@ -91,6 +91,23 @@ def test_thumbnail_reads_are_staggered_and_stop_without_viewers():
         p.close()
 
 
+def test_frame_only_viewer_does_not_request_thumbnails_or_cancel_studio_viewer():
+    p = Preview()
+    try:
+        p.frame('o0', timeout=0, thumbnails=False)
+        now = time.monotonic()
+        assert p.plan(now) == (True, None)
+        # A simultaneous Studio window still gets its output picker thumbnails.
+        p.frame('o0', timeout=0)
+        p.frame('o0', timeout=0, thumbnails=False)
+        assert p.plan(now + .01) == (True, 'o0')
+        # Gorgon keeps requesting selected frames after Studio goes away.
+        p.frame('o0', timeout=0, thumbnails=False)
+        assert p.plan(now + 3) == (True, None)
+    finally:
+        p.close()
+
+
 def renderer(backend, patch, size=(32, 18)):
     if backend == 'cpu':
         from hydrapy.backend_np import Renderer

@@ -758,7 +758,10 @@ def make_server(session, port=8765):
                     if bus not in ('program', 'aux'):
                         raise ValueError('bus must be program or aux')
                     preview = session.aux_preview if bus == 'aux' else session.preview
-                    frame = preview.frame(output, after)
+                    # Only Studio's output picker displays the four thumbnails.
+                    # Gorgon and its output windows need the selected frame only.
+                    thumbnails = args.get('thumbnails', ['1'])[0] != '0'
+                    frame = preview.frame(output, after, thumbnails=thumbnails)
                     if frame is None:
                         return self._send(204, b'', 'image/jpeg')
                     sent = time.monotonic()

@@ -76,13 +76,14 @@ class Preview:
                 self.pending = item
             self.condition.notify_all()
 
-    def frame(self, output, after=-1, timeout=1.):
+    def frame(self, output, after=-1, timeout=1., *, thumbnails=True):
         deadline = time.monotonic() + timeout
         with self.condition:
             if output != self.output:
                 return None
             self.requested = True
-            self.active_until = time.monotonic() + 2.
+            if thumbnails:
+                self.active_until = time.monotonic() + 2.
             while self.running and output == self.output:
                 if self.latest and self.latest['sequence'] > after:
                     return self.latest
