@@ -496,6 +496,10 @@ class Patch:
         self.scales: dict = {}          # output index -> render scale (Chain.out(scale=...)); absent = 1
         self.probes: list = []          # live.Probe instances, updated after every frame
         self.transport = None           # live.Transport (Link, MidiClock) for `hydrapy live`; None = wall clock
+        self.scenes: dict = {}          # name -> (output index, chain, blend transform); see scenes.py
+        self.scene_bases: dict = {}     # output index -> the chain under that output's scenes
+        self.scene_weights = None       # name -> 0..1, set by the tracker each frame; None = not driven
+        self.tracker_frame = None       # the tracker's lane values this frame (scenes.TrackerSignal)
 
     def assign(self, output: Output, chain: Chain):
         # outputs are matched by index, so the global o0..o3 work with any patch
@@ -512,6 +516,8 @@ class Patch:
             o.chain = None
         self.display = self.o0
         self.scales.clear()
+        self.scenes.clear()
+        self.scene_bases.clear()
 
     def output_size(self, output, size) -> tuple:
         """The pixel size ``output`` (an Output, an index or a name like 'o1') renders at in a ``size`` frame."""

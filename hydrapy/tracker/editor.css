@@ -41,7 +41,11 @@ details[open] > summary { color: var(--mint); border-color: #6f8d77; background:
 .file-popover input, .file-popover select { width: 100%; min-width: 0; padding: 7px; border: 1px solid var(--line); background: #101a15; color: var(--text); }
 .file-popover button:hover { background: #2b4033; }
 .track-headers { height: 39px; padding-right: 6px; }
-.track-headers, .tracker-row { grid-template-columns: 36px repeat(4, minmax(72px, 1fr)) repeat(3, minmax(78px, .95fr)); }
+.track-headers, .tracker-row { grid-template-columns: 36px repeat(4, minmax(72px, 1fr)) repeat(3, minmax(78px, .95fr)) minmax(84px, 1fr); }
+/* SCENE: the patch scene that starts on a row. A name the loaded patch doesn't declare is struck through. */
+.tracker-row .cell.scene { color: #c9b6e4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tracker-row .cell.scene.missing { color: #8a7f96; text-decoration: line-through; }
+.track-header.scene strong { color: #c9b6e4; }
 .tracker-row { min-width: 558px; }
 .track-header { padding: 5px 6px; }
 .track-header strong { font-size: 10px; }

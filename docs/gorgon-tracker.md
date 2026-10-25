@@ -64,6 +64,64 @@ palette is explicitly **synth demo** audio generated in the control browser.
 Archive samples, Stable Audio, RAVE, Pd and model servers are not connected.
 Sound starts muted and requires a user gesture.
 
+## Scenes and lane signals
+
+A patch can declare named **scenes**, and the tracker's **SCENE** column picks
+which one plays (`patches/gorgon_scenes.py` is a working example):
+
+```python
+@scene('drift')
+def _():
+    return osc(8).rotate(roll)
+
+@scene('fracture')
+def _():
+    return voronoi(5).kaleid(6).scale(1 + tracker.hit(1, decay=.2))
+```
+
+- A scene's function returns the chain for one output: o0 by default, or
+  `@scene('glow', o1)`. Each output follows the changes that name its own scenes,
+  so one SCENE lane can drive several outputs independently.
+- A SCENE cell starts its scene on that row, and it holds until the next change,
+  wrapping round the score or the looped pattern. **Fade** (0–64 rows) crossfades
+  from the previous scene. A fade never runs past the next change, so a change
+  never jumps from a half-finished fade, and a change to the scene already
+  showing doesn't fade. One SCENE lane holds one change per row, so two outputs
+  can't both change on exactly the same row. Enter on an empty cell writes the scene after the one
+  above it, so repeated entries step through the patch's scenes. A name the
+  loaded patch doesn't declare is struck through and kept, so swapping patches
+  doesn't lose the score.
+- Before any change, and outside the tracker (`hydrapy live`, `render`), each
+  output shows its first declared scene. Disabling automation keeps the scene
+  that is showing, as it does controls.
+- Anything sent to an output before its first scene stays underneath, as the base.
+  Sending to that output *after* its scenes replaces them, so Studio refuses
+  that patch with an error rather than silently dropping the scenes.
+
+The output is the base blended with every scene, each at its weight. In GL, a
+blend at amount 0 is compiled out of the shader, so a scene costs nothing while
+it isn't playing. Studio compiles each scene's shader, and each crossfade the
+score contains, when the patch loads or the score changes, so a scene change or
+fade never compiles while it plays. `switch()` uses the same mechanism for
+fxhash mint variants.
+
+**Lane signals** read the audio lanes per frame, in any operator argument:
+
+| Signal | Value |
+| --- | --- |
+| `tracker.gate(n)` | 1 while lane n's gate is open (half a row per hit), else 0 |
+| `tracker.hit(n, decay=.25)` | 1 at each hit, falling to 0 over `decay` seconds |
+| `tracker.note(n)` | the last hit's MIDI note, key-transposed as the CV is (held; 60 to start) |
+| `tracker.vel(n)` | the last hit's velocity, 0–1 (held) |
+| `tracker.beat()`, `tracker.row()` | the playhead: beat 0–64, sixteenth row 0–63 |
+
+Lanes are numbered 1–4 as in the tracker. A hit fires when the playhead crosses
+its row, so it fires once per pass and isn't missed at a low frame rate. Muted
+lanes, zero-velocity hits and a stopped tracker send no gates or hits. A seek clears the held note and velocity,
+as the CV output does. Video exports evaluate both scenes and lane signals frame
+by frame from the score. A static HTML export captures the scene and values
+showing when it is exported.
+
 ## Timing, feedback and exports
 
 Python owns the playhead. The browser sends scores after edits (coalesced, with
@@ -222,7 +280,7 @@ scanout or audio latency. The buses have independent sequence cursors.
 ## Reproducible checks
 
 ```sh
-python -m pytest -q tests/test_studio_tracker.py tests/test_tracker_cv.py tests/test_es40.py tests/test_studio_bridge.py tests/test_studio.py tests/test_studio_preview.py
+python -m pytest -q tests/test_studio_tracker.py tests/test_scenes.py tests/test_tracker_cv.py tests/test_es40.py tests/test_studio_bridge.py tests/test_studio.py tests/test_studio_preview.py
 python -m pip install playwright
 python -m playwright install chromium
 HYDRAPY_BROWSER_TESTS=1 python -m pytest -q tests/test_studio_tracker_browser.py tests/test_studio_preview_browser.py

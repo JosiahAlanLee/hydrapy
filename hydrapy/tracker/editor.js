@@ -3,6 +3,11 @@ import {noteMidi, canonicalNote} from './notes.js';
 
 export const LANES = ['z', 'roll', 'feedback'];
 const LIMITS = [[0, 1], [-45, 45], [0, .9]];
+export const COLUMNS = 8;                     // four audio lanes, three automation lanes, SCENE
+export const SCENE = 7;
+export const SCENE_NAME = /^[A-Za-z0-9_-]{1,24}$/;
+// What a column holds, so blocks only paste into columns of the same kind.
+export const kindOf = col => col < 4 ? 'audio' : col < SCENE ? LANES[col - 4] : 'scene';
 const EDITABLE = ['patterns', 'bpm', 'key', 'mutes', 'bindings'];
 const clone = value => structuredClone(value);
 const snapshot = score => Object.fromEntries(EDITABLE.map(key => [key, clone(score[key])]));
@@ -49,11 +54,16 @@ export function bounds(cell, anchor = cell) {
 }
 
 export function getCell(pattern, row, col) {
+  if (col === SCENE) return (pattern.scenes ?? []).find(key => key.r === row) ?? null;
   return col < 4 ? pattern.audio[col][row] : pattern.keys[LANES[col - 4]].find(key => key.r === row) ?? null;
 }
 
 export function putCell(pattern, row, col, value) {
-  if (col < 4) {
+  if (col === SCENE) {
+    pattern.scenes = (pattern.scenes ?? []).filter(key => key.r !== row);
+    if (value) pattern.scenes.push({r: row, name: value.name, fade: value.fade ?? 0});
+    pattern.scenes.sort((a, b) => a.r - b.r);
+  } else if (col < 4) {
     pattern.audio[col][row] = value ? {note: value.note, vel: value.vel} : null;
   } else {
     const lane = LANES[col - 4];
@@ -64,7 +74,7 @@ export function putCell(pattern, row, col, value) {
 }
 
 export function copyBlock(pattern, box) {
-  const columns = Array.from({length: box.c1 - box.c0 + 1}, (_, i) => box.c0 + i < 4 ? 'audio' : LANES[box.c0 + i - 4]);
+  const columns = Array.from({length: box.c1 - box.c0 + 1}, (_, i) => kindOf(box.c0 + i));
   const rows = Array.from({length: box.r1 - box.r0 + 1}, (_, r) =>
     columns.map((_, c) => clone(getCell(pattern, box.r0 + r, box.c0 + c))));
   return {format: 'gorgon-block-1', columns, rows};
@@ -75,7 +85,7 @@ export function readBlock(text) {
   if (text.length > 100000) throw new Error('Clipboard block is too large.');
   const block = JSON.parse(text);
   if (block?.format !== 'gorgon-block-1' || !Array.isArray(block.columns) || !block.columns.length ||
-      block.columns.length > 7 || block.columns.some(c => c !== 'audio' && !LANES.includes(c)) ||
+      block.columns.length > COLUMNS || block.columns.some(c => c !== 'audio' && c !== 'scene' && !LANES.includes(c)) ||
       !Array.isArray(block.rows) || !block.rows.length || block.rows.length > 64) throw new Error('Copy a Gorgon cell block first.');
   for (const row of block.rows) {
     if (!Array.isArray(row) || row.length !== block.columns.length) throw new Error('Invalid clipboard row.');
@@ -85,6 +95,10 @@ export function readBlock(text) {
       if (block.columns[c] === 'audio') {
         value.note = canonicalNote(value.note);
         if (!Number.isInteger(value.vel) || value.vel < 0 || value.vel > 127) throw new Error('Invalid clipboard velocity.');
+      } else if (block.columns[c] === 'scene') {
+        if (typeof value.name !== 'string' || !SCENE_NAME.test(value.name)) throw new Error('Invalid clipboard scene name.');
+        value.fade ??= 0;
+        if (!Number.isInteger(value.fade) || value.fade < 0 || value.fade > 64) throw new Error('Invalid clipboard scene fade.');
       } else {
         const [low, high] = LIMITS[LANES.indexOf(block.columns[c])];
         if (!Number.isFinite(value.v) || value.v < low || value.v > high) throw new Error('Invalid clipboard automation value.');
@@ -98,8 +112,8 @@ export function pasteBlock(pattern, start, block) {
   let written = 0, skipped = 0;
   block.rows.forEach((row, r) => row.forEach((value, c) => {
     const dest = start.col + c, y = start.row + r;
-    if (dest > 6 || y > 63) { skipped++; return; }
-    const kind = dest < 4 ? 'audio' : LANES[dest - 4];
+    if (dest >= COLUMNS || y > 63) { skipped++; return; }
+    const kind = kindOf(dest);
     if (kind !== block.columns[c]) { skipped++; return; }
     putCell(pattern, y, dest, value);
     written++;
@@ -143,6 +157,7 @@ export function pianoNote(code, octave) { return code in PIANO ? midiNote(12 * (
 export function activity(pattern) {
   return Array.from({length:64}, (_, r) => ({
     audio: pattern.audio.reduce((n, lane) => n + (lane[r]?.vel > 0 ? 1 : 0), 0),
-    keys: LANES.reduce((n, lane) => n + (pattern.keys[lane].some(k => k.r === r) ? 1 : 0), 0),
+    keys: LANES.reduce((n, lane) => n + (pattern.keys[lane].some(k => k.r === r) ? 1 : 0), 0) +
+          ((pattern.scenes ?? []).some(k => k.r === r) ? 1 : 0),
   }));
 }
