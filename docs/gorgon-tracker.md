@@ -85,6 +85,48 @@ preview frames. The browser synth uses a bounded lookahead scheduler and an
 estimated server playhead, not a native sample clock. Browser throttling and
 physical audio/video latency still require workstation testing.
 
+## CV out: Gorgon as the master clock
+
+`--cv-device` sends the score out of an audio interface as control voltage,
+for example ADAT into an Expert Sleepers ES-3 (DC coupled, ±10 V full scale):
+
+```sh
+hydrapy devices                     # find the interface and its channel numbers
+hydrapy studio patches/gorgon_corridor.py --tracker --cv-device "Digi 003" --cv-map 8
+```
+
+`--cv-map 8` puts the default eight signals on channels 8–15, which should be the
+003's ADAT outputs; check the order `hydrapy devices` and your audio system report.
+Channel numbers count from 0, as `CvOut` does. Choose signals explicitly with
+`--cv-map 8=clock,9=reset,10=gate1,...`.
+
+| Signal | Voltage |
+| --- | --- |
+| `clock` | 5 V pulses, `--cv-ppqn` per quarter note (default 4: sixteenths), 50% duty |
+| `reset` | 5 ms, 5 V trigger at the start of the score, or of the looped pattern |
+| `run` | 5 V while the tracker is playing |
+| `gate1`–`gate4` | 5 V for half a row on each audio-lane hit; muted lanes send nothing |
+| `vel1`–`vel4` | last hit's velocity on that lane, 0–5 V, held until the next hit |
+| `z`, `feedback` | lane minimum to maximum as 0–5 V |
+| `roll` | −45° to 45° as −5 V to 5 V |
+
+The default map is `clock, reset, gate1–gate4, z, roll`, because the ES-3 has
+eight outputs; `feedback`, `run` and velocities are opt-in.
+
+Every sample is evaluated in the audio callback from the render thread's latest
+playhead, so clock, gates and held key steps land on the exact sample rather than
+on a video frame. Pausing or disabling automation stops clock, reset and gates;
+lanes hold their value. The CV and the picture share one playhead, so the modular
+follows Gorgon's tempo, seeks and loops. Gorgon does not follow an incoming clock.
+
+`--cv-offset-ms` sends the voltages earlier (positive) or later (negative) than
+the picture. Set it after the click-and-flash comparison below, using a gate into
+a percussion voice as the click.
+
+Not yet covered: pitch CV from the lanes' notes, CV in exports, and a patch's own
+`CvOut` on the same device. Opening the device twice fails on plain ALSA; with
+PipeWire or JACK both streams can share it.
+
 ## Preview and measurements
 
 Program reuses Studio's bounded preview. Auxiliary has an additional encoder
@@ -104,7 +146,7 @@ scanout or audio latency. The buses have independent sequence cursors.
 ## Reproducible checks
 
 ```sh
-python -m pytest -q tests/test_studio_tracker.py tests/test_studio.py tests/test_studio_preview.py
+python -m pytest -q tests/test_studio_tracker.py tests/test_tracker_cv.py tests/test_studio.py tests/test_studio_preview.py
 python -m pip install playwright
 python -m playwright install chromium
 HYDRAPY_BROWSER_TESTS=1 python -m pytest -q tests/test_studio_tracker_browser.py tests/test_studio_preview_browser.py
