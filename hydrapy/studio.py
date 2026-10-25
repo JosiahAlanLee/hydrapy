@@ -216,9 +216,7 @@ class Session:
             old.release()
         self.renderer, self.path, self.source, self.armed = new, path, source, requested_arm
         # A patch's declared display remains authoritative when it is loaded.
-        if self.tracker.document['modes']['program'] != patch.display.name:
-            document = dict(self.tracker.document, modes=dict(self.tracker.document['modes'], program=patch.display.name))
-            self.tracker.replace(document, self.clock_time, self.tracker.revision)
+        self.tracker.sync_program(patch.display.name, self.clock_time)
         self.gpu_query = None
         self.preview.reset(patch.display.name)
         self.aux_preview.reset(self.tracker.document['modes']['aux'])
@@ -302,7 +300,8 @@ class Session:
             self.paused = not playing
             return dict(self.tracker.snapshot(self.clock_time, not self.paused), blackout=self.tracker_blackout)
         elif action == 'tracker_save':
-            if data.get('revision') != self.tracker.revision:
+            revision = data.get('revision')
+            if type(revision) is not int or not self.tracker.edit_revision <= revision <= self.tracker.revision:
                 raise ValueError('Score changed in another window. Reload before saving.')
             path = self.root / '.hydrapy' / 'tracker.json'
             atomic_text(path, json.dumps(self.tracker.document, indent=2))
@@ -315,8 +314,7 @@ class Session:
             if not 0 <= index < 4:
                 raise ValueError('output must be 0–3')
             patch.render(patch.outputs[index])
-            document = dict(self.tracker.document, modes=dict(self.tracker.document['modes'], program=patch.display.name))
-            self.tracker.replace(document, self.clock_time, self.tracker.revision)
+            self.tracker.sync_program(patch.display.name, self.clock_time)
             self.preview.reset(patch.display.name)
             self.preview_dirty = True
             self._pictures(force=True)

@@ -99,6 +99,9 @@ class Tracker:
             document = json.loads(Path(__file__).with_name('tracker').joinpath('demo.json').read_text())
         self.document = validate(document)
         self.revision = 0
+        # Last revision written by a score edit. Studio's own program-output
+        # syncs advance ``revision`` but not this, so they are never conflicts.
+        self.edit_revision = 0
         self.enabled = False
         self.anchor_time = self.anchor_beat = 0.
 
@@ -114,9 +117,30 @@ class Tracker:
         self.anchor_beat, self.anchor_time = self.normalize(beat), clock_time
 
     def replace(self, document, clock_time, revision):
-        if revision != self.revision:
+        """Apply a score edit based on ``revision``.
+
+        An edit is a conflict only if another score edit landed after its base.
+        If just Studio's program-output syncs happened since, the edit is
+        accepted and the server's current program output is kept, because the
+        editor could not have known about that change.
+        """
+        if type(revision) is not int or not self.edit_revision <= revision <= self.revision:
             raise ValueError('Score changed in another window. Reload before editing.')
         prepared = validate(document)
+        if revision != self.revision:
+            prepared['modes']['program'] = self.document['modes']['program']
+        self._commit(prepared, clock_time)
+        self.edit_revision = self.revision
+
+    def sync_program(self, output, clock_time):
+        """Record Studio's displayed output without invalidating open editors."""
+        if self.document['modes']['program'] == output:
+            return
+        document = copy.deepcopy(self.document)
+        document['modes']['program'] = output
+        self._commit(validate(document), clock_time)
+
+    def _commit(self, prepared, clock_time):
         beat = self.beat(clock_time)
         self.document = prepared
         self.revision += 1

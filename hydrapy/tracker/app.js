@@ -88,6 +88,12 @@ async function flushScore(){
   const document = pendingScore; pendingScore = null;
   scoreRequest = api('tracker_score', {document, revision}).then(result => {
     revision = result.revision;
+    // Studio may have switched its displayed output since this edit's base.
+    // Keep that choice unless the user has changed the program route again.
+    const program = result.document.modes.program;
+    if (state.modes.program === document.modes.program) state.modes.program = program;
+    if (pendingScore && pendingScore.modes.program === document.modes.program) pendingScore.modes.program = program;
+    if (program !== document.modes.program) updateControls();
     $('savedState').textContent = 'Score applied · not saved';
   }).catch(error => {
     conflicted = true; pendingScore = null;

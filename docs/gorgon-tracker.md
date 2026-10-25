@@ -37,7 +37,9 @@ Studio's existing execution and hardware staging rules.
 - **Save session** writes `.hydrapy/tracker.json` and downloads JSON.
   **Restore saved score** or **Import score** reloads it explicitly. Browser reload
   reconnects to the server score. Edits are validated and revision-checked;
-  concurrent edits cannot silently overwrite a newer score. Restarting Studio
+  concurrent edits cannot silently overwrite a newer score. Switching Studio's
+  displayed output is not an edit: an open tracker keeps working, and the new
+  program output is kept. Restarting Studio
   starts with the initial study until Restore is chosen. Transport and blackout
   are not saved. Unpersisted edits disappear when Studio exits.
 
