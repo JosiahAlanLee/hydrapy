@@ -268,7 +268,10 @@ class CVGroup:
             raise error
 
 
-def load_profile(path, *, open_stream=True, **options):
+def load_profile(path, *, open_stream=True, polarity_settings=None, **options):
+    if polarity_settings is not None and (not isinstance(polarity_settings, dict) or
+            any(v not in POLARITIES for v in polarity_settings.values())):
+        raise ValueError('Invalid saved polarity settings')
     profile = json.loads(Path(path).read_text())
     if not isinstance(profile, dict) or set(profile) != {'format', 'devices'} or profile['format'] != 'hydrapy-cv-1':
         raise ValueError('Expected a hydrapy-cv-1 profile with devices')
@@ -294,6 +297,9 @@ def load_profile(path, *, open_stream=True, **options):
         outputs.append(ES40CV(config.get('es40'), device=device, samplerate=config['samplerate'],
                              direct=config.get('direct'), open_stream=False, **prepared))
     group = CVGroup(outputs)
+    for route in group.polarity_routes():
+        if polarity_settings is not None and route['id'] in polarity_settings:
+            group.set_polarity(route['id'], polarity_settings[route['id']])
     try:
         if open_stream:
             for output in outputs:

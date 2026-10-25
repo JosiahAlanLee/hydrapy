@@ -242,8 +242,14 @@ def main(argv=None):
         try:
             options = dict(ppqn=a.cv_ppqn, offset_ms=a.cv_offset_ms, pitch_zero=a.cv_pitch_zero, backend=a.cv_backend)
             if a.cv_profile:
+                import json
+                from pathlib import Path
                 from .es40 import load_profile
-                cv = load_profile(a.cv_profile, **options)
+                settings_path = Path(a.root) / '.hydrapy' / 'outputs.json'
+                saved = json.loads(settings_path.read_text()) if settings_path.is_file() else {}
+                # Restore compensation before the first hardware callback,
+                # including the initial zero-voltage encoded DAC commands.
+                cv = load_profile(a.cv_profile, polarity_settings=saved.get('polarity', {}), **options)
             elif a.cv_device is not None:
                 from .tracker_cv import TrackerCV, parse_map
                 device = int(a.cv_device) if a.cv_device.isdigit() else a.cv_device

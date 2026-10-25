@@ -4,7 +4,7 @@ import json
 import numpy as np
 import pytest
 
-from hydrapy.es40 import ES40CV, flip_pcm24, pack_es40
+from hydrapy.es40 import ES40CV, flip_pcm24, load_profile, pack_es40
 from hydrapy.studio import Session
 
 
@@ -70,6 +70,7 @@ def test_gui_settings_survive_restart_and_failed_write_rolls_back(tmp_path, monk
         assert path.read_text() == saved
     finally:
         session.close()
+
     monkeypatch.undo()
     output = cv()
     session = Session(tmp_path, 'p.py', backend='cpu', size=(32, 18), cv=output)
@@ -89,3 +90,30 @@ def test_gui_settings_survive_restart_and_failed_write_rolls_back(tmp_path, monk
         assert output.polarity_routes()[0]['mode'] == 'normal'
     finally:
         session.close()
+
+
+def test_saved_polarity_applies_before_the_first_hardware_callback(tmp_path, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    first = []
+    class Stream:
+        active = False
+        def __init__(self, **kw): self.callback = kw['callback']
+        def start(self):
+            data = np.zeros((32, 2), np.int32)
+            self.callback(data, 32, SimpleNamespace(), None)
+            first.append(data.copy())
+        def stop(self): pass
+        def close(self): pass
+    monkeypatch.setitem(sys.modules, 'sounddevice', SimpleNamespace(OutputStream=Stream))
+    profile = dict(format='hydrapy-cv-1', devices=[dict(device='Digital', samplerate=48000,
+        es40=[dict(channels=[0, 1], header=1, map={'1': 'pitch1'})])])
+    path = tmp_path/'cv.json'; path.write_text(json.dumps(profile))
+    output = load_profile(path, polarity_settings={'["Digital",0,1]': 'invert_left'})
+    try:
+        # The first marker byte is 0x80: a negative full-scale normal sample.
+        # Its positive saturated inverse must already be on the first block.
+        assert first[0][0, 0] == 8388607 << 8
+        assert output.polarity_routes()[0]['mode'] == 'invert_left'
+    finally:
+        output.close()
