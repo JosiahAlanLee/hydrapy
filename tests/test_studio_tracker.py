@@ -32,6 +32,10 @@ def test_interpolation_including_exact_hold_boundaries():
 
 @pytest.mark.parametrize('change', [
     lambda d: d.update(bpm=float('nan')),
+    lambda d: d.update(key=False),
+    lambda d: d.update(key=True),
+    lambda d: d.update(key='0'),
+    lambda d: d.update(key=None),
     lambda d: d.update(pattern=4),
     lambda d: d['bindings'].update(z='Roll'),
     lambda d: d['modes'].update(aux='o7'),
@@ -46,6 +50,19 @@ def test_rejected_score_does_not_change_the_running_document(change):
         tracker.replace(d, 1., 0)
     assert tracker.document is old
     assert tracker.revision == 0
+
+
+@pytest.mark.parametrize('key', [0, 2, 5, 7, 0., 2., 5., 7.])
+def test_numeric_keys_keep_the_existing_transposition(key):
+    from hydrapy.tracker_cv import TrackerCV
+    document = score()
+    document['key'] = key
+    document['patterns'][0]['audio'][0][0] = {'note': 'C-4', 'vel': 100}
+    tracker = Tracker(document)
+    tracker.enabled = True
+    cv = TrackerCV({0: 'pitch1'}, open_stream=False)
+    cv.publish(tracker, 0., 100., True)
+    assert cv.render(1, 100.)[0, 0] == pytest.approx((key - 2) / 12)
 
 
 def test_tempo_loop_seek_revision_and_copy_ownership():
