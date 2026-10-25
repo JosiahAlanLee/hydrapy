@@ -27,7 +27,10 @@ OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTEST_DISABLE_PLUGIN
   /tmp/hydrapy-cpu-check/bin/python -m pytest -q -ra
 ```
 
-FFmpeg, ffprobe and Node must also be on `PATH`. On Linux, Sardine's RtMidi
+FFmpeg, ffprobe and Node must also be on `PATH`. FFmpeg 4.4, Ubuntu 22.04's
+package, is too old: with it as `ffmpeg`, both `test_ten_minute_video_audio_sync`
+cases and `test_lazy_soundtrack_is_muxed_after_rendering` fail. They pass with
+FFmpeg 7.0, and with Ubuntu 24.04's 6.1 in CI. On Linux, Sardine's RtMidi
 dependency may need a C++ compiler, `pkg-config` and `libasound2-dev` to build.
 For Python 3.9 omit Sardine;
 that package requires Python 3.10 or newer. CI resolves compatible dependencies
@@ -55,6 +58,9 @@ render timing and optical-audio timing tests in separate processes. This release
 GL state between groups. A failed test, skipped test, empty collection, timeout or
 missing prerequisite makes the check fail. Known failures should remain visible;
 do not loosen tolerances or exclude cases just to get a green report.
+Running the whole suite in one `pytest` process with ModernGL installed fails
+the four `test_automata.py` tests with `cannot create buffer`; they pass in their
+own group, as here, and on their own.
 
 It then benchmarks `osc`, `rd`, `wave` and `nca`, with 30 warm-up frames and 120
 measured frames per case at 1920×1080. GPU execution and RGB readback are included.
@@ -78,6 +84,31 @@ median and p95 against an idle baseline on the same device, driver, dependencies
 and settings. Record background work in `--label`; the script does not start,
 stop or discover training/inference processes. Repeat idle measurements after
 the change to distinguish a regression from temporary load or thermal effects.
+
+### Recorded result, 2026-10-25
+
+Commit `67d0897` on the render workstation, idle: Ubuntu 22.04.5, Python 3.11,
+GeForce RTX 4090 with driver 580.178.04 (GL 3.3 context), FFmpeg 7.0, Node 26.
+
+| Group | Result |
+| --- | --- |
+| operators | 141 passed, **2 failed**: `test_cpu_and_gpu_agree[voronoi-chain1]` (mean difference 0.206, limit 0.02) and `[mipblur-chain73]` (0.130) |
+| automata | 8 passed |
+| equivalence | 98 passed |
+| render timing | 42 passed |
+| audio timing | 32 passed |
+
+Benchmark, median / p95 per frame: `osc` 4.11 / 4.25 ms, `rd` 0.93 / 0.95 ms,
+`wave` 1.05 / 1.12 ms, `nca` 0.91 / 0.92 ms.
+
+The full suite in one process, with the Chromium tests enabled, gave 1137 passed,
+7 failed and 63 skipped. The failures are the two operator cases above,
+`test_mipblur_is_smooth_cheap_and_the_same_on_both_backends` (maximum difference
+0.061, limit 0.01) and the four automata tests. All seven also fail at the
+previous `main`, `2d4553e`. `test_studio_jack.py` passed 3/3 against a private
+`jackd` dummy server and 3/3 against a private PipeWire 1.0.7 instance.
+Audio devices, ADAT/CV, RAVE inference, end-to-end latency and hardware encoding
+were not measured.
 
 ## Audio, ADAT and model qualification
 
