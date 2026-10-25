@@ -85,6 +85,11 @@ preview frames. The browser synth uses a bounded lookahead scheduler and an
 estimated server playhead, not a native sample clock. Browser throttling and
 physical audio/video latency still require workstation testing.
 
+The browser keeps its scheduling counter continuous through pattern and song
+wraps. Explicit seeks cancel lookahead, including small seeks. Browser, direct
+CV and the VCV bridge use the same pre-render beat timestamp: a slow frame does
+not add its render time to the browser's clock offset.
+
 ## CV out: Gorgon as the master clock
 
 `--cv-device` sends the score out of an audio interface as control voltage,
@@ -148,6 +153,41 @@ S/PDIF pairs in one stream on the same interface. Keep a patch's own `CvOut` on
 a separate device: uncoordinated writers can mix or fail to open, depending on
 the driver. CV is not included in video/audio exports.
 
+## VCV Rack bridge
+
+The [Gorgon module](https://github.com/JosiahAlanLee/DSP_Emulation/tree/main/vcv/gorgon)
+for VCV Rack 2 links Rack to Studio with no configuration. On start Studio writes
+`~/.hydrapy/studio.json` (port, session token, root; readable only by you) and
+removes it on exit if it is still its own. Set `HYDRAPY_STUDIO_FILE` to use another
+path. The module reads that file and polls Studio on loopback.
+
+GorgonBridge 2.0.1 puts the score's clock, gates, held velocities and automation
+on Rack jacks, with gates and unipolar lanes at 10 V. Its polyphonic **V/OCT** jack
+carries four held pitches (1 V/oct, C4 = 0 V by default; C3 is selectable). Notes,
+key transposition, AIR, velocity zero and mute follow direct CV semantics. Reset
+is latched on start/resume/seek so a late network update cannot skip the pulse.
+The module generates signals per sample from Studio's playhead. It also
+sends values back: four CV inputs set the patch's named controls (0–10 V spans
+each control's range), and PLAY and RESET drive Studio's transport.
+
+The endpoints are local and need the session token like every other route:
+
+- `GET /api/bridge?revision=N`: the playhead as an anchor (`anchor_beat`,
+  `anchor_time`, `clock_time` and `wall`, Studio's monotonic time when it was
+  sampled), `enabled`, `playing`, `transport_revision`, `server_now`, the patch's controls, and the score
+  `document`. The document is left out when `N` matches the current revision.
+- `POST /api/bridge_params` with `{"values": {"Control name": value}}`: sets named
+  controls, clamped to their slider range. Controls bound to a tracker lane are
+  left alone while automation is on; the reply lists what was applied and what
+  was ignored, and why.
+- Transport uses the existing `POST /api/tracker_transport`.
+
+`transport_revision` changes on an explicit seek or automation enable change,
+independently of the score revision. Ordinary score edits do not restart a
+follower's reset pulse or discard held notes. The browser endpoint and transport
+replies also include it. The Gorgon integration workflow runs real Chromium
+tests and connects the VCV bridge from DSP_Emulation's `main` to this Studio.
+
 ## Preview and measurements
 
 Program reuses Studio's bounded preview. Auxiliary has an additional encoder
@@ -167,7 +207,7 @@ scanout or audio latency. The buses have independent sequence cursors.
 ## Reproducible checks
 
 ```sh
-python -m pytest -q tests/test_studio_tracker.py tests/test_tracker_cv.py tests/test_es40.py tests/test_studio.py tests/test_studio_preview.py
+python -m pytest -q tests/test_studio_tracker.py tests/test_tracker_cv.py tests/test_es40.py tests/test_studio_bridge.py tests/test_studio.py tests/test_studio_preview.py
 python -m pip install playwright
 python -m playwright install chromium
 HYDRAPY_BROWSER_TESTS=1 python -m pytest -q tests/test_studio_tracker_browser.py tests/test_studio_preview_browser.py

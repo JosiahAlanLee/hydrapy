@@ -176,7 +176,8 @@ class Tracker:
 
     def snapshot(self, clock_time, playing):
         return dict(document=self.document, revision=self.revision, enabled=self.enabled,
-                    beat=self.beat(clock_time), playing=playing and self.enabled)
+                    beat=self.beat(clock_time), playing=playing and self.enabled,
+                    transport_revision=self.transport_revision)
 
     def frames(self, patch, *, seconds, fps, size, backend, start=0., beat=0.):
         """Apply automation at the render boundary, not at a pipelined JPEG yield.
