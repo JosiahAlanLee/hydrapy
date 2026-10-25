@@ -86,7 +86,7 @@ class Recorder:
 
 
 class Session:
-    def __init__(self, root, patch=None, backend='auto', size=(640, 360), fps=30.):
+    def __init__(self, root, patch=None, backend='auto', size=(640, 360), fps=30., cv=None):
         self.root, self.backend, self.size, self.fps = Path(root).resolve(), backend, tuple(size), float(fps)
         if not self.root.is_dir() or backend not in ('auto', 'cpu', 'gl'):
             raise ValueError('Choose an existing root and auto/cpu/gl backend')
@@ -107,6 +107,9 @@ class Session:
         self.tracker = Tracker()
         self.tracker_state = {}
         self.tracker_blackout = False
+        # Optional tracker CV output (a TrackerCV); opened by the caller so a
+        # device error is reported before Studio starts.
+        self.cv = cv
         self.preview_profile, self.gpu_query = False, None
         self.render_metrics, self.preview_error = {}, ''
         self.preview_dirty = True
@@ -139,6 +142,8 @@ class Session:
             finally:
                 self.running = False
                 self.thread.join(timeout=10)
+        if self.cv is not None:
+            self.cv.close()
         for proc in self.job_processes.values():
             if proc.poll() is None:
                 proc.terminate()
@@ -292,7 +297,8 @@ class Session:
                 raise ValueError('Transport states must be boolean')
             if enabled and self.armed and patch.transport:
                 raise ValueError('Disconnect the external clock before enabling tracker automation')
-            self.tracker.seek(beat, self.clock_time)
+            if 'beat' in data or enabled != self.tracker.enabled:
+                self.tracker.seek(beat, self.clock_time)
             self.tracker.enabled = enabled
             self.tracker_blackout = blackout
             if self.paused != (not playing):
@@ -305,7 +311,8 @@ class Session:
                 raise ValueError('Score changed in another window. Reload before saving.')
             path = self.root / '.hydrapy' / 'tracker.json'
             atomic_text(path, json.dumps(self.tracker.document, indent=2))
-            return dict(file=str(path.relative_to(self.root)))
+            return dict(file=str(path.relative_to(self.root)), document=self.tracker.document,
+                        revision=self.tracker.revision)
         elif action == 'pause':
             self.paused = bool(data.get('paused', not self.paused))
             self.last_wall = time.monotonic()
@@ -551,6 +558,9 @@ class Session:
                                     except Exception:
                                         self.preview_profile = False
                                 query = self.gpu_query
+                            if self.cv is not None:
+                                # Publish before a potentially expensive render step.
+                                self.cv.publish(self.tracker, self.clock_time, now, True)
                             render_started = time.monotonic()
                             self.tracker.apply(self.renderer.patch, self.clock_time)
                             with query if query is not None else nullcontext():
@@ -583,6 +593,8 @@ class Session:
                         # A transport failure must not pause synthesis or live hooks.
                         self.preview_error = f'{type(exc).__name__}: {exc}'
                 self.last_wall = now
+                if self.cv is not None:
+                    self.cv.publish(self.tracker, self.clock_time, now, not self.paused and self.renderer is not None)
                 with self.lock:
                     self.tracker_state = self.tracker.snapshot(self.clock_time, not self.paused)
                     self.tracker_state.update(sampled=time.monotonic(), blackout=self.tracker_blackout,
@@ -591,7 +603,8 @@ class Session:
                                               output=self.renderer.patch.display.name if self.renderer else 'o0',
                                               generation=self.preview.generation, aux_generation=self.aux_preview.generation,
                                               path=str(self.path.relative_to(self.root)) if self.path else None,
-                                              controls=[x.describe() for x in self.renderer.patch.controls.values()] if self.renderer else [])
+                                              controls=[x.describe() for x in self.renderer.patch.controls.values()] if self.renderer else [],
+                                              cv=None if self.cv is None else self.cv.describe())
                 if now - sample_start >= .5:
                     self.actual_fps = frames / (now - sample_start)
                     sample_start, frames = now, 0
@@ -607,6 +620,8 @@ class Session:
                 time.sleep(max(.001, 1 / self.fps - (time.monotonic() - started)))
         finally:
             self.running = False
+            if self.cv is not None:
+                self.cv.publish(self.tracker, self.clock_time, time.monotonic(), False)
             self.gpu_query = None  # dispose timer on the GL context's thread
             self.preview.close()
             self.aux_preview.close()
@@ -670,6 +685,7 @@ def make_server(session, port=8765):
             assets = {'/tracker/': ('index.html', 'text/html; charset=utf-8'),
                       '/tracker/app.js': ('app.js', 'text/javascript; charset=utf-8'),
                       '/tracker/backend.js': ('backend.js', 'text/javascript; charset=utf-8'),
+                      '/tracker/notes.js': ('notes.js', 'text/javascript; charset=utf-8'),
                       '/tracker/style.css': ('style.css', 'text/css; charset=utf-8')}
             if parsed.path in assets:
                 name, mime = assets[parsed.path]
@@ -746,11 +762,16 @@ def make_server(session, port=8765):
     return server, token
 
 
-def serve(root='.', patch=None, backend='auto', size=(640, 360), fps=30, port=8765, open_browser=True, tracker=False):
+def serve(root='.', patch=None, backend='auto', size=(640, 360), fps=30, port=8765, open_browser=True, tracker=False, cv=None):
     root = Path(root).resolve()
     # Match CLI patch execution: relative asset paths belong to the project.
     os.chdir(root)
-    session = Session(root, patch, backend, size, fps)
+    try:
+        session = Session(root, patch, backend, size, fps, cv=cv)
+    except BaseException:
+        if cv is not None:
+            cv.close()
+        raise
     server = None
     try:
         server, token = make_server(session, port)

@@ -186,6 +186,17 @@ def main(argv=None):
     studio.add_argument("--port", type=int, default=8765)
     studio.add_argument("--no-browser", action="store_true")
     studio.add_argument("--tracker", action="store_true", help="open the Gorgon tracker workspace")
+    cv_output = studio.add_mutually_exclusive_group()
+    cv_output.add_argument("--cv-device", help="send direct CV on this audio device (see `hydrapy devices`)")
+    cv_output.add_argument("--cv-profile", help="JSON routing profile for ES-40 / ESX-8CV units and direct CV")
+    studio.add_argument("--cv-map", default="0", help="first channel for the default eight signals, or e.g. 8=clock,9=reset,10=gate1")
+    studio.add_argument("--cv-ppqn", type=int, default=4, help="clock pulses per quarter note (default 4: sixteenths)")
+    studio.add_argument("--cv-offset-ms", type=float, default=0., help="send CV earlier (+) or later (-) than the picture")
+    studio.add_argument("--cv-pitch-zero", type=int, default=60, help="MIDI note at 0 V (default 60 = C4); pitch is 1 V/oct")
+    diagnostic = sub.add_parser("es40-check", help="write an encoded S/PDIF diagnostic WAV for an ES-40 + ESX-8CV")
+    diagnostic.add_argument("-o", "--out", required=True, help="24-bit stereo WAV destination; data, not listening audio")
+    diagnostic.add_argument("--header", type=int, choices=range(1, 6), default=1, help="ES-40 expansion header (1–5)")
+    diagnostic.add_argument("--samplerate", type=int, choices=[44100, 48000], default=48000)
     session = sub.add_parser("session", help="play or inspect a beat-timed OSC session")
     from .session import add_arguments as session_arguments
     session_arguments(session)
@@ -205,6 +216,13 @@ def main(argv=None):
 
     a = ap.parse_args(argv)
 
+    if a.cmd == "es40-check":
+        from .es40 import diagnostic_wav
+        diagnostic_wav(a.out, header=a.header, samplerate=a.samplerate)
+        print(f'{a.out}: 18 s, {a.samplerate} Hz / 24-bit S/PDIF data. Route only to ES-40 at unity, without mixing or resampling.\n'
+              'Zero, then 1 V on each ESX-8CV jack in turn for 1 s, with 1 s zero between steps; ends at zero.')
+        return
+
     if a.cmd == "session":
         from .session import execute
         try:
@@ -217,7 +235,22 @@ def main(argv=None):
 
     if a.cmd == "studio":
         from .studio import serve
-        serve(a.root, a.patch, a.backend, a.size, a.fps, a.port, not a.no_browser, tracker=a.tracker)
+        cv = None
+        try:
+            options = dict(ppqn=a.cv_ppqn, offset_ms=a.cv_offset_ms, pitch_zero=a.cv_pitch_zero)
+            if a.cv_profile:
+                from .es40 import load_profile
+                cv = load_profile(a.cv_profile, **options)
+            elif a.cv_device is not None:
+                from .tracker_cv import TrackerCV, parse_map
+                device = int(a.cv_device) if a.cv_device.isdigit() else a.cv_device
+                cv = TrackerCV(parse_map(a.cv_map), device=device, **options)
+        except Exception as exc:
+            ap.exit(1, f'Tracker CV: {exc}\n')
+        if cv is not None:
+            import json
+            print('Tracker CV: ' + json.dumps(cv.describe()), flush=True)
+        serve(a.root, a.patch, a.backend, a.size, a.fps, a.port, not a.no_browser, tracker=a.tracker, cv=cv)
         return
 
     if a.cmd == "check":

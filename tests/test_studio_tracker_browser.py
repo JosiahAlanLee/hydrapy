@@ -3,6 +3,7 @@ import json
 import os
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -125,3 +126,52 @@ def test_import_validation_hold_boundary_and_slow_decode_are_bounded(workspace):
     assert max(peak)==1
     assert session.preview.snapshot()['pending']<=1
     assert len(page.evaluate('gorgonPreview.samples'))<=300
+
+
+def test_pitched_note_edit_audition_frequency_and_reload(workspace):
+    session, page, context, root = workspace
+    # Select an existing event without erasing it, then enter a note beyond the
+    # original demo's small fixed vocabulary.
+    page.locator('[data-row="6"][data-col="1"]').click()
+    assert session.tracker.document['patterns'][0]['audio'][1][6] is not None
+    page.locator('#noteInput').fill('E4'); page.locator('#noteInput').press('Tab')
+    page.locator('#velocityInput').fill('110'); page.locator('#velocityInput').press('Tab')
+    page.wait_for_timeout(400)
+    assert session.tracker.document['patterns'][0]['audio'][1][6] == {'note': 'E-4', 'vel': 110}
+    values = page.evaluate('''async()=>{const n=await import('/tracker/notes.js');
+      return [n.noteMidi('E4'), n.noteFrequency('A-4',2), n.noteFrequency('A-5',2), n.noteFrequency('A-4',7)];}''')
+    assert values[:3] == [64, 440, 880]
+    assert values[3] == pytest.approx(440*2**(5/12))
+    page.evaluate('''() => {
+      window.testOscillators=[];
+      const make=AudioContext.prototype.createOscillator;
+      AudioContext.prototype.createOscillator=function(){const o=make.call(this);testOscillators.push(o);return o;};
+    }''')
+    page.locator('#auditionBtn').click()
+    page.wait_for_function('testOscillators.length===2')
+    frequency = 440 * 2 ** ((64 - 69) / 12)
+    assert page.evaluate('testOscillators.map(o=>o.frequency.value)') == pytest.approx([frequency, 2 * frequency])
+    with page.expect_download() as download:
+        page.locator('#saveBtn').click()
+    saved = json.loads(Path(download.value.path()).read_text())
+    assert saved['patterns'][0]['audio'][1][6]['note'] == 'E-4'
+    assert page.locator('.inspector').evaluate('(e)=>e.scrollWidth<=e.clientWidth+1')
+    page.screenshot(path='/tmp/gorgon-pitched-voices.png')
+    page.reload(); page.wait_for_function('gorgonPreview.frames>=1')
+    page.locator('[data-row="6"][data-col="1"]').click()
+    assert page.locator('#noteInput').input_value() == 'E-4'
+    assert page.locator('#velocityInput').input_value() == '110'
+
+
+def test_download_uses_exact_saved_score_after_studio_output_sync(workspace):
+    session, page, context, root = workspace
+    # Freeze the editor's GET snapshot while Studio changes its output. Saving
+    # an otherwise unedited older revision is allowed by the sync protocol.
+    snapshot = dict(session.tracker_state, server_now=time.monotonic())
+    page.route('**/api/tracker', lambda route: route.fulfill(json=snapshot))
+    session.call('output', index=1)
+    with page.expect_download() as download:
+        page.locator('#saveBtn').click()
+    saved = json.loads(Path(download.value.path()).read_text())
+    assert saved == json.loads((root/'.hydrapy/tracker.json').read_text())
+    assert saved['modes']['program'] == 'o1'

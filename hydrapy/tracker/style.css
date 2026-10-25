@@ -11,3 +11,9 @@
 @media(prefers-reduced-motion:reduce){button,.toast,.output-hud{transition:none}}
 
 .score-actions{padding:10px;display:grid;gap:8px;font-size:9px}.score-actions a{color:var(--mint)}.score-actions label{cursor:pointer;text-align:center;border:1px solid var(--line);padding:6px}.bindings{padding:8px 14px;border-top:1px solid var(--line)}.bindings label{display:flex;align-items:center;justify-content:space-between;font-size:9px;margin-top:7px}.bindings select{width:145px;font-size:9px;padding:4px}.bindings select.missing{border-color:#c98b59;color:#e4b889}#automationBtn{margin-bottom:12px;width:100%}#automationBtn[aria-pressed=true]{color:var(--mint);border-color:#759c79}#patchSelect{max-width:100%;width:100%;margin:18px 0}.top-actions a{color:var(--mint)}
+
+#noteEditor label{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:8px 0;color:var(--muted)}
+#noteEditor input{width:85px;background:var(--bg);color:var(--text);border:1px solid var(--line);padding:5px 8px;font:11px var(--mono)}
+#noteEditor>div{display:flex;gap:6px;margin-bottom:8px}
+#cvStatus{color:var(--mint);overflow-wrap:anywhere}
+#noteEditor{display:block;max-width:100%}

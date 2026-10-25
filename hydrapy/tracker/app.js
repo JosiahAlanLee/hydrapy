@@ -1,4 +1,5 @@
 import {api, PreviewStream} from './backend.js';
+import {noteMidi, noteFrequency, canonicalNote} from './notes.js';
 const $ = id => document.getElementById(id);
 const clamp = (n,a,b) => Math.max(a,Math.min(b,n));
 const mod = (n,m) => ((n%m)+m)%m;
@@ -166,6 +167,8 @@ async function pollRemote(){
     $('connectionStatus').textContent=result.playing?'Transport running':'Transport paused';
     $('backendStatus').textContent=result.error||(result.path?`${result.backend} · ${result.fps.toFixed(1)} render fps · ${result.path}`:'Load a patch to begin');
     $('resolution').textContent=result.size.join(' × ');
+    $('cvStatus').textContent=!result.cv?'CV off · configure at launch':result.cv.error?`CV error: ${result.cv.error}`:`CV active · ${result.cv.underflows||0} underflows`;
+    $('cvStatus').title=result.cv?JSON.stringify(result.cv,null,2):'';
   }catch(error){
     playing=false;stopVoices();$('backendStatus').textContent=error.message;
     $('connectionStatus').textContent='Studio disconnected';
@@ -193,15 +196,15 @@ function ensureAudio(){
 }
 function stopVoices(){for(const n of voices){try{n.stop();}catch{}}voices.clear();nextTick=null;}
 function connectVoice(source,gain,t,duration){source.connect(gain);gain.connect(master);voices.add(source);source.onended=()=>{voices.delete(source);source.disconnect();gain.disconnect();};source.start(t);source.stop(t+duration);}
-function noteFreq(note){const values={'C-2':36,'D-2':38,'F#2':42,'D-4':62,'A-4':69,'F-4':65,'C-5':72,'A-1':33};const midi=(values[note]||62)+(state.key-2);return 440*2**((midi-69)/12);}
+function noteFreq(note){return noteFrequency(note, state.key);}
 function soundHit(track,hit,t){
-  if(!audioContext||!master||!hit)return;const vel=hit.vel/127;
+  if(!audioContext||!master||!hit)return;const vel=hit.vel/127;if(vel<=0)return;if((track===1||track===2)&&noteMidi(hit.note)===null)return;
   if(track===0&&hit.note==='C-2'){
     const o=audioContext.createOscillator(),g=audioContext.createGain();o.frequency.setValueAtTime(145,t);o.frequency.exponentialRampToValueAtTime(44,t+.13);g.gain.setValueAtTime(.95*vel,t);g.gain.exponentialRampToValueAtTime(.001,t+.29);connectVoice(o,g,t,.3);
   }else if(track===0){
     const snare=hit.note==='D-2',n=audioContext.createBufferSource(),f=audioContext.createBiquadFilter(),g=audioContext.createGain();n.buffer=noiseBuffer;f.type='highpass';f.frequency.value=snare?1000:7200;n.connect(f);f.connect(g);g.connect(master);g.gain.setValueAtTime(vel*(snare?.44:.18),t);g.gain.exponentialRampToValueAtTime(.001,t+(snare?.15:.04));voices.add(n);n.onended=()=>{voices.delete(n);n.disconnect();f.disconnect();g.disconnect();};n.start(t,mod(t*.17,1));n.stop(t+(snare?.17:.06));
   }else if(track===1){
-    const o=audioContext.createOscillator(),m=audioContext.createOscillator(),mg=audioContext.createGain(),g=audioContext.createGain();const freq=noteFreq(hit.note);o.frequency.value=freq;m.frequency.value=freq*2.73;mg.gain.setValueAtTime(freq*2,t);mg.gain.exponentialRampToValueAtTime(1,t+.3);m.connect(mg);mg.connect(o.frequency);g.gain.setValueAtTime(.17*vel,t);g.gain.exponentialRampToValueAtTime(.001,t+.5);connectVoice(o,g,t,.52);voices.add(m);m.onended=()=>{voices.delete(m);m.disconnect();mg.disconnect();};m.start(t);m.stop(t+.52);
+    const o=audioContext.createOscillator(),m=audioContext.createOscillator(),mg=audioContext.createGain(),g=audioContext.createGain();const freq=noteFreq(hit.note);o.frequency.value=freq;m.frequency.value=freq*2;mg.gain.setValueAtTime(freq*2,t);mg.gain.exponentialRampToValueAtTime(1,t+.3);m.connect(mg);mg.connect(o.frequency);g.gain.setValueAtTime(.17*vel,t);g.gain.exponentialRampToValueAtTime(.001,t+.5);connectVoice(o,g,t,.52);voices.add(m);m.onended=()=>{voices.delete(m);m.disconnect();mg.disconnect();};m.start(t);m.stop(t+.52);
   }else if(track===2){
     const o=audioContext.createOscillator(),g=audioContext.createGain();o.frequency.value=noteFreq(hit.note);g.gain.setValueAtTime(.001,t);g.gain.linearRampToValueAtTime(.38*vel,t+.01);g.gain.exponentialRampToValueAtTime(.001,t+.65);connectVoice(o,g,t,.7);
   }else{
@@ -267,6 +270,10 @@ function updateInspector(){
   ['z','roll','feedback'].forEach(id=>{const v=valueAt(p,id,selected.row);$(id+'Slider').value=v;$(id+'Value').textContent=formatValue(id,v);});
   $('selectedTrack').textContent=tracks[selected.col].name;$('selectedRow').textContent=`ROW ${hex(selected.row)}`;
   const hit=selected.col<4?p.audio[selected.col][selected.row]:null;
+  $('noteEditor').hidden=selected.col>=4;
+  $('noteInput').value=hit?.note||tracks[selected.col].note||'C-4';
+  $('velocityInput').value=hit?.vel??90;
+  $('auditionBtn').disabled=!hit;
   $('selectedHint').textContent=selected.col<4?(hit?`${hit.note} · velocity ${hit.vel}. Enter toggles this event.`:'Empty event. Enter inserts a hit.'):'Move a slider to write a keyframe.';
   $('curveTabs').querySelectorAll('button').forEach(b=>b.classList.toggle('active',b.dataset.curve===curve));
   $('easeButtons').querySelectorAll('button').forEach(b=>b.classList.toggle('active',b.dataset.ease===p.easing[curve]));
@@ -328,11 +335,29 @@ if(outputType){
   $('audioBtn').onclick=async()=>{state.sound=!state.sound;if(state.sound)await ensureAudio();if(master)master.gain.setTargetAtTime(state.sound?.23:0,audioContext.currentTime,.02);if(!state.sound)stopVoices();updateControls();saveLocal();};
   $('fullscreenBtn').onclick=fullscreen;$('programBtn').onclick=()=>openOutput('program');$('expandPreview').onclick=()=>openOutput('program');$('auxBtn').onclick=()=>openOutput('aux');$('blackoutBtn').onclick=toggleBlackout;
   $('followBtn').onclick=()=>{follow=!follow;$('followBtn').classList.toggle('active',follow);$('followBtn').setAttribute('aria-pressed',follow);};
-  $('trackerRows').addEventListener('click',e=>{const b=e.target.closest('[data-col]');if(!b)return;const col=Number(b.dataset.col);selectCell(Number(b.dataset.row),col,col>=4);if(col<4)toggleCell();});
+  $('trackerRows').addEventListener('click',e=>{const b=e.target.closest('[data-col]');if(!b)return;const col=Number(b.dataset.col);selectCell(Number(b.dataset.row),col,col>=4);});
   ['z','roll','feedback'].forEach(id=>$(id+'Slider').addEventListener('input',()=>setKey(id,Number($(id+'Slider').value))));
   $('curveTabs').querySelectorAll('button').forEach(b=>b.onclick=()=>{curve=b.dataset.curve;selected.col=tracks.findIndex(t=>t.id===curve);renderRows();updateInspector();});
   $('easeButtons').querySelectorAll('button').forEach(b=>b.onclick=()=>{state.patterns[state.pattern].easing[curve]=b.dataset.ease;updateInspector();saveLocal();});
   $('clearCellBtn').onclick=clearCell;
+  function writeNote(){
+    if(selected.col>=4)return;
+    try{
+      const note=canonicalNote($('noteInput').value.toUpperCase().trim());
+      const vel=Number($('velocityInput').value);
+      if(!Number.isInteger(vel)||vel<0||vel>127)throw new Error('Velocity must be 0–127.');
+      state.patterns[state.pattern].audio[selected.col][selected.row]={note,vel};
+      renderRows();updateInspector();saveLocal();
+    }catch(error){toast(error.message);}
+  }
+  $('noteInput').onchange=writeNote;$('velocityInput').onchange=writeNote;
+  $('insertNoteBtn').onclick=writeNote;
+  $('auditionBtn').onclick=async()=>{
+    const hit=state.patterns[state.pattern].audio[selected.col]?.[selected.row];
+    if(!hit)return;
+    state.sound=true;await ensureAudio();updateControls();saveLocal();
+    if(audioContext)soundHit(selected.col,hit,audioContext.currentTime+.01);
+  };
   $('curveCanvas').addEventListener('pointerdown',e=>{
     const rect=e.currentTarget.getBoundingClientRect(),d=e.currentTarget.width/rect.width,t=tracks.find(t=>t.id===curve),x=(e.clientX-rect.left)*d,y=(e.clientY-rect.top)*d;
     const row=clamp(Math.round((x-32)/(e.currentTarget.width-48)*63),0,63),value=t.min+(1-(y-18)/(e.currentTarget.height-41))*(t.max-t.min);
@@ -344,8 +369,8 @@ if(outputType){
   $('saveBtn').onclick=async()=>{
     await flushScore();if(conflicted)return;
     try{
-      await api('tracker_save',{revision});
-      const u=URL.createObjectURL(new Blob([JSON.stringify(state,null,2)],{type:'application/json'}));
+      const saved=await api('tracker_save',{revision});
+      const u=URL.createObjectURL(new Blob([JSON.stringify(saved.document,null,2)],{type:'application/json'}));
       const a=document.createElement('a');a.href=u;a.download='gorgon-session.json';a.click();setTimeout(()=>URL.revokeObjectURL(u),1000);
       $('savedState').textContent='Saved to workspace';toast('Score saved to .hydrapy/tracker.json and downloaded.');
     }catch(error){toast(error.message);}
