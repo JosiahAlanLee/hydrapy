@@ -140,9 +140,9 @@ Pauses and score edits reach CV when the server handles the command; signals
 already queued in the device cannot be recalled. Underflows and callback errors
 appear in Output routing; hover for device routes. A stopped/failed render thread
 publishes a stopped transport. Normal shutdown sends zero-volt commands before
-closing streams, including encoded ESX-8CV outputs.
+closing streams, including encoded ESX-8GT gates and ESX-8CV outputs.
 
-See [ES-40 + ESX-8CV setup](es40.md) for two-unit profiles, encoded diagnostics,
+See [ES-40 + ESX-8GT / ESX-8CV setup](es40.md) for gate/CV profiles, encoded diagnostics,
 and VCV troubleshooting. A profile can combine direct ADAT CV with encoded
 S/PDIF pairs in one stream on the same interface. Keep a patch's own `CvOut` on
 a separate device: uncoordinated writers can mix or fail to open, depending on

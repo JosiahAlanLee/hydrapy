@@ -6,22 +6,22 @@
       "samplerate": 48000,
       "es40": [
         {
-          "name": "Digi 003 rack ES-40",
+          "name": "Digi 003 rack ES-40 + ESX-8GT",
           "channels": [
             16,
             17
           ],
-          "header": null,
+          "header": 1,
           "map": {
-            "1": "pitch1",
-            "2": "gate1",
-            "3": "pitch2",
-            "4": "gate2",
+            "1": "gate1",
+            "2": "gate2",
+            "3": "gate3",
+            "4": "gate4",
             "5": "clock",
             "6": "reset",
-            "7": "vel1",
-            "8": "z"
-          }
+            "7": "run"
+          },
+          "expander": "8gt"
         }
       ]
     }

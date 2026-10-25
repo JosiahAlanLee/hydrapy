@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from hydrapy.es40 import Encoder8CV, ES40CV, diagnostic_wav, load_profile, pack_es40
+from hydrapy.es40 import Encoder8GT, Encoder8CV, ES40CV, diagnostic_wav, load_profile, pack_es40
 from hydrapy.studio_tracker import Tracker, note_midi, validate
 
 
@@ -203,3 +203,145 @@ def test_shutdown_clears_all_latched_dacs_before_stopping_stream():
     packets = decode(unpack(np.concatenate(captured)[:, [2, 3]], 1))
     assert {jack: code for _, jack, code in packets[-8:]} == {j: 2048 for j in range(8)}
     assert stream.stopped and stream.closed and cv.stream is None
+
+
+def gate_unit(pair=(2, 3), header=1, mapping=None):
+    return dict(unit(pair, header, mapping or {'1': 'gate1'}), expander='8gt')
+
+
+@pytest.mark.parametrize('blocksize', [1, 7, 64, 512])
+def test_gate_encoder_matches_manufacturer_all_states_thresholds_and_headers(blocksize):
+    fixture = json.loads(Path(__file__).with_name('fixtures').joinpath('es40-gates-reference.json').read_text())
+    volts, expected = np.array(fixture['inputs'], np.float32), np.array(fixture['rows'], np.int64)
+    encoder = Encoder8GT()
+    data = np.concatenate([encoder.encode(volts[start:start + blocksize])
+                           for start in range(0, len(volts), blocksize)])
+    assert np.array_equal(data, expected[:, 0])
+    assert np.array_equal(data[:256], np.arange(256))  # all gate combinations, including all off/on
+    for header in range(1, 6):
+        headers = np.zeros((len(data), 5), np.int32)
+        headers[:, header - 1] = data
+        packed = pack_es40(headers)
+        assert np.array_equal(packed.astype(np.int64) >> 8, expected[:, 2 * header - 1:2 * header + 1])
+        for other in range(1, 6):
+            assert np.array_equal(unpack(packed, other), data if other == header else np.zeros(len(data)))
+
+
+def test_gate_hysteresis_survives_empty_and_split_audio_blocks():
+    encoder = Encoder8GT()
+    assert encoder.encode(np.full((1, 8), .75)).tolist() == [0]
+    assert encoder.encode(np.full((1, 8), 1.)).tolist() == [255]
+    assert encoder.encode(np.empty((0, 8))).size == 0
+    assert encoder.encode(np.full((1, 8), .5)).tolist() == [255]
+    assert encoder.encode(np.full((1, 8), .499)).tolist() == [0]
+
+
+def test_header1_gate1_polarity_reversal_reproduces_all_eight_gates():
+    headers = np.array([[1, 0, 0, 0, 0]], np.int32)
+    pcm = pack_es40(headers)
+    assert (pcm >> 8).tolist() == [[65536, 0]]
+    assert unpack(pcm, 1).tolist() == [1]
+    # A diagnostic hypothesis, not evidence that this machine reverses polarity.
+    assert unpack(-pcm, 1).tolist() == [255]
+
+
+def test_tracker_gate1_does_not_activate_other_gates_and_pause_mute_clear_it():
+    d = copy.deepcopy(Tracker().document)
+    for pattern in d['patterns']:
+        pattern['audio'] = [[None] * 64 for _ in range(4)]
+    d['patterns'][0]['audio'][0][0] = {'note': 'C4', 'vel': 100}
+    tracker = Tracker(d)
+    tracker.enabled = True
+    tracker.seek(0., 0.)
+    cv = ES40CV([gate_unit(mapping={str(i): f'gate{i}' for i in range(1, 5)})], open_stream=False)
+    for playing, muted, expected in [(True, False, 1), (False, False, 0),
+                                    (True, False, 1), (True, True, 0)]:
+        tracker.document['mutes'][0] = muted
+        cv.publish(tracker, 0., 100., playing)
+        out = np.zeros((256, 4), np.int32)
+        cv._write_volts(out, cv.render(256, 100.))
+        assert np.all(unpack(out[:, [2, 3]], 1) == expected)
+        assert not out[:, :2].any()
+
+
+def test_mixed_gate_cv_and_direct_pitch_routes_are_independent():
+    cv = ES40CV([gate_unit(), unit((6, 7), 5)], direct='0=pitch1', open_stream=False)
+    values = np.zeros((96, len(cv.mapping)))
+    values[:, cv.columns['pitch1']] = 1.
+    values[:, cv.columns['gate1']] = 5.
+    out = np.zeros((96, 8), np.int32)
+    cv._write_volts(out, values)
+    assert np.all(unpack(out[:, [2, 3]], 1) == 1)
+    assert [code for _, _, code in decode(unpack(out[:, [6, 7]], 5))[:3]] == [2432, 3968, 2048]
+    assert np.all(out[:, 0] == int(2147483648 / cv.volts_per_fs))
+    assert not out[:, [1, 4, 5]].any()
+
+
+@pytest.mark.parametrize('signal', ['pitch1', 'vel1', 'roll'])
+def test_gate_expander_rejects_continuous_cv_signals(signal):
+    with pytest.raises(ValueError, match='gates only'):
+        ES40CV([gate_unit(mapping={'1': signal})], open_stream=False)
+
+
+def test_unknown_expander_is_rejected_and_current_rack_profile_uses_gates():
+    with pytest.raises(ValueError, match='8gt or 8cv'):
+        ES40CV([dict(gate_unit(), expander='unknown')], open_stream=False)
+    path = Path(__file__).parents[1]/'docs/examples/digi003-es40.json'
+    output = load_profile(path, open_stream=False).outputs[0]
+    assert output.units[0]['expander'] == '8gt'
+    assert output.units[0]['map'][1] == 'gate1'
+    assert isinstance(output.encoders[0], Encoder8GT)
+
+
+def test_gate_callback_error_and_shutdown_clear_previously_active_gates():
+    cv = ES40CV([gate_unit(mapping={str(i): 'gate1' for i in range(1, 9)})], open_stream=False)
+    out = np.zeros((16, 4), np.int32)
+    cv._write_volts(out, np.full((16, 1), 5.))
+    assert np.all(unpack(out[:, [2, 3]], 1) == 255)
+    cv.snapshot = {'broken': True}
+    cv._callback(out, 16, types.SimpleNamespace(), None)
+    assert cv.error and not out.any()
+    cv._write_volts(out, np.full((16, 1), 5.))
+    class Stream:
+        latency = 0.
+        stopped = closed = False
+        @property
+        def active(self):
+            cv._callback(out, 16, types.SimpleNamespace(), None)
+            return True
+        def stop(self): self.stopped = True
+        def close(self): self.closed = True
+    stream = cv.stream = Stream()
+    cv.close()
+    assert not out.any() and not cv.encoders[0].bits.any()
+    assert stream.stopped and stream.closed and cv.stream is None
+
+
+@pytest.mark.parametrize('header,samplerate', [(h, 48000) for h in range(1, 6)] + [(1, 44100)])
+def test_gate_diagnostic_every_frame_activates_only_the_expected_jack(tmp_path, header, samplerate):
+    path = tmp_path/'gates.wav'
+    diagnostic_wav(path, expander='8gt', header=header, samplerate=samplerate)
+    with wave.open(str(path)) as wav:
+        assert (wav.getnchannels(), wav.getsampwidth(), wav.getframerate(), wav.getnframes()) == (2, 3, samplerate, 18*samplerate)
+        for second in range(18):
+            raw = np.frombuffer(wav.readframes(samplerate), np.uint8).reshape(-1, 3)
+            padded = np.zeros((len(raw), 4), np.uint8)
+            padded[:, 1:] = raw
+            pcm = np.frombuffer(padded.tobytes(), '<i4').reshape(-1, 2)
+            mask = 1 << ((second - 1) // 2) if 1 <= second <= 16 and second % 2 else 0
+            for other in range(1, 6):
+                assert np.all(unpack(pcm, other) == (mask if other == header else 0))
+
+
+def test_diagnostic_cli_requires_model_and_reports_gate_output(tmp_path, capsys):
+    from hydrapy.cli import main
+    path = tmp_path/'gates.wav'
+    with pytest.raises(SystemExit) as error:
+        main(['es40-check', '-o', str(path)])
+    assert error.value.code == 2 and not path.exists()
+    assert '--expander' in capsys.readouterr().err
+    main(['es40-check', '--expander', '8gt', '-o', str(path)])
+    assert 'ESX-8GT' in capsys.readouterr().out
+    with wave.open(str(path)) as wav:
+        wav.setpos(48000)
+        assert wav.readframes(1) == bytes([0, 0, 1, 0, 0, 0])  # header 1, gate 1 only
