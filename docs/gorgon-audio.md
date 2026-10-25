@@ -19,10 +19,11 @@ through the audio graph.
    sample rate, period, buffer lead and error counters. Levels and enable state
    are saved in `.hydrapy/outputs.json` and restored on the next Studio launch.
 4. In Rack, right-click **Gorgon** and choose its audio driver, capture device
-   and input channel group. Select JACK and a device/group exposing four input
-   channels. In your JACK/PipeWire patchbay, connect the four HydraPy ports to
-   those four Rack capture channels in the order below. Device choices depend
-   on the JACK driver; use the actual port names shown by the patchbay.
+   and input channel group: JACK, the device named after Studio's client
+   (`HydraPy`), channels 1–4. When Rack opens that device it connects the four
+   HydraPy ports to those capture channels itself, in the order below; check
+   them in your JACK/PipeWire patchbay. With any other device, connect them
+   there by hand, using the actual port names the patchbay shows.
 5. Patch Gorgon's audio jacks into a Rack mixer or processing chain, then an
    ordinary Audio output module for listening. Enable browser **Sound** only
    when you also want the independent browser audition synth.
@@ -36,8 +37,10 @@ through the audio graph.
 
 JACK may suffix duplicate client names, so use the full names displayed in
 Studio rather than assuming a fixed `HydraPy:` prefix. Rack saves its audio
-device selection with the patch; the external patchbay connections follow the
-session manager's normal persistence rules.
+device selection with the patch, so loading the patch while Studio is running
+makes the connections again. Rack connects only when it opens the device: if
+Studio restarts while Rack keeps running, the OPT/BRK jacks fall silent until
+the four ports are connected again in the patchbay.
 
 ## What produces the sound
 
@@ -76,6 +79,10 @@ default optical gain 0.5 limits a full-scale waveform to ±5 V. The separate
 direct CV) for gates, clock, reset, run, velocity, Z and feedback. Pitch stays
 1 V/oct, roll stays ±5 V, and audio scaling is independent of that choice.
 **OFFSET** adjusts Rack's score/CV timing; it does not move received PCM.
+At 48 kHz/256 with the default lead, Rack's capture arrived 10.7 ms after
+Studio's ports (16 ms in two JACK1 runs), and a Breaks hit reached Gorgon's BRK
+jacks 16–22 ms after its GATE 1 pulse (about 21.5 ms in four runs of five). An
+OFFSET of about −20 ms lines up a Rack voice played from the gates with Breaks.
 Measure end-to-end audio/video latency on the actual workstation.
 
 ## ES-40 data stays on its own route
@@ -139,6 +146,17 @@ HYDRAPY_JACK_TESTS=1 python -m pytest -q -s tests/test_studio_jack.py
 # PipeWire compatibility variant:
 HYDRAPY_JACK_TESTS=1 pw-jack python -m pytest -q -s tests/test_studio_jack.py
 ```
+
+A workstation run on 2026-10-25 took the whole chain through a real Rack (VCV
+Rack Free 2.6.6, Gorgon 2.1.0 driving Vastish) on isolated JACK1 and PipeWire
+1.0.7 servers at 48 kHz/256. Rack's clock held 138 BPM to within 0.01 ms, and
+Vastish sounded on every gate. Gorgon's four captured channels matched Studio's
+ports sample for sample, to within float rounding (largest difference 3×10⁻⁸).
+Studio's counters stayed at zero on PipeWire. On JACK1 they showed 2 underruns
+and 3 late packets since Studio's start, and the captured audio still matched.
+A Rack Pro not signed in to a VCV account processed no audio, so the run used
+Rack Free. The live desktop session, the Digi003/ES-40 and a signed-in Rack Pro
+were not part of it.
 
 Linux CI runs isolated native JACK/dummy and PipeWire daemons separately,
 checking the audio loopback, encoded gate/CV words, live polarity changes,
