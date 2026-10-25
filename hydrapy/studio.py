@@ -718,6 +718,8 @@ def make_server(session, port=8765):
                       '/tracker/app.js': ('app.js', 'text/javascript; charset=utf-8'),
                       '/tracker/backend.js': ('backend.js', 'text/javascript; charset=utf-8'),
                       '/tracker/notes.js': ('notes.js', 'text/javascript; charset=utf-8'),
+                      '/tracker/editor.js': ('editor.js', 'text/javascript; charset=utf-8'),
+                      '/tracker/editor.css': ('editor.css', 'text/css; charset=utf-8'),
                       '/tracker/style.css': ('style.css', 'text/css; charset=utf-8')}
             if parsed.path in assets:
                 name, mime = assets[parsed.path]

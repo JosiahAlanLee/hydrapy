@@ -16,6 +16,7 @@ guide for the work you want to make. Run commands from the repository root.
 | [Live control and modular audio](live-io.md) | CV in/out, the painted oscillator, probes, OSC, MIDI, Ableton Link, hot reload and video out |
 | [Performance sessions](performance-sessions.md) | Beat-timed OSC clips, visible score previews, Vortex capture, child processes and the RAVE integration boundary |
 | [Gorgon tracker](gorgon-tracker.md) | Fullscreen Studio score, parameter automation, independent output windows and browser synth sketch |
+| [Gorgon editor walkthrough](gorgon-editor-walkthrough.md) | Keyboard and block editing, pattern tools, recovery, and a workstation video capture guide |
 | [Rendering and export](rendering-and-export.md) | NumPy/GLSL backends, hardware encoding, frame holds, alpha, streaming and audio export, fxhash projects |
 | [Demoscene tools](DEMOSCENE.md) | Materials, metaballs, spline wireframes, 3D fields, fractal folds and musical timelines |
 | [Animated thi.ng adaptations](TOXI_ANIMATION_SOURCES.md) | Cellular rules, Voronoi fields, curves, vegetation, export limits and source provenance |

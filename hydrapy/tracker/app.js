@@ -1,5 +1,7 @@
 import {api, PreviewStream} from './backend.js';
 import {noteMidi, noteFrequency, canonicalNote} from './notes.js';
+import {ScoreHistory, bounds, getCell, putCell, copyBlock, readBlock, pasteBlock, clearBlock,
+  transposeBlock, setBlockVelocity, pianoNote, activity} from './editor.js';
 const $ = id => document.getElementById(id);
 const clamp = (n,a,b) => Math.max(a,Math.min(b,n));
 const mod = (n,m) => ((n%m)+m)%m;
@@ -33,6 +35,9 @@ const defaults = () => ({version:1,format:'hydrapy-tracker-1',bindings:{z:'Dolly
 let state=defaults();
 let playing=false,anchorBeat=state.pattern*16,anchorTime=performance.now(),blackout=false,follow=true;
 let selected={row:0,col:4},curve='z',lastStep=-1,lastPattern=-1;
+let editPattern=0, selectionAnchor=null, clipboard=null, pianoEntry=false, entryVelocity=90;
+let curveDirty=true, curvePaint=null;
+const history = new ScoreHistory();
 let audioContext=null,master=null,noiseBuffer=null,nextTick=null,analyser=null,levelData=null;
 let voices=new Set(),toastTimer=null;
 const outputType=new URL(location.href).searchParams.get('output');
@@ -69,8 +74,46 @@ function waveform(seed=0,bars=64){
   let out='';for(let i=0;i<bars;i++){const hit=(i+seed)%8===0;const h=hit?21:3+Math.abs(Math.sin(i*2.38+seed)*Math.cos(i*.43))*15;out+=`<path d="M${i*4+1} ${12-h/2}v${h.toFixed(1)}"/>`;}
   return `<svg viewBox="0 0 ${bars*4} 24" preserveAspectRatio="none" aria-hidden="true"><g stroke="currentColor" stroke-width="1.1">${out}</g></svg>`;
 }
+function patternActivity(pattern){
+  const bars=activity(pattern);
+  return `<svg class="activity-map" viewBox="0 0 256 24" preserveAspectRatio="none" aria-hidden="true">${bars.map((v,r)=>
+    `<path d="M${r*4+1} 21v-${v.audio*4}" stroke="currentColor" stroke-width="2"/>`+
+    (v.keys?`<path d="M${r*4+1} 2v${v.keys*2}" stroke="#e2ac77" stroke-width="2"/>`:'')).join('')}</svg>`;
+}
+function selectionBox(){return bounds(selected,selectionAnchor||selected);}
+function focusCell(scroll=false){
+  const el=$('trackerRows').querySelector(`[data-row="${selected.row}"][data-col="${selected.col}"]`);
+  el?.focus({preventScroll:true});
+  if(scroll)el?.scrollIntoView({block:'nearest',inline:'nearest'});
+}
+function setFollow(value){
+  follow=value;$('followBtn').classList.toggle('active',follow);$('followBtn').setAttribute('aria-pressed',follow);
+  lastPattern=-1;
+}
+function updateHistory(){
+  $('undoBtn').disabled=!history.past.length;$('redoBtn').disabled=!history.future.length;
+  $('undoBtn').title=history.past.length?`Undo ${history.past.at(-1).label} · Ctrl/Cmd+Z`:'Nothing to undo';
+  $('redoBtn').title=history.future.length?`Redo ${history.future.at(-1).label} · Ctrl/Cmd+Shift+Z`:'Nothing to redo';
+}
+function redrawScore(){renderPatterns();renderHeaders();renderRows();renderInstruments();updateControls();updateInspector();updateHistory();}
+function changeScore(label,mutate,merge=''){
+  if(!remote){toast('Wait for Studio to connect before editing.');return false;}
+  try{
+    const changed=history.change(state,label,mutate,{pattern:editPattern,selected},merge);
+    if(changed){redrawScore();saveLocal();}
+    return changed;
+  }catch(error){toast(error.message);return false;}
+}
+function restoreHistory(redo=false){
+  const entry=redo?history.redo(state):history.undo(state);
+  if(!entry)return;
+  editPattern=entry.context.pattern;selected={...entry.context.selected};selectionAnchor=null;
+  setFollow(false);stopVoices();redrawScore();saveLocal();focusCell(true);
+  toast(`${redo?'Redid':'Undid'} ${entry.label}.`);
+}
 function toast(message){$('toast').textContent=message;$('toast').classList.add('visible');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').classList.remove('visible'),4000);}
 let remote = null, revision = 0, pendingScore = null, scoreRequest = null, scoreTimer;
+let scoreFailed = false, failedDocument = null, acceptedDocument = null;
 let transportQueue = Promise.resolve(), conflicted = false;
 let transportPending = 0, transportEpoch = 0;
 let transportRevision = null;
@@ -78,18 +121,21 @@ const preview = new PreviewStream(outputType === 'aux' ? 'aux' : 'program');
 window.gorgonPreview = preview.stats;
 const escapeHTML = value => String(value).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 function saveLocal(){
-  if (!remote || conflicted) return;
+  if (!remote) return;
   pendingScore = structuredClone(state);
-  $('savedState').textContent = 'Unsaved score';
+  if(conflicted||scoreFailed)return;
+  $('savedState').textContent = 'Applying edit…';
   clearTimeout(scoreTimer); scoreTimer = setTimeout(flushScore, 120);
 }
 async function flushScore(){
   clearTimeout(scoreTimer);
   if (scoreRequest) { await scoreRequest; return flushScore(); }
-  if (!pendingScore) return;
+  if(conflicted||scoreFailed)return false;
+  if (!pendingScore) return true;
   const document = pendingScore; pendingScore = null;
   scoreRequest = api('tracker_score', {document, revision}).then(result => {
     revision = result.revision;
+    acceptedDocument=structuredClone(result.document);
     // Studio may have switched its displayed output since this edit's base.
     // Keep that choice unless the user has changed the program route again.
     const program = result.document.modes.program;
@@ -98,11 +144,43 @@ async function flushScore(){
     if (program !== document.modes.program) updateControls();
     $('savedState').textContent = 'Score applied · not saved';
   }).catch(error => {
-    conflicted = true; pendingScore = null;
-    $('savedState').textContent = 'Edit rejected · reload'; toast(error.message);
+    pendingScore=pendingScore||structuredClone(state);failedDocument=document;
+    conflicted=!!error.status&&error.status<500;scoreFailed=true;
+    $('savedState').textContent=conflicted?'Edit rejected · recovery available':'Edit pending · retry';
+    $('editConnection').hidden=false;
+    $('editConnectionText').textContent=conflicted?`${error.message} Your local edits are preserved for download.`:'Connection interrupted. Local edits have not been confirmed by Studio.';
+    $('retryScoreBtn').hidden=conflicted;
+    toast(error.message);
   });
   await scoreRequest; scoreRequest = null;
+  if(conflicted||scoreFailed)return false;
   if (pendingScore) return flushScore();
+  return true;
+}
+function sameScore(a,b){
+  if(!a||!b)return false;
+  const left=structuredClone(a),right=structuredClone(b);
+  left.modes.program=right.modes.program='o0';
+  return JSON.stringify(left)===JSON.stringify(right);
+}
+async function retryScore(){
+  try{
+    const result=await api('tracker');
+    if(!sameScore(result.document,acceptedDocument)&&!sameScore(result.document,failedDocument)){
+      conflicted=true;$('retryScoreBtn').hidden=true;
+      throw new Error('Studio has different edits. Download your recovery copy before choosing Use server score.');
+    }
+    const program=failedDocument?.modes.program;
+    if(state.modes.program===program)state.modes.program=result.document.modes.program;
+    revision=result.revision;acceptedDocument=structuredClone(result.document);
+    scoreFailed=conflicted=false;pendingScore=structuredClone(state);
+    $('editConnection').hidden=true;
+    await flushScore();
+  }catch(error){$('editConnectionText').textContent=error.message;toast(error.message);}
+}
+function downloadScore(score=state,name='gorgon-recovery.json'){
+  const u=URL.createObjectURL(new Blob([JSON.stringify(score,null,2)],{type:'application/json'}));
+  const a=document.createElement('a');a.href=u;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(u),1000);
 }
 function adoptTransport(result, elapsed=0){
   const old = rawBeat(), length = state.loop ? 16 : 64;
@@ -126,12 +204,14 @@ function adoptTransport(result, elapsed=0){
   $('automationBtn').setAttribute('aria-pressed',result.enabled);
   $('automationBtn').textContent=result.enabled?'Automation on':'Automation off';
 }
-function transport(changes){
+function transport(changes,{score=true}={}){
   transportPending++;transportEpoch++;
   transportQueue=transportQueue.then(async()=>{
-    await flushScore();
-    if(conflicted) throw new Error('Reload to recover the last accepted score.');
-    const result=await api('tracker_transport',typeof changes==='function'?changes():changes);
+    const request=typeof changes==='function'?changes():changes;
+    // A rejected edit must never trap the operator with a running or visible output.
+    const pause=request.playing===false&&request.beat===undefined;
+    if(score&&!pause&&!await flushScore())throw new Error('Resolve the pending edit before changing transport. Your recovery copy is available in File.');
+    const result=await api('tracker_transport',request);
     adoptTransport(result); if(remote) Object.assign(remote,result);
   }).catch(error=>toast(error.message)).finally(()=>{transportPending--;transportEpoch++;});
   return transportQueue;
@@ -147,6 +227,7 @@ function renderBindings(controls){
       select.dataset.options=signature;
     }
     select.value=name;
+    for(const option of select.options){option.disabled=!!option.value&&Object.entries(state.bindings).some(([other,bound])=>other!==lane&&bound===option.value);}
     select.classList.toggle('missing',!!name&&!controls.some(p=>p.name===name));
   }
 }
@@ -156,9 +237,11 @@ async function pollRemote(){
     const result=await api('tracker');
     if(!result.document)throw new Error('Studio is starting.');
     if(result.server_now-result.sampled>3)throw new Error('Studio renderer is not responding.');
-    if(!remote||(!pendingScore&&!scoreRequest&&result.revision>revision)){
-      if(!remote)$('savedState').textContent='Live score · save to keep';
+    if(!remote||(!conflicted&&!scoreFailed&&!pendingScore&&!scoreRequest&&result.revision>revision)){
+      if(!remote){editPattern=result.document.pattern;$('savedState').textContent='Live score · save to keep';}
+      else if(!sameScore(result.document,acceptedDocument)){history.clear();updateHistory();}
       state=result.document;revision=result.revision;
+      acceptedDocument=structuredClone(result.document);
       if(!outputType){renderPatterns();renderHeaders();renderRows();renderInstruments();updateControls();updateInspector();}
     }
     if(!transportPending&&epoch===transportEpoch){
@@ -236,72 +319,132 @@ async function togglePlay(){
   return transport(()=>({playing:!playing,enabled:true}));
 }
 function renderPatterns(){
-  $('patterns').innerHTML=state.patterns.map((p,i)=>`<button class="pattern-card ${i===state.pattern?'selected':''}" data-pattern="${i}" aria-label="Select pattern ${i+1}: ${escapeHTML(p.name)}" aria-pressed="${i===state.pattern}"><div class="pattern-top"><b>${pad(i+1)}</b><span>${escapeHTML(p.name)}</span><span class="bars">${pad(i*4+1)}—${pad(i*4+4)}</span></div>${waveform(i*3)}<i class="pattern-playhead"></i></button>`).join('');
-  $('patterns').querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>selectPattern(Number(b.dataset.pattern),true)));
+  $('patterns').innerHTML=state.patterns.map((p,i)=>`<div class="pattern-slot"><button class="pattern-card ${i===editPattern?'selected':''}" data-pattern="${i}" aria-label="Select pattern ${i+1}: ${escapeHTML(p.name)}" aria-pressed="${i===editPattern}"><div class="pattern-top"><b>${pad(i+1)}</b><span>${escapeHTML(p.name)}</span><span class="bars">${pad(i*4+1)}—${pad(i*4+4)}</span></div>${patternActivity(p)}<i class="pattern-playhead"></i></button><button class="pattern-launch" data-launch="${i}" aria-label="Play from pattern ${i+1}" title="Launch pattern ${i+1}">▶</button></div>`).join('');
+  $('patterns').querySelectorAll('[data-pattern]').forEach(b=>b.onclick=()=>selectPattern(Number(b.dataset.pattern)));
+  $('patterns').querySelectorAll('[data-launch]').forEach(b=>b.onclick=()=>launchPattern(Number(b.dataset.launch)));
 }
 function renderHeaders(){
   $('trackHeaders').innerHTML='<div class="track-header row-index">ROW</div>'+tracks.map((t,i)=>`<div class="track-header ${t.visual?'visual':''}"><div><strong>${t.name}</strong>${t.visual?'':`<button class="mute" data-mute="${i}" aria-label="Mute ${t.name}" aria-pressed="${state.mutes[i]}">M</button>`}</div><span>${t.sub}</span></div>`).join('');
-  $('trackHeaders').querySelectorAll('[data-mute]').forEach(b=>b.addEventListener('click',()=>{state.mutes[Number(b.dataset.mute)]=!state.mutes[Number(b.dataset.mute)];stopVoices();renderHeaders();renderRows();saveLocal();}));
+  $('trackHeaders').querySelectorAll('[data-mute]').forEach(b=>b.onclick=()=>{
+    changeScore('mute lane',()=>{state.mutes[Number(b.dataset.mute)]=!state.mutes[Number(b.dataset.mute)];});stopVoices();
+  });
 }
 function formatValue(id,v){return id==='roll'?`${v>=0?'+':''}${Math.round(v)}°`:v.toFixed(2);}
 function renderRows(){
-  const p=state.patterns[state.pattern];let html='';
+  const grid=$('trackerRows'),hadFocus=grid.contains(document.activeElement),p=state.patterns[editPattern],box=selectionBox();let html='';
   for(let r=0;r<64;r++){
-    html+=`<div class="tracker-row ${r%4===0?'beat':''} ${r%16===0?'bar':''}" role="row" data-row="${r}"><span class="row-number" role="rowheader">${hex(r)}</span>`;
+    html+=`<div class="tracker-row ${r%4===0?'beat':''} ${r%16===0?'bar':''}" role="row" data-row="${r}"><button class="row-number" role="rowheader" tabindex="-1" data-seek-row="${r}" title="Double-click to seek to row ${hex(r)}">${hex(r)}</button>`;
     tracks.forEach((t,c)=>{
-      const key=t.visual?p.keys[t.id].find(k=>k.r===r):p.audio[c][r];const content=key?(t.visual?formatValue(t.id,key.v):`${key.note}<span class="velocity">${hex(key.vel)}</span>`):'···';
-      html+=`<button role="gridcell" tabindex="${selected.row===r&&selected.col===c?'0':'-1'}" class="cell ${t.visual?'visual':''} ${!key?'empty':''} ${selected.row===r&&selected.col===c?'selected':''} ${c<4&&state.mutes[c]?'muted':''}" data-row="${r}" data-col="${c}" aria-label="${t.name}, row ${hex(r)}, ${key?(t.visual?formatValue(t.id,key.v):key.note):'empty'}" aria-selected="${selected.row===r&&selected.col===c}">${content}</button>`;
+      const key=getCell(p,r,c),isSelected=selected.row===r&&selected.col===c;
+      const inBlock=r>=box.r0&&r<=box.r1&&c>=box.c0&&c<=box.c1;
+      const content=key?(t.visual?formatValue(t.id,key.v):`${escapeHTML(key.note)}<span class="velocity">${hex(key.vel)}</span>`):'···';
+      html+=`<button role="gridcell" tabindex="${isSelected?'0':'-1'}" class="cell ${t.visual?'visual':''} ${!key?'empty':''} ${isSelected?'selected':''} ${inBlock?'in-selection':''} ${c<4&&state.mutes[c]?'muted':''}" data-row="${r}" data-col="${c}" aria-label="${t.name}, row ${hex(r)}, ${key?(t.visual?formatValue(t.id,key.v):escapeHTML(key.note)):'empty'}" aria-selected="${inBlock}">${content}</button>`;
     });html+='</div>';
   }
-  $('trackerRows').innerHTML=html;lastStep=-1;
+  grid.innerHTML=html;lastStep=-1;
+  if(hadFocus)focusCell();
+  updateSelection();
+}
+function updateSelection(){
+  const box=selectionBox();
+  $('trackerRows').querySelectorAll('[data-col]').forEach(el=>{
+    const r=Number(el.dataset.row),c=Number(el.dataset.col),active=r===selected.row&&c===selected.col;
+    const inside=r>=box.r0&&r<=box.r1&&c>=box.c0&&c<=box.c1;
+    el.classList.toggle('selected',active);el.classList.toggle('in-selection',inside);
+    el.setAttribute('aria-selected',inside);el.tabIndex=active?0:-1;
+  });
+  const count=(box.r1-box.r0+1)*(box.c1-box.c0+1);
+  $('selectionInfo').textContent=count===1?'1 cell':`${box.r1-box.r0+1} × ${box.c1-box.c0+1} cells`;
+  document.querySelectorAll('[data-transpose]').forEach(el=>{el.disabled=box.c0>=4;});
 }
 function renderInstruments(){
   $('instruments').innerHTML=tracks.slice(0,4).map((t,i)=>`<button class="instrument ${selected.col===i?'active':''}" data-instrument="${i}" title="Audition ${t.label}"><span class="instrument-name"><strong>${t.label}</strong><small>${t.tag}</small></span>${waveform(i*7,38)}</button>`).join('');
-  $('instruments').querySelectorAll('button').forEach(b=>b.addEventListener('click',async()=>{selected.col=Number(b.dataset.instrument);await ensureAudio();if(master&&state.sound)soundHit(selected.col,{note:tracks[selected.col].note,vel:90},audioContext.currentTime+.005);renderInstruments();renderRows();updateInspector();}));
+  $('instruments').querySelectorAll('button').forEach(b=>b.onclick=async()=>{
+    selectCell(selected.row,Number(b.dataset.instrument));await ensureAudio();
+    if(master&&state.sound)soundHit(selected.col,{note:tracks[selected.col].note,vel:90},audioContext.currentTime+.005);
+    renderInstruments();focusCell(true);
+  });
 }
-function selectPattern(index,doSeek=false){state.pattern=index;renderPatterns();renderRows();updateInspector();if(doSeek)seek(index*16);saveLocal();}
-function selectCell(row,col,seekVisual=false){
-  selected={row,col};if(tracks[col].visual){curve=tracks[col].id;if(seekVisual)seek(state.pattern*16+row/4);}
-  $('trackerRows').querySelectorAll('.selected').forEach(e=>{e.classList.remove('selected');e.setAttribute('aria-selected','false');e.tabIndex=-1;});
-  const cell=$('trackerRows').querySelector(`[data-row="${row}"][data-col="${col}"]`);cell?.classList.add('selected');cell?.setAttribute('aria-selected','true');if(cell)cell.tabIndex=0;
-  updateInspector();
+function selectPattern(index){
+  editPattern=index;selectionAnchor=null;setFollow(false);
+  renderPatterns();renderRows();updateInspector();renderInstruments();
 }
-function toggleCell(){const p=state.patterns[state.pattern],t=tracks[selected.col];if(t.visual){const keys=p.keys[t.id];const found=keys.findIndex(k=>k.r===selected.row);if(found>=0)keys.splice(found,1);else keys.push({r:selected.row,v:valueAt(p,t.id,selected.row)});keys.sort((a,b)=>a.r-b.r);}else{p.audio[selected.col][selected.row]=p.audio[selected.col][selected.row]?null:{note:t.note,vel:90};}renderRows();updateInspector();saveLocal();}
-function clearCell(){const t=tracks[selected.col],p=state.patterns[state.pattern];if(t.visual)p.keys[t.id]=p.keys[t.id].filter(k=>k.r!==selected.row);else p.audio[selected.col][selected.row]=null;renderRows();updateInspector();saveLocal();}
+function launchPattern(index){
+  selectPattern(index);
+  if(state.loop){state.pattern=index;saveLocal();}
+  if(state.sound)ensureAudio();
+  return transport({beat:index*16,playing:true,enabled:true});
+}
+function seekSelected(){
+  if(state.loop&&state.pattern!==editPattern){state.pattern=editPattern;saveLocal();updateControls();}
+  return seek(editPattern*16+selected.row/4);
+}
+function selectCell(row,col,extend=false){
+  if(extend){if(!selectionAnchor)selectionAnchor={...selected};}else selectionAnchor=null;
+  selected={row,col};if(tracks[col].visual)curve=tracks[col].id;
+  if(playing&&follow)setFollow(false);
+  updateSelection();updateInspector();
+}
+function toggleCell(){
+  changeScore('toggle cell',()=>{
+    const p=state.patterns[editPattern],t=tracks[selected.col];
+    const value=getCell(p,selected.row,selected.col)?null:t.visual?{v:valueAt(p,t.id,selected.row)}:{note:t.note,vel:entryVelocity};
+    putCell(p,selected.row,selected.col,value);
+  });
+}
+function clearCell(){changeScore('clear cells',()=>clearBlock(state.patterns[editPattern],selectionBox()));}
 function setKey(id,value){
-  const t=tracks.find(t=>t.id===id),p=state.patterns[state.pattern],v=clamp(value,t.min,t.max);let key=p.keys[id].find(k=>k.r===selected.row);
-  if(key)key.v=v;else p.keys[id].push({r:selected.row,v});p.keys[id].sort((a,b)=>a.r-b.r);curve=id;selected.col=tracks.findIndex(t=>t.id===id);renderRows();updateInspector();saveLocal();
+  const t=tracks.find(t=>t.id===id),v=clamp(value,t.min,t.max);
+  if(!Number.isFinite(v)){toast('Enter a finite key value.');return;}
+  curve=id;selected.col=tracks.findIndex(t=>t.id===id);selectionAnchor=null;
+  if(!changeScore('automation value',()=>putCell(state.patterns[editPattern],selected.row,selected.col,{v}),`key:${editPattern}:${id}:${selected.row}`)){
+    renderRows();updateInspector();
+  }
 }
 function updateInspector(){
-  const p=state.patterns[state.pattern];$('patternTitle').textContent=`${pad(state.pattern+1)} / ${escapeHTML(p.name)}`;
+  curveDirty=true;
+  const p=state.patterns[editPattern];$('patternTitle').textContent=`${pad(editPattern+1)} / ${p.name}`;
+  $('patternName').value=p.name;
+  const options=state.patterns.map((pattern,i)=>new Option(`${pad(i+1)} / ${pattern.name}`,String(i)));
+  const previous=$('duplicateTarget').value;
+  $('duplicateTarget').replaceChildren(...options);
+  $('duplicateTarget').value=previous!==''&&Number(previous)!==editPattern?previous:String((editPattern+1)%4);
   $('keyLocation').textContent=`KEY / ${hex(selected.row)}`;
   ['z','roll','feedback'].forEach(id=>{const v=valueAt(p,id,selected.row);$(id+'Slider').value=v;$(id+'Value').textContent=formatValue(id,v);});
-  $('selectedTrack').textContent=tracks[selected.col].name;$('selectedRow').textContent=`ROW ${hex(selected.row)}`;
+  $('selectedTrack').textContent=tracks[selected.col].name;$('selectedRow').textContent=`P${editPattern+1} / ROW ${hex(selected.row)}`;
   const hit=selected.col<4?p.audio[selected.col][selected.row]:null;
-  $('noteEditor').hidden=selected.col>=4;
+  $('noteEditor').hidden=selected.col>=4;$('visualCellEditor').hidden=selected.col<4;
   $('noteInput').value=hit?.note||tracks[selected.col].note||'C-4';
-  $('velocityInput').value=hit?.vel??90;
-  $('auditionBtn').disabled=!hit;
-  $('selectedHint').textContent=selected.col<4?(hit?`${hit.note} · velocity ${hit.vel}. Enter toggles this event.`:'Empty event. Enter inserts a hit.'):'Move a slider to write a keyframe.';
+  $('velocityInput').value=hit?.vel??entryVelocity;$('auditionBtn').disabled=!hit;
+  $('selectedHint').textContent=selected.col<4?'Enter toggles · Note and velocity write on change':'Writes at the edit cursor; playback stays in place.';
+  if(selected.col>=4){
+    const t=tracks[selected.col],input=$('cellValue');input.min=t.min;input.max=t.max;input.step=t.id==='roll'?1:.01;input.value=valueAt(p,t.id,selected.row).toFixed(t.id==='roll'?0:2);
+  }
   $('curveTabs').querySelectorAll('button').forEach(b=>b.classList.toggle('active',b.dataset.curve===curve));
   $('easeButtons').querySelectorAll('button').forEach(b=>b.classList.toggle('active',b.dataset.ease===p.easing[curve]));
-  $('curveValue').textContent=formatValue(curve,valueAt(p,curve,selected.row));$('curveUnit').textContent=curve==='roll'?'DEGREES':curve==='z'?'DEPTH':'AMOUNT';
+  $('curveValue').textContent=formatValue(curve,valueAt(p,curve,selected.row));$('curveUnit').textContent=curve==='roll'?'DEGREES':curve==='z'?'SCALE':'AMOUNT';
+  updateHistory();
 }
 function drawCurve(beat){
-  const c=$('curveCanvas'),[w,h]=sizeCanvas(c),ctx=c.getContext('2d'),p=state.patterns[state.pattern],t=tracks.find(t=>t.id===curve),left=32,right=w-16,top=18,bottom=h-23;
+  const c=$('curveCanvas');if(!c.getClientRects().length)return;
+  const [w,h]=sizeCanvas(c),position=Math.floor(beat/16)===editPattern?beat:null;
+  if(!curveDirty&&curvePaint?.w===w&&curvePaint?.h===h&&curvePaint?.position===position)return;
+  curveDirty=false;curvePaint={w,h,position};
+  const ctx=c.getContext('2d'),p=state.patterns[editPattern],t=tracks.find(t=>t.id===curve),left=32,right=w-16,top=18,bottom=h-23;
   ctx.clearRect(0,0,w,h);ctx.fillStyle='#121b16';ctx.fillRect(0,0,w,h);ctx.font='9px ui-monospace, monospace';ctx.lineWidth=.6;
   for(let i=0;i<=4;i++){const y=top+(bottom-top)*i/4;ctx.strokeStyle='#2a3b2e';ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(right,y);ctx.stroke();if(i===0||i===4){ctx.fillStyle='#546b59';ctx.fillText((t.max-(t.max-t.min)*i/4).toFixed(t.id==='roll'?0:1),3,y+3);}}
-  for(let i=0;i<5;i++){const x=left+(right-left)*i/4;ctx.strokeStyle='#344431';ctx.beginPath();ctx.moveTo(x,top);ctx.lineTo(x,bottom);ctx.stroke();ctx.fillStyle='#637c66';ctx.fillText(`${pad(state.pattern*4+i+1)}`,x-5,h-7);}
+  for(let i=0;i<5;i++){const x=left+(right-left)*i/4;ctx.strokeStyle='#344431';ctx.beginPath();ctx.moveTo(x,top);ctx.lineTo(x,bottom);ctx.stroke();ctx.fillStyle='#637c66';ctx.fillText(`${pad(editPattern*4+i+1)}`,x-5,h-7);}
   const point=(r,v)=>[left+r/63*(right-left),bottom-(v-t.min)/(t.max-t.min)*(bottom-top)];
   ctx.beginPath();for(let r=0;r<=63;r+=.25){const xy=point(r,valueAt(p,curve,r));if(r===0)ctx.moveTo(...xy);else ctx.lineTo(...xy);}ctx.strokeStyle='#d6b27e';ctx.lineWidth=1.5;ctx.stroke();ctx.lineTo(right,bottom);ctx.lineTo(left,bottom);ctx.closePath();ctx.fillStyle='#d0ab6a0b';ctx.fill();
   p.keys[curve].forEach(k=>{const [x,y]=point(k.r,k.v);ctx.fillStyle=k.r===selected.row?'#f4d79c':'#a58959';ctx.fillRect(x-2.5,y-2.5,5,5);});
-  if(Math.floor(beat/16)===state.pattern){const x=left+mod(beat,16)/16*(right-left);ctx.beginPath();ctx.moveTo(x,top-5);ctx.lineTo(x,bottom+4);ctx.strokeStyle='#a5d3a7';ctx.lineWidth=.8;ctx.stroke();}
+  if(Math.floor(beat/16)===editPattern){const x=left+mod(beat,16)/16*(right-left);ctx.beginPath();ctx.moveTo(x,top-5);ctx.lineTo(x,bottom+4);ctx.strokeStyle='#a5d3a7';ctx.lineWidth=.8;ctx.stroke();}
 }
 function updateControls(){
   if(master)master.gain.setTargetAtTime(state.sound?.23:0,audioContext.currentTime,.02);
   $('tempo').value=state.bpm;$('key').value=state.key;$('audioBtn').setAttribute('aria-pressed',state.sound);$('audioLabel').textContent=state.sound?'Sound on':'Sound off';$('loopBtn').setAttribute('aria-pressed',state.loop);$('loopBtn').classList.toggle('active',state.loop);
+  $('loopBtn').title=state.loop?`Looping pattern ${state.pattern+1}; click to disable`:`Loop selected pattern ${editPattern+1}`;
   $('programMode').value=state.modes.program;$('auxMode').value=state.modes.aux;$('sceneName').textContent=remote?.path?.split('/').pop()||'Choose a patch';$('sceneMeta').textContent=remote?.output?.toUpperCase()||'HYDRAPY';
-  const sec=64*60/state.bpm;$('duration').textContent=`00:${sec.toFixed(1)}`;
+  const sec=64*60/state.bpm;$('duration').textContent=`${pad(Math.floor(sec/60))}:${(sec%60).toFixed(1).padStart(4,'0')}`;
 }
 
 if(outputType){
@@ -322,13 +465,13 @@ if(outputType){
   window.addEventListener('keydown',e=>{
     if(e.key.toLowerCase()==='f'||e.key==='Enter'){e.preventDefault();$('outputWelcome').hidden=true;fullscreen();}
     if(e.code==='Space'){e.preventDefault();transport(()=>({playing:!playing,enabled:true}));}
-    if(e.key.toLowerCase()==='b')transport(()=>({blackout:!blackout}));
+    if(e.key.toLowerCase()==='b')transport(()=>({blackout:!blackout}),{score:false});
   });
   function outputFrame(){preview.draw($('outputCanvas'),blackout);requestAnimationFrame(outputFrame);}
   requestAnimationFrame(outputFrame);
 }else{
   const outputPresence={program:0,aux:0};
-  function toggleBlackout(){return transport(()=>({blackout:!blackout}));}
+  function toggleBlackout(){return transport(()=>({blackout:!blackout}),{score:false});}
   listen(m=>{if(m.type==='presence'&&['program','aux'].includes(m.kind))outputPresence[m.kind]=Date.now();});
   function openOutput(kind){
     const u=new URL(location.href);u.search='';u.searchParams.set('output',kind);u.searchParams.set('session',sessionId);
@@ -336,92 +479,256 @@ if(outputType){
     if(!win)toast('The output window was blocked. Allow pop-ups for this site, then open the output again.');
     else {win.focus();toast(`Move the ${kind==='aux'?'auxiliary':'program'} window to your display and press F for fullscreen.`);}
   }
-  $('playBtn').onclick=togglePlay;$('stopBtn').onclick=()=>transport({playing:false,beat:state.pattern*16});
-  $('loopBtn').onclick=()=>{const b=nowBeat();state.loop=!state.loop;seek(b);updateControls();saveLocal();};
-  $('tempo').addEventListener('change',()=>{state.bpm=clamp(Number($('tempo').value)||138,60,200);updateControls();saveLocal();});
-  $('key').onchange=()=>{state.key=Number($('key').value);stopVoices();saveLocal();};
+  $('playBtn').onclick=togglePlay;
+  $('stopBtn').onclick=()=>scoreFailed||conflicted?transport({playing:false},{score:false}):transport({playing:false,beat:state.loop?state.pattern*16:editPattern*16});
+  $('loopBtn').onclick=()=>{
+    const beat=nowBeat();state.loop=!state.loop;
+    if(state.loop)state.pattern=editPattern;
+    saveLocal();seek(state.loop?editPattern*16:beat);updateControls();
+  };
+  $('tempo').onchange=()=>changeScore('tempo',()=>{state.bpm=clamp(Number($('tempo').value)||138,60,200);});
+  $('key').onchange=()=>{changeScore('key transposition',()=>{state.key=Number($('key').value);});stopVoices();};
   $('audioBtn').onclick=async()=>{state.sound=!state.sound;if(state.sound)await ensureAudio();if(master)master.gain.setTargetAtTime(state.sound?.23:0,audioContext.currentTime,.02);if(!state.sound)stopVoices();updateControls();saveLocal();};
   $('fullscreenBtn').onclick=fullscreen;$('programBtn').onclick=()=>openOutput('program');$('expandPreview').onclick=()=>openOutput('program');$('auxBtn').onclick=()=>openOutput('aux');$('blackoutBtn').onclick=toggleBlackout;
-  $('followBtn').onclick=()=>{follow=!follow;$('followBtn').classList.toggle('active',follow);$('followBtn').setAttribute('aria-pressed',follow);};
-  $('trackerRows').addEventListener('click',e=>{const b=e.target.closest('[data-col]');if(!b)return;const col=Number(b.dataset.col);selectCell(Number(b.dataset.row),col,col>=4);});
+  $('followBtn').onclick=()=>setFollow(!follow);
+  $('seekCellBtn').onclick=seekSelected;
+  $('trackerRows').addEventListener('dblclick',e=>{
+    const row=e.target.closest('[data-seek-row]');
+    if(row){selectCell(Number(row.dataset.seekRow),selected.col);seekSelected();}
+  });
+  let dragging=false,dragAnchor=null,dragMoved=false;
+  $('trackerRows').addEventListener('pointerdown',e=>{
+    const cell=e.target.closest('[data-col]');if(!cell||e.button!==0)return;
+    const row=Number(cell.dataset.row),col=Number(cell.dataset.col);
+    selectCell(row,col,e.shiftKey);dragAnchor={...(selectionAnchor||selected)};dragging=true;dragMoved=false;
+    if(e.pointerType==='mouse'){e.preventDefault();focusCell();}
+  });
+  $('trackerRows').addEventListener('pointerover',e=>{
+    if(!dragging||!(e.buttons&1))return;
+    const cell=e.target.closest('[data-col]');if(!cell)return;
+    selectionAnchor=dragAnchor;selected={row:Number(cell.dataset.row),col:Number(cell.dataset.col)};
+    if(selected.row!==dragAnchor.row||selected.col!==dragAnchor.col)dragMoved=true;
+    if(tracks[selected.col].visual)curve=tracks[selected.col].id;
+    updateSelection();updateInspector();focusCell();
+  });
+  window.addEventListener('pointerup',()=>{dragging=false;});
+  window.addEventListener('blur',()=>{dragging=false;});
+  $('trackerScroll').addEventListener('scroll',()=>{$('trackHeaders').scrollLeft=$('trackerScroll').scrollLeft;});
+  // Native keyboard activation and assistive-technology clicks have no pointerdown.
+  $('trackerRows').addEventListener('click',e=>{
+    const cell=e.target.closest('[data-col]');if(!cell)return;
+    if(!dragMoved&&e.detail===0)selectCell(Number(cell.dataset.row),Number(cell.dataset.col),e.shiftKey);
+    dragMoved=false;
+  });
+  document.querySelector('.editor-stack').addEventListener('focusin',()=>{if(playing&&follow)setFollow(false);});
   ['z','roll','feedback'].forEach(id=>$(id+'Slider').addEventListener('input',()=>setKey(id,Number($(id+'Slider').value))));
-  $('curveTabs').querySelectorAll('button').forEach(b=>b.onclick=()=>{curve=b.dataset.curve;selected.col=tracks.findIndex(t=>t.id===curve);renderRows();updateInspector();});
-  $('easeButtons').querySelectorAll('button').forEach(b=>b.onclick=()=>{state.patterns[state.pattern].easing[curve]=b.dataset.ease;updateInspector();saveLocal();});
+  $('curveTabs').querySelectorAll('button').forEach(b=>b.onclick=()=>{curve=b.dataset.curve;selected.col=tracks.findIndex(t=>t.id===curve);selectionAnchor=null;renderRows();updateInspector();});
+  $('easeButtons').querySelectorAll('button').forEach(b=>b.onclick=()=>changeScore('interpolation',()=>{state.patterns[editPattern].easing[curve]=b.dataset.ease;}));
   $('clearCellBtn').onclick=clearCell;
-  function writeNote(){
-    if(selected.col>=4)return;
+  $('undoBtn').onclick=()=>restoreHistory();$('redoBtn').onclick=()=>restoreHistory(true);
+  function selectBlock(all=false){
+    selectionAnchor={row:0,col:all?0:selected.col};selected={row:63,col:all?6:selected.col};
+    setFollow(false);updateSelection();updateInspector();focusCell();
+  }
+  $('selectLaneBtn').onclick=()=>selectBlock();$('selectAllBtn').onclick=()=>selectBlock(true);
+  function copySelection(cut=false){
+    clipboard=copyBlock(state.patterns[editPattern],selectionBox());
+    if(cut)clearCell();
+    toast(`${cut?'Cut':'Copied'} ${clipboard.rows.length} × ${clipboard.columns.length} cells.`);
+    return JSON.stringify(clipboard);
+  }
+  function pasteSelection(block=clipboard){
+    if(!block){toast('Copy a Gorgon block first.');return;}
     try{
-      const note=canonicalNote($('noteInput').value.toUpperCase().trim());
-      const vel=Number($('velocityInput').value);
-      if(!Number.isInteger(vel)||vel<0||vel>127)throw new Error('Velocity must be 0–127.');
-      state.patterns[state.pattern].audio[selected.col][selected.row]={note,vel};
-      renderRows();updateInspector();saveLocal();
+      block=readBlock(JSON.stringify(block));
+      let result;
+      changeScore('paste cells',()=>{result=pasteBlock(state.patterns[editPattern],selected,block);});
+      if(result)toast(`Pasted ${result.written} cells.${result.skipped?' '+result.skipped+' outside the pattern or in incompatible lanes were skipped.':''}`);
     }catch(error){toast(error.message);}
   }
-  $('noteInput').onchange=writeNote;$('velocityInput').onchange=writeNote;
-  $('insertNoteBtn').onclick=writeNote;
+  $('copyBtn').onclick=()=>copySelection();$('cutBtn').onclick=()=>copySelection(true);$('pasteBtn').onclick=()=>pasteSelection();
+  $('trackerRows').addEventListener('copy',e=>{e.preventDefault();e.clipboardData.setData('text/plain',copySelection());});
+  $('trackerRows').addEventListener('cut',e=>{e.preventDefault();e.clipboardData.setData('text/plain',copySelection(true));});
+  $('trackerRows').addEventListener('paste',e=>{
+    e.preventDefault();const text=e.clipboardData.getData('text/plain');
+    try{pasteSelection(text?readBlock(text):clipboard);}catch(error){toast(error.message);}
+  });
+  function transposeSelection(amount){changeScore('transpose notes',()=>transposeBlock(state.patterns[editPattern],selectionBox(),amount));}
+  document.querySelectorAll('[data-transpose]').forEach(b=>b.onclick=()=>transposeSelection(Number(b.dataset.transpose)));
+  function velocity(){
+    const value=Number($('velocityInput').value);
+    if(!Number.isInteger(value)||value<0||value>127)throw new Error('Velocity must be 0–127.');
+    return value;
+  }
+  function writeNote(note=$('noteInput').value){
+    if(selected.col>=4)return;
+    try{
+      note=canonicalNote(note.toUpperCase().trim());entryVelocity=velocity();
+      changeScore('write note',()=>putCell(state.patterns[editPattern],selected.row,selected.col,{note,vel:entryVelocity}));
+    }catch(error){toast(error.message);}
+  }
+  $('noteInput').onchange=()=>writeNote();
+  $('velocityInput').onchange=()=>{
+    try{
+      entryVelocity=velocity();const box=selectionBox();
+      if(box.r0===box.r1&&box.c0===box.c1)writeNote();
+    }catch(error){toast(error.message);}
+  };
+  $('insertNoteBtn').onclick=()=>writeNote();
+  $('applyVelocityBtn').onclick=()=>{
+    try{const v=velocity();entryVelocity=v;changeScore('block velocity',()=>setBlockVelocity(state.patterns[editPattern],selectionBox(),v));}catch(error){toast(error.message);}
+  };
+  $('pianoBtn').onclick=()=>{
+    pianoEntry=!pianoEntry;$('pianoBtn').setAttribute('aria-pressed',pianoEntry);$('pianoBtn').textContent=pianoEntry?'Piano keys on':'Piano keys off';
+    $('entryHint').textContent=pianoEntry?'Z–M: this octave · Q–U: next octave · B enters G while the note grid is focused':'Arrows move · Shift+arrows select · Enter toggles';
+    focusCell(true);
+  };
+  $('octaveInput').onchange=()=>{$('octaveInput').value=clamp(Number($('octaveInput').value)||0,0,8);};
   $('auditionBtn').onclick=async()=>{
-    const hit=state.patterns[state.pattern].audio[selected.col]?.[selected.row];
-    if(!hit)return;
+    const hit=state.patterns[editPattern].audio[selected.col]?.[selected.row];if(!hit)return;
     state.sound=true;await ensureAudio();updateControls();saveLocal();
     if(audioContext)soundHit(selected.col,hit,audioContext.currentTime+.01);
   };
+  $('writeKeyBtn').onclick=()=>setKey(tracks[selected.col].id,Number($('cellValue').value));
+  $('cellValue').onchange=()=>setKey(tracks[selected.col].id,Number($('cellValue').value));
   $('curveCanvas').addEventListener('pointerdown',e=>{
     const rect=e.currentTarget.getBoundingClientRect(),d=e.currentTarget.width/rect.width,t=tracks.find(t=>t.id===curve),x=(e.clientX-rect.left)*d,y=(e.clientY-rect.top)*d;
     const row=clamp(Math.round((x-32)/(e.currentTarget.width-48)*63),0,63),value=t.min+(1-(y-18)/(e.currentTarget.height-41))*(t.max-t.min);
-    selected.row=row;seek(state.pattern*16+row/4);setKey(curve,Math.round(value*100)/100);
+    selected.row=row;setFollow(false);setKey(curve,Math.round(value*100)/100);
   });
+  $('patternName').onchange=()=>{
+    const name=$('patternName').value.trim();if(!name){toast('Give the pattern a name.');updateInspector();return;}
+    changeScore('pattern name',()=>{state.patterns[editPattern].name=name;});
+  };
+  $('duplicatePatternBtn').onclick=()=>{
+    const target=Number($('duplicateTarget').value);if(target===editPattern){toast('Choose another destination.');return;}
+    changeScore('copy pattern',()=>{state.patterns[target]=structuredClone(state.patterns[editPattern]);});
+    $('patternMenu').open=false;toast(`Copied to pattern ${target+1}. Undo restores its previous contents.`);
+  };
+  $('clearPatternBtn').onclick=()=>{
+    changeScore('clear pattern',()=>clearBlock(state.patterns[editPattern],{r0:0,r1:63,c0:0,c1:6}));
+    $('patternMenu').open=false;toast('Pattern cleared. Undo restores it.');
+  };
   ['program','aux'].forEach(k=>$(k+'Mode').onchange=()=>{state.modes[k]=$(k+'Mode').value;saveLocal();});
   $('sceneBtn').onclick=async()=>{try{const data=await api('catalog');$('patchSelect').replaceChildren(...data.patches.map(p=>new Option(p.path,p.path)));$('patchDialog').showModal();}catch(error){toast(error.message);}};
-  $('helpBtn').onclick=()=>$('helpDialog').showModal();$('closeHelp').onclick=()=>$('helpDialog').close();$('helpDialog').addEventListener('click',e=>{if(e.target===$('helpDialog')){const r=e.currentTarget.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)e.currentTarget.close();}});
+  $('choosePatchBtn').onclick=()=>{$('fileMenu').open=false;$('sceneBtn').click();};
+  $('helpBtn').onclick=()=>$('helpDialog').showModal();$('closeHelp').onclick=()=>$('helpDialog').close();
   $('saveBtn').onclick=async()=>{
-    await flushScore();if(conflicted)return;
+    if(!await flushScore()){downloadScore();toast('Downloaded local recovery copy. Resolve the pending edit to save to Studio.');return;}
     try{
       const saved=await api('tracker_save',{revision});
-      const u=URL.createObjectURL(new Blob([JSON.stringify(saved.document,null,2)],{type:'application/json'}));
-      const a=document.createElement('a');a.href=u;a.download='gorgon-session.json';a.click();setTimeout(()=>URL.revokeObjectURL(u),1000);
+      downloadScore(saved.document,'gorgon-session.json');
       $('savedState').textContent='Saved to workspace';toast('Score saved to .hydrapy/tracker.json and downloaded.');
     }catch(error){toast(error.message);}
   };
   async function importScore(document){
     if(!document)throw new Error('No saved score in this workspace.');
-    await flushScore();
+    if(!await flushScore())throw new Error('Resolve the pending edit before importing. Download your recovery copy from File.');
     const result=await api('tracker_score',{document,revision});
-    state=result.document;revision=result.revision;conflicted=false;
-    renderPatterns();renderHeaders();renderRows();renderInstruments();updateControls();updateInspector();
-    stopVoices();toast('Score loaded.');
+    history.change(state,'import score',()=>{
+      for(const field of ['patterns','bpm','key','mutes','bindings'])state[field]=structuredClone(result.document[field]);
+    },{pattern:editPattern,selected});
+    state=result.document;
+    revision=result.revision;acceptedDocument=structuredClone(result.document);editPattern=state.pattern;selectionAnchor=null;
+    redrawScore();stopVoices();toast('Score loaded.');
   }
+  $('importBtn').onclick=()=>{$('fileMenu').open=false;$('importFile').click();};
   $('importFile').onchange=async event=>{
-    try{const file=event.target.files[0];if(file.size>2000000)throw new Error('Score is too large.');await importScore(JSON.parse(await file.text()));}
+    try{const file=event.target.files[0];if(!file)return;if(file.size>2000000)throw new Error('Score is too large.');await importScore(JSON.parse(await file.text()));}
     catch(error){toast(error.message);}event.target.value='';
   };
-  $('restoreBtn').onclick=async()=>{try{await importScore((await api('tracker_saved')).document);}catch(error){toast(error.message);}};
+  $('restoreBtn').onclick=async()=>{try{$('fileMenu').open=false;await importScore((await api('tracker_saved')).document);}catch(error){toast(error.message);}};
+  $('newScoreBtn').onclick=()=>{
+    if(!confirm('Start an empty score? You can undo this edit.'))return;
+    changeScore('new empty score',()=>{state.patterns.forEach(p=>clearBlock(p,{r0:0,r1:63,c0:0,c1:6}));});
+    $('fileMenu').open=false;
+  };
+  $('downloadScoreBtn').onclick=()=>{downloadScore();$('fileMenu').open=false;};
+  $('recoveryBtn').onclick=()=>downloadScore();$('retryScoreBtn').onclick=retryScore;
+  $('reloadScoreBtn').onclick=async()=>{
+    if(!confirm('Replace local edits with Studio’s score? Download a recovery copy first if you need them.'))return;
+    try{
+      await scoreRequest;const result=await api('tracker');
+      clearTimeout(scoreTimer);pendingScore=null;scoreFailed=conflicted=false;
+      state=result.document;acceptedDocument=structuredClone(state);revision=result.revision;editPattern=state.pattern;selectionAnchor=null;
+      history.clear();redrawScore();$('editConnection').hidden=true;$('savedState').textContent='Server score loaded';
+    }catch(error){toast(error.message);}
+  };
   $('automationBtn').onclick=()=>transport(()=>({enabled:!remote?.enabled}));
-  ['z','roll','feedback'].forEach(lane=>$('bind_'+lane).onchange=()=>{state.bindings[lane]=$('bind_'+lane).value;saveLocal();});
-  $('loadPatch').onclick=async()=>{try{await api('load',{path:$('patchSelect').value});$('patchDialog').close();}catch(error){toast(error.message);}};
+  ['z','roll','feedback'].forEach(lane=>$('bind_'+lane).onchange=()=>changeScore('parameter binding',()=>{state.bindings[lane]=$('bind_'+lane).value;}));
+  $('loadPatch').onclick=async()=>{try{if(!await flushScore())return;await api('load',{path:$('patchSelect').value});$('patchDialog').close();}catch(error){toast(error.message);}};
   $('closePatch').onclick=()=>$('patchDialog').close();
   $('studioLink').href='/#'+location.hash.slice(1);
-  $('studioLink').onclick=async event=>{event.preventDefault();await flushScore();if(!conflicted)location.href=$('studioLink').href;};
+  $('studioLink').onclick=async event=>{event.preventDefault();if(await flushScore())location.href=$('studioLink').href;};
   $('resetBtn').onclick=async()=>{
     if(!confirm('Replace the current score with the starting study?'))return;
     try{await transport({playing:false,enabled:false,beat:0});await importScore(defaults());}catch(error){toast(error.message);}
   };
+  $('libraryBtn').onclick=()=>{
+    if(innerWidth<=1100)document.body.classList.toggle('library-open');
+    else document.body.classList.toggle('library-collapsed');
+    $('libraryBtn').setAttribute('aria-pressed',innerWidth<=1100?document.body.classList.contains('library-open'):!document.body.classList.contains('library-collapsed'));
+  };
+  const updateLibraryButton=()=>$('libraryBtn').setAttribute('aria-pressed',innerWidth<=1100?document.body.classList.contains('library-open'):!document.body.classList.contains('library-collapsed'));
+  updateLibraryButton();window.addEventListener('resize',updateLibraryButton);
+  $('textSize').onchange=()=>document.body.classList.toggle('large-text',$('textSize').value==='large');
+  $('curveVisibilityBtn').onclick=()=>{
+    const collapsed=document.body.classList.toggle('curve-collapsed');$('curveVisibilityBtn').setAttribute('aria-pressed',!collapsed);
+  };
+  document.addEventListener('click',e=>{
+    document.querySelectorAll('details[open]').forEach(d=>{if(!d.contains(e.target))d.open=false;});
+  });
+  window.addEventListener('beforeunload',e=>{if(pendingScore||scoreRequest||scoreFailed||conflicted){e.preventDefault();e.returnValue='';}});
   window.addEventListener('keydown',e=>{
-    if($('helpDialog').open||$('patchDialog').open)return;if(['INPUT','SELECT','TEXTAREA'].includes(document.activeElement.tagName))return;
-    if(e.code==='Space'){e.preventDefault();togglePlay();}if(e.key.toLowerCase()==='f'){e.preventDefault();fullscreen();}if(e.key.toLowerCase()==='b'){e.preventDefault();toggleBlackout();}
-    if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)){e.preventDefault();const r=clamp(selected.row+(e.key==='ArrowDown'?1:e.key==='ArrowUp'?-1:0),0,63),c=clamp(selected.col+(e.key==='ArrowRight'?1:e.key==='ArrowLeft'?-1:0),0,6);selectCell(r,c);$('trackerRows').querySelector(`[data-row="${r}"][data-col="${c}"]`)?.focus({preventScroll:true});$('trackerRows').querySelector(`[data-row="${r}"][data-col="${c}"]`)?.scrollIntoView({block:'nearest'});}
-    if(e.key==='Delete'||e.key==='Backspace'){e.preventDefault();clearCell();}if(e.key==='Enter'&&document.activeElement.closest('#trackerRows')){e.preventDefault();toggleCell();}
+    if($('helpDialog').open||$('patchDialog').open)return;
+    const target=document.activeElement,form=['INPUT','SELECT','TEXTAREA'].includes(target.tagName),command=e.ctrlKey||e.metaKey;
+    if(command&&e.key.toLowerCase()==='s'){e.preventDefault();$('saveBtn').click();return;}
+    if(form)return;
+    const inGrid=!!target.closest('#trackerRows');
+    if(command){
+      const key=e.key.toLowerCase();
+      if(key==='z'){e.preventDefault();restoreHistory(e.shiftKey);}
+      else if(key==='y'){e.preventDefault();restoreHistory(true);}
+      else if(inGrid&&key==='a'){e.preventDefault();selectBlock(true);}
+      // Native copy/cut/paste events carry a validated block across controllers.
+      return;
+    }
+    if(e.key==='Escape'){
+      selectionAnchor=null;updateSelection();document.querySelectorAll('details[open]').forEach(d=>{d.open=false;});return;
+    }
+    if(inGrid&&pianoEntry&&selected.col<4&&!e.altKey){
+      const note=pianoNote(e.code,Number($('octaveInput').value));
+      if(note){
+        e.preventDefault();if(e.repeat)return;
+        const col=selected.col;writeNote(note);
+        if(state.sound&&audioContext?.state==='running')soundHit(col,{note,vel:entryVelocity},audioContext.currentTime+.005);
+        selectCell(Math.min(63,selected.row+Number($('entryStep').value)),col);focusCell(true);return;
+      }
+    }
+    if(e.code==='Space'){e.preventDefault();togglePlay();return;}
+    if(e.key.toLowerCase()==='f'){e.preventDefault();fullscreen();return;}
+    if(e.key.toLowerCase()==='b'){e.preventDefault();toggleBlackout();return;}
+    if(!inGrid)return;
+    if(e.altKey&&(e.key==='ArrowUp'||e.key==='ArrowDown')){e.preventDefault();transposeSelection((e.key==='ArrowUp'?1:-1)*(e.shiftKey?12:1));return;}
+    if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Home','End','PageUp','PageDown'].includes(e.key)){
+      e.preventDefault();let r=selected.row,c=selected.col;
+      if(e.key==='Home')r=0;else if(e.key==='End')r=63;else if(e.key==='PageUp')r-=16;else if(e.key==='PageDown')r+=16;
+      else {r+=e.key==='ArrowDown'?1:e.key==='ArrowUp'?-1:0;c+=e.key==='ArrowRight'?1:e.key==='ArrowLeft'?-1:0;}
+      selectCell(clamp(r,0,63),clamp(c,0,6),e.shiftKey);focusCell(true);
+    }
+    if(e.key==='Delete'||e.key==='Backspace'){e.preventDefault();clearCell();}
+    if(e.key==='Enter'){e.preventDefault();if(e.altKey)seekSelected();else toggleCell();}
   });
   renderPatterns();renderHeaders();renderRows();renderInstruments();updateControls();updateInspector();drawVisual($('sceneThumb'),0,'full');
   setInterval(scheduler,25);
   setInterval(()=>{for(const k of ['program','aux']){const connected=Date.now()-outputPresence[k]<2600;$(k+'Btn').classList.toggle('connected',connected);$(k+'Status').textContent=connected?'Window connected':'Open output';$(k==='aux'?'routeAux':'routeProgram').classList.toggle('mint',connected);}},800);
   function frame(){
     const beat=nowBeat(),step=Math.floor(beat*4),pattern=Math.floor(beat/16),row=step%64;
-    if(playing&&pattern!==lastPattern&&follow&&state.pattern!==pattern){state.pattern=pattern;renderPatterns();renderRows();updateInspector();}
+    if(playing&&follow&&editPattern!==pattern){editPattern=pattern;selectionAnchor=null;renderPatterns();renderRows();updateInspector();}
     if(step!==lastStep){
       $('position').innerHTML=`${pad(Math.floor(beat/4)+1,3)}<span>:</span>${pad(Math.floor(beat%4)+1)}<span>:</span>${pad(step%4)}`;
       $('trackerRows').querySelectorAll('.playing').forEach(e=>e.classList.remove('playing'));
-      if(pattern===state.pattern){const el=$('trackerRows').querySelector(`.tracker-row[data-row="${row}"]`);el?.classList.add('playing');if(playing&&follow&&el){const area=$('trackerScroll');if(el.offsetTop<area.scrollTop||el.offsetTop+el.offsetHeight>area.scrollTop+area.clientHeight)area.scrollTop=Math.max(0,el.offsetTop-area.clientHeight*.3);}}
+      if(pattern===editPattern){const el=$('trackerRows').querySelector(`.tracker-row[data-row="${row}"]`);el?.classList.add('playing');if(playing&&follow&&el){const area=$('trackerScroll');if(el.offsetTop<area.scrollTop||el.offsetTop+el.offsetHeight>area.scrollTop+area.clientHeight)area.scrollTop=Math.max(0,el.offsetTop-area.clientHeight*.3);}}
       lastStep=step;lastPattern=pattern;
     }
     $('patterns').querySelectorAll('.pattern-card').forEach((e,i)=>{e.classList.toggle('current',i===pattern);if(i===pattern)e.querySelector('.pattern-playhead').style.left=`${mod(beat,16)/16*100}%`;});

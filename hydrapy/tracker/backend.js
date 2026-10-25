@@ -6,7 +6,11 @@ export async function api(name, data, signal) {
     body: data === undefined ? undefined : JSON.stringify(data),
   });
   const result = await response.json();
-  if (!response.ok) throw new Error(result.error || response.statusText);
+  if (!response.ok) {
+    const error = new Error(result.error || response.statusText);
+    error.status = response.status;
+    throw error;
+  }
   return result;
 }
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -67,7 +71,9 @@ export class PreviewStream {
     }
   }
   draw(canvas, blackout = false) {
-    const context = canvas.getContext('2d'), rect = canvas.getBoundingClientRect();
+    const rect = canvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const context = canvas.getContext('2d');
     const width = Math.max(1, Math.round(rect.width * Math.min(devicePixelRatio, 2)));
     const height = Math.max(1, Math.round(rect.height * Math.min(devicePixelRatio, 2)));
     const resized = canvas.width !== width || canvas.height !== height;
