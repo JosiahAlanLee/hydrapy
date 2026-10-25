@@ -8,10 +8,25 @@ from __future__ import annotations
 import copy
 import json
 import math
+import re
 from pathlib import Path
 
 LANES = {'z': (0., 1., .35), 'roll': (-45., 45., 0.), 'feedback': (0., .9, .25)}
-NOTES = {'C-2', 'D-2', 'F#2', 'D-4', 'A-4', 'F-4', 'C-5', 'A-1', 'AIR'}
+
+def note_midi(note):
+    """Tracker naturals use a separator: C-4 is C4 (MIDI 60), not C minus 4.
+
+    Accept C0–G9, including sharps; AIR is an unpitched event.
+    """
+    if note == 'AIR':
+        return None
+    match = re.fullmatch(r'([A-G])([-#]?)([0-9])', note) if isinstance(note, str) else None
+    if match:
+        letter, accidental, octave = match.groups()
+        midi = 12 * (int(octave) + 1) + {'C': 0, 'D': 2, 'E': 4, 'F': 5, 'G': 7, 'A': 9, 'B': 11}[letter] + (accidental == '#')
+        if midi <= 127 and not (accidental == '#' and letter in 'BE'):
+            return midi
+    raise ValueError('Note must be C0–G9 (sharps allowed), or AIR')
 
 
 def number(value, low, high, label):
@@ -55,8 +70,9 @@ def validate(document):
                 raise ValueError('Audio lanes contain 64 rows')
             for hit in lane:
                 if hit is not None:
-                    if not isinstance(hit, dict) or hit.get('note') not in NOTES:
-                        raise ValueError('Unknown synth note')
+                    if not isinstance(hit, dict):
+                        raise ValueError('Expected a note and velocity')
+                    note_midi(hit.get('note'))
                     number(hit.get('vel'), 0, 127, 'Velocity')
         if not isinstance(p.get('keys'), dict) or set(p['keys']) != set(LANES) or not isinstance(p.get('easing'), dict):
             raise ValueError('Three automation lanes are required')
@@ -103,6 +119,7 @@ class Tracker:
         # syncs advance ``revision`` but not this, so they are never conflicts.
         self.edit_revision = 0
         self.enabled = False
+        self.transport_revision = 0
         self.anchor_time = self.anchor_beat = 0.
 
     def normalize(self, beat):
@@ -113,8 +130,10 @@ class Tracker:
         elapsed = clock_time - self.anchor_time if self.enabled else 0.
         return self.normalize(self.anchor_beat + elapsed * self.document['bpm'] / 60)
 
-    def seek(self, beat, clock_time):
+    def seek(self, beat, clock_time, *, discontinuity=True):
         self.anchor_beat, self.anchor_time = self.normalize(beat), clock_time
+        if discontinuity:
+            self.transport_revision += 1
 
     def replace(self, document, clock_time, revision):
         """Apply a score edit based on ``revision``.
@@ -144,7 +163,7 @@ class Tracker:
         beat = self.beat(clock_time)
         self.document = prepared
         self.revision += 1
-        self.seek(beat, clock_time)  # tempo changes preserve position
+        self.seek(beat, clock_time, discontinuity=False)  # tempo changes preserve position
 
     def apply(self, patch, clock_time):
         if not self.enabled:
