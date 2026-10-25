@@ -98,12 +98,19 @@ def _():
   Sending to that output *after* its scenes replaces them, so Studio refuses
   that patch with an error rather than silently dropping the scenes.
 
-The output is the base blended with every scene, each at its weight. In GL, a
-blend at amount 0 is compiled out of the shader, so a scene costs nothing while
-it isn't playing. Studio compiles each scene's shader, and each crossfade the
-score contains, when the patch loads or the score changes, so a scene change or
-fade never compiles while it plays. `switch()` uses the same mechanism for
-fxhash mint variants.
+The output is the base blended with every scene, each at its weight. A scene
+costs nothing while it isn't playing. In GL, a blend at amount 0 is compiled out
+of the shader. On the CPU backend, a combine operator at its identity amount
+(a blend or modulate at 0, for example) returns its input unchanged without
+evaluating the chain it takes. Studio compiles each scene's shader, and each
+crossfade the score contains, when the patch loads or the score changes, so a
+scene change or fade never compiles while it plays. `switch()` uses the same
+mechanism for fxhash mint variants.
+
+Every scene draws into the same output buffer, so feedback (`src(o0)`) and
+`delay()` history carry across a scene change. A scene that isn't playing isn't
+evaluated, so anything inside it that advances only when drawn holds still until
+the scene plays again.
 
 **Lane signals** read the audio lanes per frame, in any operator argument:
 

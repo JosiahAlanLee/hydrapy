@@ -7,6 +7,7 @@ import pytest
 import hydrapy.core as core
 from hydrapy import Param, noise, o0, o1, osc, scene, solid, tracker, voronoi
 from hydrapy.scenes import check_scenes, scene_names
+from hydrapy.signals import Signal
 from hydrapy.studio import Session
 from hydrapy.studio_tracker import Tracker, scene_fades, scene_weights, validate
 
@@ -417,3 +418,38 @@ def test_exports_outside_the_tracker_show_the_scene_showing(tmp_path):
         assert pixel[2] > 200 and pixel[0] < 50              # scene b (blue), not the first declared
     finally:
         session.close()
+
+
+class Counted(Signal):
+    """A constant that counts how often a renderer evaluates it."""
+
+    def __init__(self, v):
+        self.v, self.calls = v, 0
+
+    def value(self, ctx):
+        self.calls += 1
+        return self.v
+
+
+def test_cpu_skips_scenes_that_are_not_showing(patch):
+    from hydrapy.backend_np import Renderer
+    freq = {name: Counted(4 + k) for k, name in enumerate(('drift', 'fracture', 'third'))}
+    for name, f in freq.items():
+        scene(name)(lambda f=f: osc(f, .1))
+    r = Renderer(patch, size=(16, 9), fps=10)
+    for w, drawn in [({'drift': 1}, {'drift'}), ({'drift': 1, 'fracture': .5}, {'drift', 'fracture'}),
+                     ({'third': 1}, {'third'})]:
+        patch.scene_weights = w
+        for f in freq.values():
+            f.calls = 0
+        r.step(.5)
+        assert {name for name, f in freq.items() if f.calls} == drawn
+
+
+@pytest.mark.parametrize('amount', [0, .4])
+def test_cpu_gated_combines_match_the_ungated_result(patch, amount):
+    # A chain-valued amount is per pixel, so it is never gated: the original evaluation path.
+    from hydrapy.backend_np import render_chain
+    a = render_chain(osc(6).blend(voronoi(5), amount).modulate(noise(3), amount), t=.3, size=(24, 12))
+    b = render_chain(osc(6).blend(voronoi(5), solid(amount)).modulate(noise(3), solid(amount)), t=.3, size=(24, 12))
+    assert np.array_equal(a, b)
