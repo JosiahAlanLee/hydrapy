@@ -171,25 +171,57 @@ def build(chain: Chain, env: Env) -> Callable[[np.ndarray], np.ndarray]:
         if op.kind != "src" and f is None:
             raise ValueError(f"a chain must start with a source, not .{op.name}()")
 
+        gate = None
         if op.kind in ("combine", "combineCoord"):
             other = build(args[0], env)
             argfns = [_arg_fn(a, env, inp) for a, inp in zip(args[1:], op.inputs[1:])]
+            gate = _gate(op, args)
         else:
             other = None
             argfns = [_arg_fn(a, env, inp) for a, inp in zip(args, op.inputs)]
 
-        f = _make_stage(op, f, other, argfns, env)
+        f = _make_stage(op, f, other, argfns, env, gate)
     if f is None:
         raise ValueError("empty chain")
     return f
 
 
-def _make_stage(op, f0, other, argfns, env):
+def _gate(op, args):
+    """For a combine op that is exactly the identity at one scalar input value (glsl.IDENTITY_AT:
+    a blend at amount 0, a modulate at amount 0), ``(index into its non-chain args, identity)``.
+
+    The GL renderer compiles such a transform out while it sits at that value. The CPU renderer
+    skips evaluating its input chain instead, so a scene that isn't playing, or a layer faded out,
+    costs nothing here either. Only numbers and signals gate, as in ``glsl.gates``.
+    """
+    from .glsl import identity_of
+    ident = identity_of(op)
+    if not ident:
+        return None
+    names = [i.name for i in op.inputs]
+    k = names.index(ident[0]) if ident[0] in names else -1
+    if k < 1 or k >= len(args):
+        return None
+    a = args[k]
+    if isinstance(a, Signal) or (isinstance(a, (int, float)) and not isinstance(a, bool)):
+        return k - 1, float(ident[1])
+    return None
+
+
+def _make_stage(op, f0, other, argfns, env, gate=None):
     npf = op.np
     kind = op.kind
 
     def vals(st):
         return [a(st) for a in argfns]
+
+    def idle(v):
+        # A non-finite or array value is never idle: evaluate the input as usual.
+        try:
+            x = float(v[gate[0]])
+        except (TypeError, ValueError):
+            return False
+        return x == gate[1]
 
     f32 = lambda a: np.asarray(a, dtype=np.float32)   # keep everything float32 like the GPU
     if kind == "src":
@@ -198,6 +230,20 @@ def _make_stage(op, f0, other, argfns, env):
         return lambda st: f0(f32(npf(st, *vals(st), env)))
     if kind == "color":
         return lambda st: f32(npf(f0(st), *vals(st), env))
+    if kind == "combine" and gate is not None:
+        def gated_combine(st):
+            v = vals(st)
+            if idle(v):
+                return f0(st)
+            return f32(npf(f0(st), other(st), *v, env))
+        return gated_combine
+    if kind == "combineCoord" and gate is not None:
+        def gated_combine_coord(st):
+            v = vals(st)
+            if idle(v):
+                return f0(st)
+            return f0(f32(npf(st, other(st), *v, env)))
+        return gated_combine_coord
     if kind == "combine":
         return lambda st: f32(npf(f0(st), other(st), *vals(st), env))
     if kind == "combineCoord":
