@@ -30,13 +30,14 @@ struct DemoCapture : Module {
       stamp = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
       std::ofstream meta(prefix + ".json");
       meta << "{\"start\":" << std::fixed << stamp << ",\"sample_rate\":" << args.sampleRate << "}";
-      if (meters) fprintf(meters, "time,clock,reset,run,gate,pitch,velocity,z,return_cv\n");
+      if (meters) fprintf(meters, "time,wall,clock,reset,run,gate,pitch,velocity,z,return_cv\n");
     }
     float sample = inputs[0].getVoltageSum() / 20.f;
     if (pcm) fwrite(&sample, sizeof(float), 1, pcm);
     if (samples % 800 == 0) {
       if (meters) {
-        fprintf(meters, "%.6f", samples / double(args.sampleRate));
+        double wall = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        fprintf(meters, "%.6f,%.6f", samples / double(args.sampleRate), wall);
         for (int i=1;i<9;i++) fprintf(meters, ",%.6f", inputs[i].getVoltage());
         fprintf(meters, "\n");
       }

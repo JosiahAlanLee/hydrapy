@@ -39,21 +39,25 @@ def prepare():
         m=dict(id=i,plugin=plugin,model=slug,version='2.0.0',pos=[x,y],params=[dict(id=k,value=v) for k,v in (params or {}).items()])
         if data is not None:m['data']=data
         modules.append(m)
-    mod(1,'Gorgon',0,data={'bindings':['Hue','__none__','__none__','__none__'],'pitchZero':60},plugin='GorgonBridge')
+    mod(1,'Gorgon',0,data={'bindings':['Hue','-','-','-'],'pitchZero':60},plugin='GorgonBridge')
     mod(2,'VCO',12,{2:0})
     mod(3,'ADSR',21,{0:.09,1:.4,2:.13,3:.35})
     mod(4,'VCA-1',30,{0:.7,1:1})
     mod(5,'VCA-1',36,{0:.75,1:1})
     mod(6,'Scope',42,{0:0,1:-5,2:0,3:-5,4:0,7:1})
     mod(7,'LFO',55,{0:1,2:-3.0})
+    mod(98,'AudioInterface2',12,data={'audio':{'driver':2,'sampleRate':48000,'blockSize':512}},plugin='Core',y=2)
     mod(99,'DemoCapture',0,plugin='GorgonBridge',y=2)
     colors=['#8fdcc4','#e7b375','#97bde0','#c4a3c6']
     def cable(a,ao,b,bi,col=0):cables.append(dict(id=len(cables)+1,outputModuleId=a,outputId=ao,inputModuleId=b,inputId=bi,color=colors[col]))
     cable(1,12,2,0,1);cable(1,11,3,4);cable(2,1,4,1,1);cable(3,0,4,0);cable(4,0,5,1,1);cable(1,3,5,0,3)
     cable(1,0,6,0);cable(1,8,6,1,1);cable(7,0,1,2,3)
+    helper_start=len(cables)
     cable(5,0,99,0,1)
     for out,inp in [(0,1),(1,2),(2,3),(4,4),(12,5),(3,6),(8,7)]:cable(1,out,99,inp)
-    cable(7,0,99,8,3);cable(99,0,1,0);cable(99,1,1,1)
+    cable(7,0,99,8,3)
+    for c in cables[helper_start:]:c['color']='#00000000'
+    cable(99,0,1,0);cable(99,1,1,1)
     patch=dict(version='2.6.4',zoom=1.5,gridOffset=[-3,-.12],modules=modules,cables=cables)
     (OUT/'Gorgon-Demo.vcv').write_text(json.dumps(patch,indent=2))
     print('Prepared native Rack patch',flush=True)
@@ -62,7 +66,7 @@ def capture():
     from hydrapy.studio import Session,make_server,advertise,withdraw
     from playwright.sync_api import sync_playwright
     import mss
-    session=Session(ROOT,'tools/gorgon_demo/visual.py',backend='gl',size=(640,360),fps=30)
+    session=Session(ROOT,'tools/gorgon_demo/visual.py',backend='gl',size=(480,270),fps=24)
     server,token=make_server(session,0)
     threading.Thread(target=server.serve_forever,daemon=True).start()
     advertised=advertise(server.server_port,token,ROOT)
