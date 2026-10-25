@@ -434,3 +434,50 @@ def test_revision_conflict_keeps_local_recovery_without_overwriting_other_contro
     page.locator('#reloadScoreBtn').click()
     page.locator('#editConnection').wait_for(state='hidden')
     assert page.locator('#tempo').input_value() == '110'
+
+
+SCENE_PATCH = ("from hydrapy import *\nz=Param('Dolly Z', .35)\nr=Param('Roll',0,min=-45,max=45)\nf=Param('Feedback',.25)\n"
+               "@scene('drift')\ndef _(): return osc(8).rotate(r)\n"
+               "@scene('fracture')\ndef _(): return voronoi(5).kaleid(6)\n"
+               "@scene('glow', o1)\ndef _(): return noise(3)\n")
+
+
+def test_scene_column_entry_fade_copy_undo_playback_and_missing_names(workspace):
+    session, page, context, root = workspace
+    (root/'s.py').write_text(SCENE_PATCH)
+    session.call('load', path='s.py')
+    page.wait_for_function("document.querySelector('[data-row=\"0\"][data-col=\"7\"]') && "
+                           "document.querySelector('.track-header.scene')")
+    cell = lambda r: page.locator(f'[data-row="{r}"][data-col="7"]')
+    scenes = lambda: session.tracker.document['patterns'][0]['scenes']
+    # Enter steps through the patch's scenes: drift, then fracture after it.
+    cell(0).click(); page.wait_for_function("document.getElementById('sceneChoice').options.length === 3")
+    page.keyboard.press('Enter')
+    cell(16).click(); page.keyboard.press('Enter')
+    page.locator('#sceneFade').fill('8'); page.locator('#sceneFade').press('Tab')
+    page.wait_for_timeout(350)
+    assert scenes() == [{'r': 0, 'name': 'drift', 'fade': 0}, {'r': 16, 'name': 'fracture', 'fade': 8}]
+    assert 'F08' in cell(16).inner_text()
+    assert page.locator('#sceneChoice option').all_inner_texts() == ['drift · o0', 'fracture · o0', 'glow · o1']
+    # A scene block copies only into the SCENE column; undo takes it back.
+    cell(16).click(); page.locator('#copyBtn').click()
+    cell(32).click(); page.locator('#pasteBtn').click()
+    page.locator(f'[data-row="40"][data-col="6"]').click(); page.locator('#pasteBtn').click()
+    page.wait_for_timeout(350)
+    assert [k['r'] for k in scenes()] == [0, 16, 32]
+    page.locator('#undoBtn').click(); page.wait_for_timeout(350)
+    assert [k['r'] for k in scenes()] == [0, 16]
+    # Playing drives the patch's scene weights: fracture fades in over 2 beats from beat 4.
+    session.call('tracker_transport', enabled=True, playing=True, beat=4.5)
+    page.wait_for_timeout(150)
+    session.call('tracker_transport', playing=False)
+    weights = dict(session.renderer.patch.scene_weights)
+    assert weights['drift'] == 1 and 0 < weights['fracture'] < 1 and weights['glow'] == 1
+    # A name the loaded patch doesn't declare is struck through, and kept.
+    (root/'s.py').write_text(SCENE_PATCH.replace("'fracture'", "'shards'"))
+    session.call('load', path='s.py')
+    page.wait_for_function("document.querySelector('[data-row=\"16\"][data-col=\"7\"]').classList.contains('missing')")
+    assert scenes()[1]['name'] == 'fracture'
+    # Arrow keys reach the SCENE column and stop there.
+    cell(16).click(); page.keyboard.press('ArrowRight')
+    assert page.evaluate('document.activeElement.dataset.col') == '7'

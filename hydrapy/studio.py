@@ -21,7 +21,8 @@ from urllib.parse import urlparse, parse_qs
 from .controls import apply_controls, carry_controls
 from .inspect import catalog, capabilities
 from .studio_preview import Preview
-from .studio_tracker import Tracker, number
+from .scenes import check_scenes
+from .studio_tracker import Tracker, number, scene_fades
 from .studio_audio import StudioAudio, settings as audio_settings
 
 
@@ -203,6 +204,12 @@ class Session:
                 if ctx is not None:
                     r = GLRenderer(patch, size=self.size, fps=self.fps, ctx=ctx)
                     r.settle = LIVE_SETTLE
+                    # Every scene's shader now, so a scene change never compiles mid-set.
+                    try:
+                        r.prewarm_scenes(scene_fades(self.tracker.document, patch.scenes))
+                    except Exception as exc:
+                        r.release()
+                        raise ValueError(f'Scene shaders failed to compile: {exc}') from exc
                     return r
         from .backend_np import Renderer
         return Renderer(patch, size=self.size, fps=self.fps)
@@ -223,10 +230,16 @@ class Session:
         try:
             with ResourceStage() as stage:
                 patch = load_patch(str(path), strict=False)
+                check_scenes(patch)
                 if self.tracker.enabled and requested_arm and patch.transport:
                     raise ValueError('Disable tracker automation before enabling an external clock')
                 if same and old:
                     carry_controls(old.patch, patch)
+                    # The scene showing stays showing (with automation off nothing re-chooses it).
+                    if old.patch.scene_weights is not None and patch.scenes:
+                        kept = {n: w for n, w in old.patch.scene_weights.items() if n in patch.scenes}
+                        patch.scene_weights = kept or None
+                    patch.tracker_frame = old.patch.tracker_frame
                 new = self._make_renderer(patch)
                 if hasattr(new, '_compile'):
                     new._compile()
@@ -311,6 +324,13 @@ class Session:
         patch = self.renderer.patch
         if action == 'tracker_score':
             self.tracker.replace(data['document'], self.clock_time, data['revision'])
+            if patch.scenes and hasattr(self.renderer, 'prewarm_scenes'):
+                # A new crossfade compiles now, at the edit, not when its row plays. The edit is
+                # already accepted, so a failure here is reported, not returned as a rejection.
+                try:
+                    self.renderer.prewarm_scenes(scene_fades(self.tracker.document, patch.scenes))
+                except Exception as exc:
+                    self.preview_error = f'Scene crossfade compile failed: {exc}'
             modes = self.tracker.document['modes']
             if patch.display.name != modes['program']:
                 patch.render(patch.outputs[int(modes['program'][1])])
@@ -499,6 +519,8 @@ class Session:
                     time=self.clock_time, encoder=data.get('encoder', 'auto'))
         if self.tracker.enabled:
             spec['tracker'] = self.tracker.snapshot(self.clock_time, not self.paused)
+        # Without the score driving it, an export shows the scene showing now, not the first declared.
+        spec['scene_weights'] = self.renderer.patch.scene_weights
         atomic_text(folder / 'job.json', json.dumps(spec))
         atomic_text(folder / 'status.json', json.dumps(dict(state='queued', progress=0)))
         with (folder / 'log.txt').open('w') as log:
@@ -618,6 +640,8 @@ class Session:
                                       generation=self.preview.generation, aux_generation=self.aux_preview.generation,
                                       path=str(self.path.relative_to(self.root)) if self.path else None,
                                       controls=[x.describe() for x in self.renderer.patch.controls.values()] if self.renderer else [],
+                                      scenes=[dict(name=name, output=f'o{value[0]}') for name, value in self.renderer.patch.scenes.items()]
+                                      if self.renderer else [],
                                       cv=None if self.cv is None else self.cv.describe(), audio=self.audio.describe())
 
     def _run(self):

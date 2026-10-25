@@ -74,3 +74,26 @@ test('keyboard octaves use the score note convention; activity follows real even
   putCell(p,3,0,{note:'C-4',vel:0});putCell(p,3,1,{note:'C-5',vel:100});putCell(p,3,4,{v:.5});
   assert.deepEqual(activity(p)[3],{audio:1,keys:1});
 });
+
+test('SCENE cells copy, paste only into SCENE, validate clipboard names and count as activity', async () => {
+  const {getCell, SCENE, kindOf} = await import('../hydrapy/tracker/editor.js');
+  const d=score(), p=d.patterns[0];
+  assert.equal(kindOf(SCENE),'scene');assert.equal(kindOf(6),'feedback');
+  delete p.scenes;                                     // scores saved before the lane existed
+  assert.equal(getCell(p,0,SCENE),null);
+  putCell(p,8,SCENE,{name:'drift',fade:4});putCell(p,2,SCENE,{name:'glow'});
+  assert.deepEqual(p.scenes,[{r:2,name:'glow',fade:0},{r:8,name:'drift',fade:4}]);
+  const block=readBlock(JSON.stringify(copyBlock(p,{r0:8,r1:8,c0:6,c1:7})));
+  assert.deepEqual(block.columns,['feedback','scene']);
+  assert.deepEqual(pasteBlock(d.patterns[1],{row:20,col:6},block),{written:2,skipped:0});
+  assert.deepEqual(getCell(d.patterns[1],20,SCENE),{r:20,name:'drift',fade:4});
+  assert.deepEqual(pasteBlock(d.patterns[1],{row:20,col:5},block),{written:0,skipped:2});   // kinds don't match
+  for (const bad of [{name:'no spaces',fade:0},{name:'x'.repeat(25)},{name:'ok',fade:65},{name:'ok',fade:1.5},{name:7}]) {
+    const text=JSON.stringify({format:'gorgon-block-1',columns:['scene'],rows:[[bad]]});
+    assert.throws(()=>readBlock(text),/scene/);
+  }
+  clearBlock(p,{r0:0,r1:63,c0:0,c1:7});
+  assert.deepEqual(p.scenes,[]);
+  putCell(p,5,SCENE,{name:'drift'});
+  assert.deepEqual(activity(p)[5],{audio:0,keys:1});
+});

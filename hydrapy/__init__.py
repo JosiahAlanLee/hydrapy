@@ -57,6 +57,8 @@ from .mint import Mint, switch
 from .signals import SH, Audio, Clock, Const, Decay, Drift, EntropyLock, Env, Expr, Fft, Fn, Fx, Lfo, Mouse, Seq, Signal, Time, as_signal
 
 from .controls import Param
+from .scenes import scene
+from . import tracker
 
 __version__ = "0.1.0"
 
@@ -200,7 +202,7 @@ __all__ = (
         "FrameSource", "Cellular", "CARule", "CA_MODES", "CA_RULES", "MultiCA1D", "WOLFRAM3", "WOLFRAM5", "subdivide", "fuzzy_paths", "flora_lines",
         "catmull_rom", "lathe_wire", "project_wire", "sweep_wire", "Track", "Timeline",
         "SDF3", "raymarch",
-        "Param", "VideoOut", "close_resources", "CvIn", "CvOut", "Link", "LiveValue", "Midi", "MidiClock", "OscIn", "OscOut", "Probe", "Soundtrack", "Transport", "TrigPhase", "audio_devices", "register_hook", "Ctx", "reset_patch", "default_patch",
+        "Param", "scene", "tracker", "VideoOut", "close_resources", "CvIn", "CvOut", "Link", "LiveValue", "Midi", "MidiClock", "OscIn", "OscOut", "Probe", "Soundtrack", "Transport", "TrigPhase", "audio_devices", "register_hook", "Ctx", "reset_patch", "default_patch",
         "Signal", "Lfo", "Seq", "Clock", "Env", "SH", "Decay", "Drift", "Mouse", "Time", "Fn", "Fx", "EntropyLock", "Mint", "switch", "Fft", "Audio", "Const", "Expr", "External", "as_signal",
         "Renderer", "iter_frames", "render_chain", "render_frames", "save_gif", "save_mp4", "save_png", "to_image", "to_ansi",
         "VideoEncoder", "video_encoders",

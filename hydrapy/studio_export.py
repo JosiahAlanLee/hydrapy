@@ -25,6 +25,8 @@ def run(job_path):
         with ResourceStage():
             patch = load_patch(spec['patch'], strict=False, source=spec['source'])
             apply_controls(patch, spec['params'])
+            if spec.get('scene_weights') is not None:
+                patch.scene_weights = {name: float(w) for name, w in spec['scene_weights'].items() if name in patch.scenes}
             patch.render(patch.outputs[spec['display']])
             target = 'html' if spec['format'] == 'html' else spec['backend']
             check = capabilities(patch, target)

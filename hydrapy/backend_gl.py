@@ -167,13 +167,56 @@ class GLRenderer:
             count = count + 1 if seen == key else 1
             self._pending[name] = (key, count)
             if count < self.settle:
-                last = self._active.get(name)
-                usable = last if last is not None and (name, last) in self._variants and last <= key else None
+                # Any compiled variant skipping only transforms that are idle now draws the same
+                # image: prefer the one that skips most (a precompiled scene, say) over the full
+                # program, which would draw every scene at once.
+                usable = max((k for n, k in self._variants if n == name and k is not None and k <= key),
+                             key=len, default=None)
                 self._active[name] = usable
                 return self._variants[(name, usable)]
         self._pending.pop(name, None)
         self._active[name] = key
         return self._compiled(prog, key)
+
+    def prewarm_scenes(self, pairs=()) -> int:
+        """Compile each scene's variant (its output with the other scenes' blends compiled out),
+        and one for each (scene, scene) pair in ``pairs``: the crossfades the score contains.
+
+        Changing scene then switches between compiled shaders. Returns the number compiled.
+        """
+        from .scenes import scene_transforms
+        transforms = scene_transforms(self.patch)
+        if not transforms or not self.specialise:
+            return 0
+        before = len(self._variants)
+        ctx = Ctx(time=float(getattr(self, 'ctx_time', 0.) or 0.), width=self.size[0], height=self.size[1],
+                  bpm=self.patch.bpm, dt=1.0 / self.fps, fps=self.fps)
+        for prog in self.programs:
+            name = prog.output.name
+            gated = {id(tr) for tr, _, _ in self._gates[name]}
+            mine = [id(tr) for tr in transforms.values() if id(tr) in gated]
+            wanted = [{id(transforms[n])} for n in transforms if id(transforms[n]) in mine]
+            wanted += [{id(transforms[a]), id(transforms[b])} for a, b in pairs
+                       if a in transforms and b in transforms and {id(transforms[a]), id(transforms[b])} <= set(mine)]
+            scene_of = {id(tr): sig for tr, sig, _ in self._gates[name] if id(tr) in mine}
+            for keep in wanted:
+                # The scene alone, and the scene with the output's other gates as they are now
+                # (a control at 0, say): the variant live playback will actually ask for.
+                idle = frozenset(t for t in mine if t not in keep)
+                forced = {id(sig): (1.0 if t in keep else 0.0) for t, sig in scene_of.items()}
+
+                def value(sig, forced=forced):
+                    if id(sig) in forced:
+                        return forced[id(sig)]
+                    try:
+                        v = float(as_signal(sig)(ctx))
+                    except Exception:
+                        return float('nan')              # unknown now: not idle
+                    return v if np.isfinite(v) else 0.0
+                for key in {idle or None, self._idle(name, value)}:
+                    if key:
+                        self._compiled(prog, key)
+        return len(self._variants) - before
 
     def prewarm(self, times) -> int:
         """Compile, now, the variants the score will need at ``times`` (seconds), so a render or a set
@@ -188,7 +231,8 @@ class GLRenderer:
             if not isinstance(sig, Signal):
                 return True
             mod = type(sig).__module__
-            if depth > 40 or isinstance(sig, (Fft, Param)) or not mod.startswith("hydrapy.") or mod == "hydrapy.live":
+            if (depth > 40 or isinstance(sig, (Fft, Param)) or not mod.startswith("hydrapy.")
+                    or mod in ("hydrapy.live", "hydrapy.scenes")):   # scenes follow the tracker, not time
                 return False
             for v in vars(sig).values():
                 for item in (v if isinstance(v, (list, tuple)) else (v,)):

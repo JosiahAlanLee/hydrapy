@@ -35,4 +35,4 @@ packages = ["hydrapy"]
 include-package-data = false
 
 [tool.setuptools.package-data]
-hydrapy = ["studio.html", "tracker/*.html", "tracker/*.css", "tracker/*.js", "tracker/*.json"]
+hydrapy = ["studio.html", "tracker/*.html", "tracker/*.css", "tracker/*.js", "tracker/*.json", "tracker/__init__.py"]

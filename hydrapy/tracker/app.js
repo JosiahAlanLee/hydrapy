@@ -1,7 +1,7 @@
 import {api, PreviewStream} from './backend.js';
 import {noteMidi, noteFrequency, canonicalNote} from './notes.js';
 import {ScoreHistory, bounds, getCell, putCell, copyBlock, readBlock, pasteBlock, clearBlock,
-  transposeBlock, setBlockVelocity, pianoNote, activity} from './editor.js';
+  transposeBlock, setBlockVelocity, pianoNote, activity, SCENE, SCENE_NAME, kindOf} from './editor.js';
 const $ = id => document.getElementById(id);
 const clamp = (n,a,b) => Math.max(a,Math.min(b,n));
 const mod = (n,m) => ((n%m)+m)%m;
@@ -15,7 +15,10 @@ const tracks = [
   {id:'z',name:'Dolly Z',sub:'CAMERA / DEPTH',visual:true,min:0,max:1},
   {id:'roll',name:'Roll',sub:'CAMERA / DEG',visual:true,min:-45,max:45},
   {id:'feedback',name:'Feedback',sub:'IMAGE / AMOUNT',visual:true,min:0,max:.9},
+  {id:'scene',name:'Scene',sub:'PATCH SCENE / FADE',scene:true},
 ];
+// The loaded patch's @scene names, from Studio ([{name, output}]).
+let patchScenes=[];
 const defaults = () => ({version:1,format:'hydrapy-tracker-1',bindings:{z:'Dolly Z',roll:'Roll',feedback:'Feedback'},bpm:138,key:2,sound:false,loop:false,pattern:0,scene:0,modes:{program:'o0',aux:'o1'},mutes:[false,false,false,false],patterns:['DRIFT','FRACTURE','ASCENT','SUSPEND'].map((name,p)=>{
   const audio = tracks.slice(0,4).map(()=>Array(64).fill(null));
   for(let r=0;r<64;r++){
@@ -25,7 +28,7 @@ const defaults = () => ({version:1,format:'hydrapy-tracker-1',bindings:{z:'Dolly
     if(r%16===0 || (p===2 && r%16===10)) audio[2][r]={note:r<32?'D-2':'A-1',vel:91};
     if(r%32===24) audio[3][r]={note:'AIR',vel:45};
   }
-  return {name,audio,easing:{z:'smooth',roll:'smooth',feedback:'smooth'},keys:{
+  return {name,audio,scenes:[],easing:{z:'smooth',roll:'smooth',feedback:'smooth'},keys:{
     z:[{r:0,v:[.35,.55,.2,.8][p]},{r:16,v:[.55,.25,.4,.7][p]},{r:32,v:[.45,.8,.7,.45][p]},{r:48,v:[.8,.5,.9,.25][p]},{r:63,v:[.35,.55,.2,.8][p]}],
     roll:[{r:0,v:0},{r:16,v:[-12,22,-6,14][p]},{r:32,v:[9,-18,19,-9][p]},{r:48,v:[-8,16,32,5][p]},{r:63,v:0}],
     feedback:[{r:0,v:.25},{r:24,v:.45+p*.08},{r:40,v:.72-p*.08},{r:56,v:.3},{r:63,v:.25}],
@@ -280,6 +283,9 @@ async function pollRemote(){
       outputType==='aux'?result.aux_generation:result.generation);
     if(!outputType){
       renderBindings(result.controls);
+      if(JSON.stringify(result.scenes??[])!==JSON.stringify(patchScenes)){
+        patchScenes=result.scenes??[];renderRows();updateInspector();
+      }
       $('sceneName').textContent=result.path?.split('/').pop()||'Choose a patch';
       $('sceneMeta').textContent=result.output.toUpperCase();
     }
@@ -354,12 +360,19 @@ function renderPatterns(){
   $('patterns').querySelectorAll('[data-launch]').forEach(b=>b.onclick=()=>launchPattern(Number(b.dataset.launch)));
 }
 function renderHeaders(){
-  $('trackHeaders').innerHTML='<div class="track-header row-index">ROW</div>'+tracks.map((t,i)=>`<div class="track-header ${t.visual?'visual':''}"><div><strong>${t.name}</strong>${t.visual?'':`<button class="mute" data-mute="${i}" aria-label="Mute ${t.name}" aria-pressed="${state.mutes[i]}">M</button>`}</div><span>${t.sub}</span></div>`).join('');
+  $('trackHeaders').innerHTML='<div class="track-header row-index">ROW</div>'+tracks.map((t,i)=>`<div class="track-header ${t.visual?'visual':''} ${t.scene?'scene':''}"><div><strong>${t.name}</strong>${i<4?`<button class="mute" data-mute="${i}" aria-label="Mute ${t.name}" aria-pressed="${state.mutes[i]}">M</button>`:''}</div><span>${t.sub}</span></div>`).join('');
   $('trackHeaders').querySelectorAll('[data-mute]').forEach(b=>b.onclick=()=>{
     changeScore('mute lane',()=>{state.mutes[Number(b.dataset.mute)]=!state.mutes[Number(b.dataset.mute)];});stopVoices();
   });
 }
 function formatValue(id,v){return id==='roll'?`${v>=0?'+':''}${Math.round(v)}°`:v.toFixed(2);}
+function sceneLabel(key){return `${escapeHTML(key.name)}${key.fade?`<span class="velocity">F${hex(key.fade)}</span>`:''}`;}
+// Enter on an empty SCENE cell: the scene after the one playing above it, so repeated entries step through.
+function nextSceneName(p,row){
+  const names=patchScenes.map(x=>x.name);if(!names.length)return 'scene';
+  const above=[...(p.scenes??[])].reverse().find(k=>k.r<row);
+  return names[(names.indexOf(above?.name)+1)%names.length];
+}
 function renderRows(){
   const grid=$('trackerRows'),hadFocus=grid.contains(document.activeElement),p=state.patterns[editPattern],box=selectionBox();let html='';
   for(let r=0;r<64;r++){
@@ -367,8 +380,9 @@ function renderRows(){
     tracks.forEach((t,c)=>{
       const key=getCell(p,r,c),isSelected=selected.row===r&&selected.col===c;
       const inBlock=r>=box.r0&&r<=box.r1&&c>=box.c0&&c<=box.c1;
-      const content=key?(t.visual?formatValue(t.id,key.v):`${escapeHTML(key.note)}<span class="velocity">${hex(key.vel)}</span>`):'···';
-      html+=`<button role="gridcell" tabindex="${isSelected?'0':'-1'}" class="cell ${t.visual?'visual':''} ${!key?'empty':''} ${isSelected?'selected':''} ${inBlock?'in-selection':''} ${c<4&&state.mutes[c]?'muted':''}" data-row="${r}" data-col="${c}" aria-label="${t.name}, row ${hex(r)}, ${key?(t.visual?formatValue(t.id,key.v):escapeHTML(key.note)):'empty'}" aria-selected="${inBlock}">${content}</button>`;
+      const content=key?(t.scene?sceneLabel(key):t.visual?formatValue(t.id,key.v):`${escapeHTML(key.note)}<span class="velocity">${hex(key.vel)}</span>`):'···';
+      const missing=t.scene&&key&&remote&&!patchScenes.some(x=>x.name===key.name);
+      html+=`<button role="gridcell" tabindex="${isSelected?'0':'-1'}" class="cell ${t.visual?'visual':''} ${t.scene?'scene':''} ${missing?'missing':''} ${!key?'empty':''} ${isSelected?'selected':''} ${inBlock?'in-selection':''} ${c<4&&state.mutes[c]?'muted':''}" data-row="${r}" data-col="${c}" aria-label="${t.name}, row ${hex(r)}, ${key?(t.scene?escapeHTML(key.name)+(missing?' (not in this patch)':''):t.visual?formatValue(t.id,key.v):escapeHTML(key.note)):'empty'}" aria-selected="${inBlock}">${content}</button>`;
     });html+='</div>';
   }
   grid.innerHTML=html;lastStep=-1;
@@ -418,7 +432,7 @@ function selectCell(row,col,extend=false){
 function toggleCell(){
   changeScore('toggle cell',()=>{
     const p=state.patterns[editPattern],t=tracks[selected.col];
-    const value=getCell(p,selected.row,selected.col)?null:t.visual?{v:valueAt(p,t.id,selected.row)}:{note:t.note,vel:entryVelocity};
+    const value=getCell(p,selected.row,selected.col)?null:t.scene?{name:nextSceneName(p,selected.row),fade:0}:t.visual?{v:valueAt(p,t.id,selected.row)}:{note:t.note,vel:entryVelocity};
     putCell(p,selected.row,selected.col,value);
   });
 }
@@ -443,11 +457,21 @@ function updateInspector(){
   ['z','roll','feedback'].forEach(id=>{const v=valueAt(p,id,selected.row);$(id+'Slider').value=v;$(id+'Value').textContent=formatValue(id,v);});
   $('selectedTrack').textContent=tracks[selected.col].name;$('selectedRow').textContent=`P${editPattern+1} / ROW ${hex(selected.row)}`;
   const hit=selected.col<4?p.audio[selected.col][selected.row]:null;
-  $('noteEditor').hidden=selected.col>=4;$('visualCellEditor').hidden=selected.col<4;
+  const kind=kindOf(selected.col);
+  $('noteEditor').hidden=kind!=='audio';$('visualCellEditor').hidden=!tracks[selected.col].visual;$('sceneEditor').hidden=kind!=='scene';
   $('noteInput').value=hit?.note||tracks[selected.col].note||'C-4';
   $('velocityInput').value=hit?.vel??entryVelocity;$('auditionBtn').disabled=!hit;
-  $('selectedHint').textContent=selected.col<4?'Enter toggles · Note and velocity write on change':'Writes at the edit cursor; playback stays in place.';
-  if(selected.col>=4){
+  $('selectedHint').textContent=kind==='audio'?'Enter toggles · Note and velocity write on change':
+    kind==='scene'?(patchScenes.length?'Enter steps to the next scene · Fade crossfades over rows':'Declare @scene in the patch to choose scenes'):
+    'Writes at the edit cursor; playback stays in place.';
+  if(kind==='scene'){
+    const key=getCell(p,selected.row,SCENE),choice=$('sceneChoice');
+    const names=[...new Set([...patchScenes.map(x=>x.name),...(key?[key.name]:[])])];
+    choice.replaceChildren(...names.map(n=>new Option(patchScenes.some(x=>x.name===n)?`${n} · ${patchScenes.find(x=>x.name===n).output}`:`${n} (not in patch)`,n)));
+    choice.value=key?.name??nextSceneName(p,selected.row);$('sceneFade').value=key?.fade??0;
+    $('writeSceneBtn').disabled=!names.length&&!key;
+  }
+  if(tracks[selected.col].visual){
     const t=tracks[selected.col],input=$('cellValue');input.min=t.min;input.max=t.max;input.step=t.id==='roll'?1:.01;input.value=valueAt(p,t.id,selected.row).toFixed(t.id==='roll'?0:2);
   }
   $('curveTabs').querySelectorAll('button').forEach(b=>b.classList.toggle('active',b.dataset.curve===curve));
@@ -557,7 +581,7 @@ if(outputType){
   $('clearCellBtn').onclick=clearCell;
   $('undoBtn').onclick=()=>restoreHistory();$('redoBtn').onclick=()=>restoreHistory(true);
   function selectBlock(all=false){
-    selectionAnchor={row:0,col:all?0:selected.col};selected={row:63,col:all?6:selected.col};
+    selectionAnchor={row:0,col:all?0:selected.col};selected={row:63,col:all?tracks.length-1:selected.col};
     setFollow(false);updateSelection();updateInspector();focusCell();
   }
   $('selectLaneBtn').onclick=()=>selectBlock();$('selectAllBtn').onclick=()=>selectBlock(true);
@@ -605,6 +629,16 @@ if(outputType){
     }catch(error){toast(error.message);}
   };
   $('insertNoteBtn').onclick=()=>writeNote();
+  function writeScene(){
+    if(selected.col!==SCENE)return;
+    const name=$('sceneChoice').value,fade=Number($('sceneFade').value);
+    if(!SCENE_NAME.test(name)){toast('Choose a scene declared in the patch.');return;}
+    if(!Number.isInteger(fade)||fade<0||fade>64){toast('Fade is 0–64 rows.');return;}
+    changeScore('write scene',()=>putCell(state.patterns[editPattern],selected.row,SCENE,{name,fade}));
+  }
+  $('writeSceneBtn').onclick=writeScene;
+  // Changing the name or fade rewrites an existing change; an empty cell waits for Write scene.
+  $('sceneChoice').onchange=$('sceneFade').onchange=()=>{if(getCell(state.patterns[editPattern],selected.row,SCENE))writeScene();};
   $('applyVelocityBtn').onclick=()=>{
     try{const v=velocity();entryVelocity=v;changeScore('block velocity',()=>setBlockVelocity(state.patterns[editPattern],selectionBox(),v));}catch(error){toast(error.message);}
   };
@@ -636,7 +670,7 @@ if(outputType){
     $('patternMenu').open=false;toast(`Copied to pattern ${target+1}. Undo restores its previous contents.`);
   };
   $('clearPatternBtn').onclick=()=>{
-    changeScore('clear pattern',()=>clearBlock(state.patterns[editPattern],{r0:0,r1:63,c0:0,c1:6}));
+    changeScore('clear pattern',()=>clearBlock(state.patterns[editPattern],{r0:0,r1:63,c0:0,c1:tracks.length-1}));
     $('patternMenu').open=false;toast('Pattern cleared. Undo restores it.');
   };
   ['program','aux'].forEach(k=>$(k+'Mode').onchange=()=>{state.modes[k]=$(k+'Mode').value;saveLocal();});
@@ -670,7 +704,7 @@ if(outputType){
   $('restoreBtn').onclick=async()=>{try{$('fileMenu').open=false;await importScore((await api('tracker_saved')).document);}catch(error){toast(error.message);}};
   $('newScoreBtn').onclick=()=>{
     if(!confirm('Start an empty score? You can undo this edit.'))return;
-    changeScore('new empty score',()=>{state.patterns.forEach(p=>clearBlock(p,{r0:0,r1:63,c0:0,c1:6}));});
+    changeScore('new empty score',()=>{state.patterns.forEach(p=>clearBlock(p,{r0:0,r1:63,c0:0,c1:tracks.length-1}));});
     $('fileMenu').open=false;
   };
   $('downloadScoreBtn').onclick=()=>{downloadScore();$('fileMenu').open=false;};
@@ -754,7 +788,7 @@ if(outputType){
       e.preventDefault();let r=selected.row,c=selected.col;
       if(e.key==='Home')r=0;else if(e.key==='End')r=63;else if(e.key==='PageUp')r-=16;else if(e.key==='PageDown')r+=16;
       else {r+=e.key==='ArrowDown'?1:e.key==='ArrowUp'?-1:0;c+=e.key==='ArrowRight'?1:e.key==='ArrowLeft'?-1:0;}
-      selectCell(clamp(r,0,63),clamp(c,0,6),e.shiftKey);focusCell(true);
+      selectCell(clamp(r,0,63),clamp(c,0,tracks.length-1),e.shiftKey);focusCell(true);
     }
     if(e.key==='Delete'||e.key==='Backspace'){e.preventDefault();clearCell();}
     if(e.key==='Enter'){e.preventDefault();if(e.altKey)seekSelected();else toggleCell();}

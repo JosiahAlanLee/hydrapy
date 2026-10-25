@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 
 LANES = {'z': (0., 1., .35), 'roll': (-45., 45., 0.), 'feedback': (0., .9, .25)}
+SCENE_NAME = re.compile(r'[A-Za-z0-9_-]{1,24}')
 
 def note_midi(note):
     """Tracker naturals use a separator: C-4 is C4 (MIDI 60), not C minus 4.
@@ -88,7 +89,81 @@ def validate(document):
                     raise ValueError('Key rows must be unique, sorted integers from 0 to 63')
                 number(key.get('v'), lo, hi, 'Key value')
                 previous = key['r']
+        # The SCENE lane is optional, so scores saved before it existed still load.
+        scenes = p.setdefault('scenes', [])
+        if not isinstance(scenes, list) or len(scenes) > 64:
+            raise ValueError('At most 64 scene changes per pattern')
+        previous = -1
+        for key in scenes:
+            if not isinstance(key, dict) or type(key.get('r')) is not int or not previous < key['r'] <= 63:
+                raise ValueError('Scene rows must be unique, sorted integers from 0 to 63')
+            if not isinstance(key.get('name'), str) or not SCENE_NAME.fullmatch(key['name']):
+                raise ValueError('Scene names are 1-24 letters, digits, - or _')
+            key.setdefault('fade', 0)
+            if type(key['fade']) is not int or not 0 <= key['fade'] <= 64:
+                raise ValueError('A scene fade is 0-64 rows')
+            if set(key) != {'r', 'name', 'fade'}:
+                raise ValueError('A scene change has a row, a name and a fade')
+            previous = key['r']
     return d
+
+
+def scene_events(document):
+    """Scene changes in the playing cycle as (beat, name, fade in beats), in order."""
+    patterns = [document['pattern']] if document['loop'] else range(4)
+    return [(p * 16 + key['r'] / 4, key['name'], key['fade'] / 4)
+            for p in patterns for key in document['patterns'][p].get('scenes', [])]
+
+
+def scene_fades(document, scenes):
+    """The (from, to) scene pairs the score crossfades between, per output."""
+    pairs = set()
+    for index in {value[0] for value in scenes.values()}:
+        events = [e for e in scene_events(document) if e[1] in scenes and scenes[e[1]][0] == index]
+        for k, (_, name, fade) in enumerate(events):
+            before = events[k - 1][1]
+            if fade > 0 and before != name:
+                pairs.add((before, name))
+    return sorted(pairs)
+
+
+def scene_weights(document, beat, scenes):
+    """How much of each patch scene shows at ``beat`` (name -> 0..1).
+
+    ``scenes`` is the patch's name -> (output index, ...) in declaration order.
+    Each output follows the changes that name its own scenes; a change holds
+    until the next one and wraps round the cycle. An output with no change in
+    the cycle shows its first declared scene. A fade crossfades from the scene
+    before over ``fade`` rows, smoothstepped; it never runs past the next change
+    (so a later change never jumps from a half-finished fade), and a change to
+    the scene already showing doesn't fade at all.
+    """
+    order = {name: k for k, name in enumerate(scenes)}
+    length = 16 if document['loop'] else 64
+    weights = {name: 0. for name in scenes}
+    for index in sorted({value[0] for value in scenes.values()}):
+        mine = [name for name, value in scenes.items() if value[0] == index]
+        events = [e for e in scene_events(document) if e[1] in mine]
+        if not events:
+            weights[mine[0]] = 1.
+            continue
+        # The change most recently passed, going back round the cycle.
+        position = min(range(len(events)), key=lambda k: (beat - events[k][0]) % length)
+        when, name, fade = events[position]
+        weights[name] = 1.
+        elapsed = (beat - when) % length
+        gap = (events[(position + 1) % len(events)][0] - when) % length or length
+        fade = min(fade, gap)
+        before = events[position - 1][1]
+        if fade > 0 and elapsed < fade and before != name:
+            t = elapsed / fade
+            t = t * t * (3 - 2 * t)
+            if order[name] > order[before]:
+                weights[before] = 1.               # blended later in the chain: fade the newcomer in
+                weights[name] = t
+            else:
+                weights[before] = 1. - t           # blended earlier: fade the outgoing one out over it
+    return weights
 
 
 def value_at(pattern, lane, row):
@@ -109,6 +184,70 @@ def value_at(pattern, lane, row):
     return keys[-1]['v']
 
 
+class LaneState:
+    """The audio lanes as the patch sees them, per frame: what TrackerCV sends as CV.
+
+    Gates follow TrackerCV (half a row, muted lanes and zero velocity silent).
+    A hit starts when the playhead crosses a row holding one, so every row
+    passed since the last frame counts, even at a low frame rate, and a hit
+    that has been muted or deleted never fires again. Note and velocity hold
+    the last hit; a seek or a new transport clears them.
+    """
+    GATE = .5
+
+    def __init__(self):
+        self.transport = None
+        self.note = [60.] * 4
+        self.vel = [0.] * 4
+        self.since = [None] * 4     # seconds since each lane's latest hit
+        self.last_row = self.last_beat = None
+
+    @staticmethod
+    def _hit(document, row, lane):
+        hit = document['patterns'][row // 64]['audio'][lane][row % 64]
+        return hit if hit is not None and hit['vel'] > 0 and not document['mutes'][lane] else None
+
+    def _hold(self, document, lane, hit):
+        midi = note_midi(hit['note'])
+        if midi is not None:
+            self.note[lane] = float(midi + document['key'] - 2)
+        self.vel[lane] = hit['vel'] / 127
+
+    def update(self, document, beat, moving, transport):
+        if transport != self.transport:
+            self.__init__()
+            self.transport = transport
+        first, rows = (document['pattern'] * 64, 64) if document['loop'] else (0, 256)
+        length, seconds = rows / 4, 60 / document['bpm']
+        current = min(int(beat * 4), first + rows - 1)
+        rowpos = beat % 16 * 4
+        gate = [0.] * 4
+        if not moving:
+            self.last_row = self.last_beat = None
+            return dict(gate=gate, since=[None] * 4, note=list(self.note), vel=list(self.vel),
+                        beat=beat, row=float(current % 64))
+        if self.last_row is None:
+            crossed = [current]
+        else:
+            count = min((current - self.last_row) % rows, rows)
+            crossed = [first + (self.last_row - first + k) % rows for k in range(1, count + 1)]
+        elapsed = (beat - self.last_beat) % length if self.last_beat is not None else 0.
+        for lane in range(4):
+            started = next((r for r in reversed(crossed) if self._hit(document, r, lane)), None)
+            if started is not None:
+                self._hold(document, lane, self._hit(document, started, lane))
+                self.since[lane] = ((beat - started / 4) % length) * seconds
+            elif self.since[lane] is not None:
+                self.since[lane] += elapsed * seconds
+            hit = self._hit(document, current, lane)
+            if hit is not None:
+                self._hold(document, lane, hit)          # an edit to the playing cell shows at once
+                gate[lane] = 1. if rowpos - int(rowpos) < self.GATE else 0.
+        self.last_row, self.last_beat = current, beat
+        return dict(gate=gate, since=list(self.since), note=list(self.note), vel=list(self.vel),
+                    beat=beat, row=float(current % 64))
+
+
 class Tracker:
     def __init__(self, document=None):
         if document is None:
@@ -121,6 +260,7 @@ class Tracker:
         self.enabled = False
         self.transport_revision = 0
         self.anchor_time = self.anchor_beat = 0.
+        self._lanes = LaneState()
 
     def normalize(self, beat):
         start, length = (self.document['pattern'] * 16, 16) if self.document['loop'] else (0, 64)
@@ -166,13 +306,18 @@ class Tracker:
         self.seek(beat, clock_time, discontinuity=False)  # tempo changes preserve position
 
     def apply(self, patch, clock_time):
+        beat = self.beat(clock_time)
+        # Lane signals for the patch (scenes.TrackerSignal): gates stop while disabled.
+        patch.tracker_frame = self._lanes.update(self.document, beat, self.enabled, self.transport_revision)
         if not self.enabled:
             return
-        beat = self.beat(clock_time)
         pattern, row = self.document['patterns'][int(beat // 16)], beat % 16 * 4
         for lane, name in self.document['bindings'].items():
             if name in patch.controls:
                 patch.controls[name].set(value_at(pattern, lane, row))
+        # Disabling automation leaves the last scene showing, as it does controls.
+        if patch.scenes:
+            patch.scene_weights = scene_weights(self.document, beat, patch.scenes)
 
     def snapshot(self, clock_time, playing):
         return dict(document=self.document, revision=self.revision, enabled=self.enabled,
@@ -197,6 +342,8 @@ class Tracker:
         try:
             if hasattr(renderer, 'prewarm'):
                 renderer.prewarm([start + i / fps for i in range(round(seconds * fps))])
+            if hasattr(renderer, 'prewarm_scenes'):
+                renderer.prewarm_scenes(scene_fades(self.document, patch.scenes))
             clear_recordings()
             for probe in patch.probes:
                 if hasattr(probe, 'clear'):
