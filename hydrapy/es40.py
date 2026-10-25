@@ -105,7 +105,8 @@ def pack_es40(headers):
     Integer PortAudio output bypasses float-to-PCM device categories entirely.
     No gain, dither, resampling or mixing may follow these data words.
     """
-    b = np.asarray(headers, dtype=np.uint32)
+    # A header byte outside 0..255 would spill into its neighbours' bits.
+    b = np.clip(np.asarray(headers, dtype=np.int64), 0, 255).astype(np.uint32)
     left = (b[:, 0] << 16) | (b[:, 1] << 8) | (b[:, 4] & 0xf0)
     right = (b[:, 2] << 16) | (b[:, 3] << 8) | ((b[:, 4] << 4) & 0xf0)
     return (np.column_stack((left, right)) << 8).astype(np.int32)
@@ -168,6 +169,10 @@ class ES40CV(TrackerCV):
             self._open_stream(device, samplerate, blocksize, channels=self.channels, dtype='int32')
 
     def _write_volts(self, outdata, volts):
+        # NaN would cast to INT_MIN and corrupt the packed words; infinity has
+        # no meaning as a voltage either. Send 0 V for both. (The vendor's
+        # encoder sends full scale for NaN; zero is the safer failure here.)
+        volts = np.where(np.isfinite(volts), volts, 0.)
         for unit, encoder in zip(self.units, self.encoders):
             cv = np.zeros((len(volts), 8), np.float32)
             for jack, signal in unit['map'].items():
