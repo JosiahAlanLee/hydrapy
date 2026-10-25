@@ -127,6 +127,31 @@ Not yet covered: pitch CV from the lanes' notes, CV in exports, and a patch's ow
 `CvOut` on the same device. Opening the device twice fails on plain ALSA; with
 PipeWire or JACK both streams can share it.
 
+## VCV Rack bridge
+
+The [Gorgon module](https://github.com/JosiahAlanLee/DSP_Emulation/tree/main/vcv/gorgon)
+for VCV Rack 2 links Rack to Studio with no configuration. On start Studio writes
+`~/.hydrapy/studio.json` (port, session token, root; readable only by you) and
+removes it on exit if it is still its own. Set `HYDRAPY_STUDIO_FILE` to use another
+path. The module reads that file and polls Studio on loopback.
+
+The module puts the same signals as CV out on Rack jacks, at Rack's 10 V levels,
+and generates them per sample from Studio's playhead, as CV out does. It also
+sends values back: four CV inputs set the patch's named controls (0–10 V spans
+each control's range), and PLAY and RESET drive Studio's transport.
+
+The endpoints are local and need the session token like every other route:
+
+- `GET /api/bridge?revision=N`: the playhead as an anchor (`anchor_beat`,
+  `anchor_time`, `clock_time` and `wall`, Studio's monotonic time when it was
+  sampled), `enabled`, `playing`, `server_now`, the patch's controls, and the score
+  `document`. The document is left out when `N` matches the current revision.
+- `POST /api/bridge_params` with `{"values": {"Control name": value}}`: sets named
+  controls, clamped to their slider range. Controls bound to a tracker lane are
+  left alone while automation is on; the reply lists what was applied and what
+  was ignored, and why.
+- Transport uses the existing `POST /api/tracker_transport`.
+
 ## Preview and measurements
 
 Program reuses Studio's bounded preview. Auxiliary has an additional encoder
@@ -146,7 +171,7 @@ scanout or audio latency. The buses have independent sequence cursors.
 ## Reproducible checks
 
 ```sh
-python -m pytest -q tests/test_studio_tracker.py tests/test_tracker_cv.py tests/test_studio.py tests/test_studio_preview.py
+python -m pytest -q tests/test_studio_tracker.py tests/test_tracker_cv.py tests/test_studio_bridge.py tests/test_studio.py tests/test_studio_preview.py
 python -m pip install playwright
 python -m playwright install chromium
 HYDRAPY_BROWSER_TESTS=1 python -m pytest -q tests/test_studio_tracker_browser.py tests/test_studio_preview_browser.py

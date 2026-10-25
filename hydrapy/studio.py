@@ -106,6 +106,7 @@ class Session:
         self.aux_preview.reset('o1')
         self.tracker = Tracker()
         self.tracker_state = {}
+        self.bridge_state = {}
         self.tracker_blackout = False
         # Optional tracker CV output (a TrackerCV); opened by the caller so a
         # device error is reported before Studio starts.
@@ -304,6 +305,24 @@ class Session:
                 self.last_wall = time.monotonic()
             self.paused = not playing
             return dict(self.tracker.snapshot(self.clock_time, not self.paused), blackout=self.tracker_blackout)
+        elif action == 'bridge_params':
+            values = data.get('values')
+            if not isinstance(values, dict) or len(values) > 64:
+                raise ValueError('values must map up to 64 control names to numbers')
+            owned = set(self.tracker.document['bindings'].values()) if self.tracker.enabled else set()
+            applied, ignored = [], {}
+            for name, value in values.items():
+                control = patch.controls.get(name) if isinstance(name, str) else None
+                if control is None:
+                    ignored[str(name)] = 'unknown control'
+                elif name in owned:
+                    ignored[name] = 'driven by tracker automation'
+                elif isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                    ignored[name] = 'not a finite number'
+                else:
+                    control.set(min(max(float(value), control.min), control.max))
+                    applied.append(name)
+            return dict(applied=applied, ignored=ignored)
         elif action == 'tracker_save':
             revision = data.get('revision')
             if type(revision) is not int or not self.tracker.edit_revision <= revision <= self.tracker.revision:
@@ -591,6 +610,14 @@ class Session:
                 if self.cv is not None:
                     self.cv.publish(self.tracker, self.clock_time, now, not self.paused and self.renderer is not None)
                 with self.lock:
+                    # The playhead as an anchor, so a bridge client can extrapolate it
+                    # sample by sample (the VCV module does) without polling per frame.
+                    self.bridge_state = dict(revision=self.tracker.revision, enabled=self.tracker.enabled,
+                                             playing=not self.paused and self.renderer is not None,
+                                             anchor_beat=self.tracker.anchor_beat, anchor_time=self.tracker.anchor_time,
+                                             clock_time=self.clock_time, wall=now, document=self.tracker.document,
+                                             controls=[dict(name=x.name, min=x.min, max=x.max, value=x.base)
+                                                       for x in self.renderer.patch.controls.values()] if self.renderer else [])
                     self.tracker_state = self.tracker.snapshot(self.clock_time, not self.paused)
                     self.tracker_state.update(sampled=time.monotonic(), blackout=self.tracker_blackout,
                                               error=self.error or self.preview_error, fps=self.actual_fps, size=self.size,
@@ -692,6 +719,14 @@ def make_server(session, port=8765):
                         state = dict(session.tracker_state)
                     state['server_now'] = time.monotonic()
                     return self._send(200, state)
+                if parsed.path == '/api/bridge':
+                    with session.lock:
+                        state = dict(session.bridge_state)
+                    state['server_now'] = time.monotonic()
+                    # The score is only resent when it changed since the client's copy.
+                    if args.get('revision', [''])[0] == str(state.get('revision')):
+                        state.pop('document', None)
+                    return self._send(200, state)
                 if parsed.path == '/api/tracker_saved':
                     path = session.root / '.hydrapy' / 'tracker.json'
                     return self._send(200, {'document': json.loads(path.read_text()) if path.exists() else None})
@@ -755,6 +790,33 @@ def make_server(session, port=8765):
     return server, token
 
 
+def bridge_file():
+    """Where Studio advertises its port and token to local bridge clients."""
+    override = os.environ.get('HYDRAPY_STUDIO_FILE')
+    return Path(override) if override else Path.home() / '.hydrapy' / 'studio.json'
+
+
+def advertise(port, token, root):
+    """Write the bridge file readable only by this user; returns its path."""
+    path = bridge_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + f'.{os.getpid()}.tmp')
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w') as handle:
+        json.dump(dict(url=f'http://127.0.0.1:{port}', port=port, token=token, pid=os.getpid(), root=str(root)), handle)
+    os.replace(temporary, path)
+    return path
+
+
+def withdraw(path, token):
+    """Remove the bridge file if it is still ours (another Studio may have replaced it)."""
+    try:
+        if json.loads(path.read_text()).get('token') == token:
+            path.unlink()
+    except (OSError, ValueError):
+        pass
+
+
 def serve(root='.', patch=None, backend='auto', size=(640, 360), fps=30, port=8765, open_browser=True, tracker=False, cv=None):
     root = Path(root).resolve()
     # Match CLI patch execution: relative asset paths belong to the project.
@@ -765,9 +827,10 @@ def serve(root='.', patch=None, backend='auto', size=(640, 360), fps=30, port=87
         if cv is not None:
             cv.close()
         raise
-    server = None
+    server = advertised = None
     try:
         server, token = make_server(session, port)
+        advertised = advertise(server.server_port, token, root)
         url = f'http://127.0.0.1:{server.server_port}/' + ('tracker/' if tracker else '') + f'#{token}'
         print(f'HydraPy Studio: {url}', flush=True)
         if open_browser:
@@ -777,6 +840,8 @@ def serve(root='.', patch=None, backend='auto', size=(640, 360), fps=30, port=87
     except KeyboardInterrupt:
         pass
     finally:
+        if advertised:
+            withdraw(advertised, token)
         if server:
             server.server_close()
         session.close()
