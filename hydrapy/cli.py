@@ -189,6 +189,7 @@ def main(argv=None):
     cv_output = studio.add_mutually_exclusive_group()
     cv_output.add_argument("--cv-device", help="send direct CV on this audio device (see `hydrapy devices`)")
     cv_output.add_argument("--cv-profile", help="JSON routing profile for ES-40 / ESX-8GT or ESX-8CV units and direct CV")
+    studio.add_argument("--cv-backend", choices=["portaudio", "jack"], default="portaudio", help="CV transport; with JACK, --cv-device is the client name")
     studio.add_argument("--cv-map", default="0", help="first channel for the default eight signals, or e.g. 8=clock,9=reset,10=gate1")
     studio.add_argument("--cv-ppqn", type=int, default=4, help="clock pulses per quarter note (default 4: sixteenths)")
     studio.add_argument("--cv-offset-ms", type=float, default=0., help="send CV earlier (+) or later (-) than the picture")
@@ -239,7 +240,7 @@ def main(argv=None):
         from .studio import serve
         cv = None
         try:
-            options = dict(ppqn=a.cv_ppqn, offset_ms=a.cv_offset_ms, pitch_zero=a.cv_pitch_zero)
+            options = dict(ppqn=a.cv_ppqn, offset_ms=a.cv_offset_ms, pitch_zero=a.cv_pitch_zero, backend=a.cv_backend)
             if a.cv_profile:
                 from .es40 import load_profile
                 cv = load_profile(a.cv_profile, **options)

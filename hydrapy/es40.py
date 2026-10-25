@@ -214,6 +214,7 @@ class ES40CV(TrackerCV):
     def describe(self):
         return dict(device=self.device, es40=[dict(u, polarity_clips=self.polarity_clips[i]) for i, u in enumerate(self.units)],
                     polarity_routes=self.polarity_routes(), direct=self.direct, samplerate=self.samplerate,
+                    backend=self.backend, ports=[p.name for p in getattr(self.stream, 'ports', [])],
                     error=self.error, status=self.status, underflows=self.underflows)
 
     def polarity_routes(self):
@@ -242,7 +243,8 @@ class CVGroup:
 
     def describe(self):
         devices = [output.describe() for output in self.outputs]
-        return dict(devices=devices, polarity_routes=self.polarity_routes(), error='; '.join(d['error'] for d in devices if d['error']),
+        return dict(devices=devices, polarity_routes=self.polarity_routes(), ports=[p for d in devices for p in d['ports']],
+                    error='; '.join(d['error'] for d in devices if d['error']),
                     underflows=sum(d['underflows'] for d in devices))
 
     def polarity_routes(self):
@@ -276,8 +278,8 @@ def load_profile(path, *, open_stream=True, **options):
     outputs, seen = [], set()
     # Validate the complete profile before opening any hardware.
     for config in devices:
-        if not isinstance(config, dict) or set(config) - {'device', 'samplerate', 'es40', 'direct'}:
-            raise ValueError('Device entries use device, samplerate, es40 and optional direct')
+        if not isinstance(config, dict) or set(config) - {'device', 'samplerate', 'es40', 'direct', 'backend'}:
+            raise ValueError('Device entries use device, samplerate, es40 and optional direct/backend')
         device = config.get('device')
         if not ((type(device) is int and device >= 0) or (isinstance(device, str) and device.strip())):
             raise ValueError('Choose an explicit audio device name or index from hydrapy devices')
@@ -286,8 +288,11 @@ def load_profile(path, *, open_stream=True, **options):
         seen.add(device)
         if 'samplerate' not in config:
             raise ValueError('Set the hardware samplerate explicitly')
+        prepared = dict(options, backend=config.get('backend', options.get('backend', 'portaudio')))
+        if prepared['backend'] == 'jack' and not isinstance(device, str):
+            raise ValueError('For JACK, device is a client name, not a PortAudio index')
         outputs.append(ES40CV(config.get('es40'), device=device, samplerate=config['samplerate'],
-                             direct=config.get('direct'), open_stream=False, **options))
+                             direct=config.get('direct'), open_stream=False, **prepared))
     group = CVGroup(outputs)
     try:
         if open_stream:

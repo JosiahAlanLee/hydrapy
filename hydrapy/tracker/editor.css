@@ -179,4 +179,4 @@ details[open] > summary { color: var(--mint); border-color: #6f8d77; background:
 .jack-settings summary { font-size: 11px; }
 .jack-settings > button { width: 100%; margin-top: 10px; }
 .jack-settings label input { width: 58%; }
-#jackPorts { white-space: pre-wrap; overflow-wrap: anywhere; font: 9px var(--mono); line-height: 1.6; color: var(--mint); }
+#jackPorts,#cvPorts { white-space: pre-wrap; overflow-wrap: anywhere; font: 9px var(--mono); line-height: 1.6; color: var(--mint); }

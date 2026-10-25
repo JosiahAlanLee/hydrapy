@@ -91,7 +91,11 @@ class TrackerCV:
     """
 
     def __init__(self, mapping, device=None, samplerate=None, blocksize=256, volts_per_fs=10.,
-                 ppqn=4, gate=.5, high=5., reset_ms=5., offset_ms=0., pitch_zero=60, open_stream=True):
+                 ppqn=4, gate=.5, high=5., reset_ms=5., offset_ms=0., pitch_zero=60, open_stream=True,
+                 backend='portaudio'):
+        if backend not in ('portaudio', 'jack'):
+            raise ValueError('CV backend must be portaudio or jack')
+        self.backend = backend
         self.mapping = dict(sorted(mapping.items()))
         if not self.mapping or any(type(c) is not int or c < 0 for c in self.mapping) or any(s not in SIGNALS for s in self.mapping.values()):
             raise ValueError('CV channels are non-negative integers mapped to known signals')
@@ -126,6 +130,16 @@ class TrackerCV:
             self._open_stream(device, samplerate, blocksize)
 
     def _open_stream(self, device, samplerate, blocksize, *, channels=None, dtype='float32'):
+        if self.backend == 'jack':
+            from .jack_cv import JackCVStream
+            self.stream = JackCVStream(self, device, samplerate, channels or max(self.mapping) + 1, dtype)
+            try:
+                self.stream.start()
+            except BaseException:
+                self.stream.close()
+                self.stream = None
+                raise
+            return
         import sounddevice as sd
         if samplerate is None:
             self.samplerate = int(sd.query_devices(device, 'output')['default_samplerate'])
@@ -141,6 +155,7 @@ class TrackerCV:
 
     def describe(self):
         return dict(map={str(k): v for k, v in self.mapping.items()}, samplerate=self.samplerate,
+                    backend=self.backend, ports=[p.name for p in getattr(self.stream, 'ports', [])],
                     error=self.error, status=self.status, underflows=self.underflows)
 
     # -- render thread --------------------------------------------------------
@@ -260,7 +275,9 @@ class TrackerCV:
             now = time.monotonic()
             dac = getattr(time_info, 'outputBufferDacTime', 0.) or 0.
             current = getattr(time_info, 'currentTime', 0.) or 0.
-            if dac and current:
+            if getattr(time_info, 'monotonic_start', None) is not None:
+                start = time_info.monotonic_start
+            elif dac and current:
                 # Map the stream clock onto monotonic time; keep the smallest
                 # offset seen, which is the one least delayed by scheduling.
                 offset = now - current

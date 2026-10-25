@@ -7,8 +7,8 @@ through the audio graph.
 
 ## Start and connect
 
-1. Install the optional client: `pip install -e ".[jack]"`. Keep `.[cv]` too
-   when using an ES-40 profile. A running JACK server is required; Studio does
+1. Install the optional client: `pip install -e ".[jack]"`. PortAudio CV needs
+   `.[cv]`; native JACK CV also uses `.[jack]`. A running JACK server is required; Studio does
    not start or reconfigure one.
 2. With native JACK, start Studio and Rack normally. With PipeWire, use its
    JACK compatibility layer, for example `pw-jack hydrapy studio
@@ -86,6 +86,46 @@ rate, with no gain/mix/resample/dither. Its per-pair **Normal / Invert left /
 Invert right / Invert both** selector is also in Output routing; see
 [the polarity details and full-scale limitation](es40.md#polarity-control-in-the-tracker).
 
+For native JACK CV, use `--cv-backend jack`. Direct CV can be launched with
+`--cv-device GorgonCV --cv-backend jack --cv-map 0`; here `GorgonCV` is the
+JACK client name. A digital profile can set `"backend": "jack"` in a device
+entry (or inherit the CLI choice). For example:
+
+```json
+{
+  "format": "hydrapy-cv-1",
+  "devices": [{
+    "backend": "jack",
+    "device": "GorgonDigital",
+    "samplerate": 48000,
+    "es40": [{
+      "name": "ES-40 gates",
+      "channels": [0, 1],
+      "header": 1,
+      "expander": "8gt",
+      "map": {"1": "gate1", "2": "gate2", "3": "gate3", "4": "gate4"}
+    }]
+  }]
+}
+```
+
+Start with `pw-jack hydrapy studio patches/gorgon_corridor.py --tracker
+--cv-profile cv.json`. Output routing lists the dedicated CV port names.
+Connect `GorgonDigital:out_00` and `out_01` directly to the interface's physical
+S/PDIF playback pair at unity. These are JACK client channel indices, not
+automatic hardware channel assignments. Connect any separate direct CV ports
+to their physical DC-coupled outputs. An explicit ES-40 rate must match the
+server; opening refuses a mismatch rather than resampling. A runtime rate
+change latches zero-voltage commands and reports an error until restart.
+Float transport preserves every signed 24-bit encoded word exactly before
+the external graph. The optional polarity correction retains its documented
+full-scale limitation. Keep the interface at the supported 44.1/48 kHz rate.
+
+CV retains its existing callback evaluator, now paced by JACK periods; this is
+also Python soft realtime. Shutdown sends actual zero-voltage encoder commands
+and lets downstream clients consume them before disconnecting. Polarity and
+PCM transport tests do not establish a bit-perfect physical S/PDIF route.
+
 ## Verification
 
 `tests/test_studio_audio.py` checks scheduling/chunk invariance, pause/seek,
@@ -100,7 +140,9 @@ HYDRAPY_JACK_TESTS=1 python -m pytest -q -s tests/test_studio_jack.py
 HYDRAPY_JACK_TESTS=1 pw-jack python -m pytest -q -s tests/test_studio_jack.py
 ```
 
-Linux CI runs isolated native JACK/dummy and PipeWire daemons separately. Rack
+Linux CI runs isolated native JACK/dummy and PipeWire daemons separately,
+checking the audio loopback, encoded gate/CV words, live polarity changes,
+separate direct CV and zero-voltage shutdown. Rack
 tests exercise its real Port/Device API with a deterministic capture device,
 including 44.1/48/96 kHz conversion. Neither test measures a physical interface,
 the ES-40 digital path, or real display latency. Cross-repo CI uses explicit

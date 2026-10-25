@@ -288,6 +288,7 @@ async function pollRemote(){
     $('resolution').textContent=result.size.join(' × ');
     $('cvStatus').textContent=!result.cv?'CV off · configure at launch':result.cv.error?`CV error: ${result.cv.error}`:`CV active · ${result.cv.underflows||0} underflows`;
     $('cvStatus').title=result.cv?JSON.stringify(result.cv,null,2):'';
+    $('cvPorts').textContent=(result.cv?.ports||[]).join('\n');
     if(!outputType){renderPolarity(result.cv?.polarity_routes||[]);renderJackAudio(result.audio);}
   }catch(error){
     playing=false;stopVoices();$('backendStatus').textContent=error.message;

@@ -17,6 +17,22 @@ from hydrapy.studio_tracker import Tracker
 pytestmark = pytest.mark.skipif(os.getenv('HYDRAPY_JACK_TESTS') != '1', reason='requires a real JACK server')
 
 
+def connect_ports(receiver, sources, sinks):
+    import jack
+    # PipeWire propagates replaced ports to other clients asynchronously.
+    # An immediate lookup can still see the old registration on reconnect.
+    deadline = time.monotonic() + 2
+    for source, sink in zip(sources, sinks):
+        while True:
+            try:
+                receiver.connect(source.name, sink.name)
+                break
+            except jack.JackErrorCode as exc:
+                if exc.code not in (errno.EINVAL, errno.ENOENT) or time.monotonic() >= deadline:
+                    raise
+                time.sleep(.01)
+
+
 def test_real_ports_preserve_four_channels_pause_and_reconnect():
     import jack
     audio = StudioAudio()
@@ -45,19 +61,7 @@ def test_real_ports_preserve_four_channels_pause_and_reconnect():
         for track, value in zip(tracks, [.4, -.8]):
             track.listeners[0](np.full(4096, value, np.float32))
         def connect():
-            # PipeWire propagates new/replaced ports to other clients
-            # asynchronously. An immediate name lookup can still see the old
-            # registration after reconnect. Wait for the graph, not audio data.
-            deadline = time.monotonic() + 2
-            for source, sink in zip(audio.ports, ports):
-                while True:
-                    try:
-                        receiver.connect(source.name, sink.name)
-                        break
-                    except jack.JackErrorCode as exc:
-                        if exc.code not in (errno.EINVAL, errno.ENOENT) or time.monotonic() >= deadline:
-                            raise
-                        time.sleep(.01)
+            connect_ports(receiver, audio.ports, ports)
         connect()
         time.sleep(.8)
         samples = np.concatenate(captured[-max(1, int(.4 * receiver.samplerate / receiver.blocksize)):])
@@ -81,5 +85,58 @@ def test_real_ports_preserve_four_channels_pause_and_reconnect():
         print(audio.describe())
     finally:
         audio.close()
+        receiver.deactivate()
+        receiver.close()
+
+
+@pytest.mark.parametrize('expander', ['8gt', '8cv'])
+def test_encoded_es40_and_direct_cv_use_separate_bit_preserving_jack_ports(expander):
+    import jack
+    from hydrapy.es40 import ES40CV
+    from test_es40 import decode
+    receiver = jack.Client('gorgon_cv_test', no_start_server=True)
+    ports = [receiver.inports.register(f'capture_{i}') for i in range(3)]
+    received = []
+    @receiver.set_process_callback
+    def receive(frames):
+        if len(received) < 2000:
+            received.append(np.column_stack([p.get_array() for p in ports]))
+    cv = ES40CV([dict(channels=[0, 1], header=1, expander=expander, map={'1': 'run'})],
+                direct='2=run', device='GorgonDigital', samplerate=int(receiver.samplerate), backend='jack')
+    tracker = Tracker(); tracker.enabled = True
+    try:
+        receiver.activate()
+        connect_ports(receiver, cv.stream.ports, ports)
+        cv.publish(tracker, 0., time.monotonic(), True)
+        time.sleep(.15)
+        data = np.concatenate(received[-5:])
+        def codes(block, inverted=False):
+            words = np.rint(block[:, 0].astype(np.float64) * (-8388608 if inverted else 8388608)).astype(np.int64)
+            return decode((words >> 16) & 255)
+        if expander == '8gt':
+            # Header 1, gate 1 alone is +65536 / 2**23 in the left PCM channel.
+            assert np.all(data[:, 0] == 1 / 128) and not data[:, 1].any()
+        else:
+            assert {j: code for _, j, code in codes(data)[-8:]} == {j: 3968 if j == 0 else 2048 for j in range(8)}
+        assert np.all(data[:, 2] == .5)  # direct 5 V, ±10 V full scale
+        cv.set_polarity(cv.polarity_routes()[0]['id'], 'invert_left')
+        time.sleep(.08)
+        data = np.concatenate(received[-3:])
+        if expander == '8gt':
+            assert np.all(data[:, 0] == -1 / 128)
+        else:
+            assert {j: code for _, j, code in codes(data, True)[-8:]} == {j: 3968 if j == 0 else 2048 for j in range(8)}
+        assert np.all(data[:, 2] == .5)  # unaffected by encoded-pair compensation
+        # close() sends a final actual gate-off command before disconnecting.
+        received.clear()
+        cv.close()
+        assert received
+        if expander == '8gt':
+            assert not received[-1].any()
+        else:
+            # Actual zero-voltage DAC commands, not PCM silence, reached the sink.
+            assert {j: code for _, j, code in codes(np.concatenate(received), True)[-8:]} == {j: 2048 for j in range(8)}
+    finally:
+        cv.close()
         receiver.deactivate()
         receiver.close()
