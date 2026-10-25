@@ -103,8 +103,12 @@ def measure(playwright, args, name):
             page.wait_for_timeout(args.warmup * 1000)
             first, before = {}, {}
             for label, view in pages.items():
-                view.evaluate(f'if ({stats_expr}) {stats_expr}.samples.length = 0; window.previewPaints = 0')
-                first[label], before[label] = view.evaluate(count), metrics(clients[label])
+                first[label] = view.evaluate(f'''() => {{
+                    if ({stats_expr}) {stats_expr}.samples.length = 0;
+                    window.previewPaints = 0;
+                    return {{frames: {count}, time: performance.now()}};
+                }}''')
+                before[label] = metrics(clients[label])
             readbacks = []
             read_frame = session._read_frame
             def measured_read():
@@ -124,12 +128,19 @@ def measure(playwright, args, name):
                           readback_timings=summarize([{'readback_ms': v} for v in readbacks]), views={})
             session._read_frame = read_frame
             for label, view in pages.items():
-                stats = view.evaluate(stats_expr + ' || null')
+                last = view.evaluate(f'''() => ({{stats: {stats_expr} || null,
+                    frames: {count}, paints: window.previewPaints, time: performance.now()}})''')
+                stats = last['stats']
                 after = metrics(clients[label])
-                report['views'][label] = dict(display_fps=(view.evaluate(count)-first[label])/duration,
-                    preview_paints_per_second=view.evaluate('window.previewPaints')/duration,
+                # Every surface has its own measurement boundaries. Slow CDP
+                # calls on one page must not inflate another page's frame rate.
+                elapsed = (last['time'] - first[label]['time']) / 1000
+                metric_elapsed = after['Timestamp'] - before[label]['Timestamp']
+                report['views'][label] = dict(seconds=elapsed,
+                    display_fps=(last['frames']-first[label]['frames'])/elapsed,
+                    preview_paints_per_second=last['paints']/elapsed,
                     timings=summarize(stats['samples']) if stats else {},
-                    browser_seconds_per_second={k: (after[k]-before[label][k])/duration
+                    browser_seconds_per_second={k: (after[k]-before[label][k])/metric_elapsed
                         for k in ('TaskDuration', 'ScriptDuration', 'LayoutDuration', 'RecalcStyleDuration')})
                 if stats and stats.get('error'):
                     errors.append(stats['error'])

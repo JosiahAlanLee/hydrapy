@@ -33,7 +33,7 @@ jobs:
       - name: Compare identical workloads, alternating order
         run: |
           git worktree add --detach /tmp/hydrapy-preview-base "$BASELINE_REF"
-          mkdir -p benchmark-results
+          mkdir -p /tmp/hydrapy-preview-results
           for round in 1 2 3; do
             order="baseline candidate"
             if [ "$round" = 2 ]; then order="candidate baseline"; fi
@@ -42,12 +42,12 @@ jobs:
               if [ "$version" = baseline ]; then checkout=/tmp/hydrapy-preview-base; fi
               python docs/studio_preview_benchmark.py --checkout "$checkout" --backend gl \
                 --size 640x360 --fps 30 --view outputs --case single --case gorgon \
-                --warmup 2 --seconds 5 --json "benchmark-results/$version-$round.json"
+                --warmup 2 --seconds 5 --json "/tmp/hydrapy-preview-results/$version-$round.json"
             done
           done
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: preview-benchmark
-          path: benchmark-results/
+          path: /tmp/hydrapy-preview-results/
           retention-days: 7
