@@ -186,6 +186,10 @@ def main(argv=None):
     studio.add_argument("--port", type=int, default=8765)
     studio.add_argument("--no-browser", action="store_true")
     studio.add_argument("--tracker", action="store_true", help="open the Gorgon tracker workspace")
+    studio.add_argument("--cv-device", help="send the tracker out as CV on this audio device (see `hydrapy devices`)")
+    studio.add_argument("--cv-map", default="0", help="first channel for the default eight signals, or e.g. 8=clock,9=reset,10=gate1")
+    studio.add_argument("--cv-ppqn", type=int, default=4, help="clock pulses per quarter note (default 4: sixteenths)")
+    studio.add_argument("--cv-offset-ms", type=float, default=0., help="send CV earlier (+) or later (-) than the picture")
     session = sub.add_parser("session", help="play or inspect a beat-timed OSC session")
     from .session import add_arguments as session_arguments
     session_arguments(session)
@@ -217,7 +221,13 @@ def main(argv=None):
 
     if a.cmd == "studio":
         from .studio import serve
-        serve(a.root, a.patch, a.backend, a.size, a.fps, a.port, not a.no_browser, tracker=a.tracker)
+        cv = None
+        if a.cv_device is not None:
+            from .tracker_cv import TrackerCV, parse_map
+            device = int(a.cv_device) if a.cv_device.isdigit() else a.cv_device
+            cv = TrackerCV(parse_map(a.cv_map), device=device, ppqn=a.cv_ppqn, offset_ms=a.cv_offset_ms)
+            print('Tracker CV: ' + ', '.join(f'{c}={n}' for c, n in cv.mapping.items()) + f' at {cv.samplerate} Hz', flush=True)
+        serve(a.root, a.patch, a.backend, a.size, a.fps, a.port, not a.no_browser, tracker=a.tracker, cv=cv)
         return
 
     if a.cmd == "check":

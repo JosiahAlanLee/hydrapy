@@ -86,7 +86,7 @@ class Recorder:
 
 
 class Session:
-    def __init__(self, root, patch=None, backend='auto', size=(640, 360), fps=30.):
+    def __init__(self, root, patch=None, backend='auto', size=(640, 360), fps=30., cv=None):
         self.root, self.backend, self.size, self.fps = Path(root).resolve(), backend, tuple(size), float(fps)
         if not self.root.is_dir() or backend not in ('auto', 'cpu', 'gl'):
             raise ValueError('Choose an existing root and auto/cpu/gl backend')
@@ -107,6 +107,9 @@ class Session:
         self.tracker = Tracker()
         self.tracker_state = {}
         self.tracker_blackout = False
+        # Optional tracker CV output (a TrackerCV); opened by the caller so a
+        # device error is reported before Studio starts.
+        self.cv = cv
         self.preview_profile, self.gpu_query = False, None
         self.render_metrics, self.preview_error = {}, ''
         self.preview_dirty = True
@@ -139,6 +142,8 @@ class Session:
             finally:
                 self.running = False
                 self.thread.join(timeout=10)
+        if self.cv is not None:
+            self.cv.close()
         for proc in self.job_processes.values():
             if proc.poll() is None:
                 proc.terminate()
@@ -583,6 +588,8 @@ class Session:
                         # A transport failure must not pause synthesis or live hooks.
                         self.preview_error = f'{type(exc).__name__}: {exc}'
                 self.last_wall = now
+                if self.cv is not None:
+                    self.cv.publish(self.tracker, self.clock_time, now, not self.paused and self.renderer is not None)
                 with self.lock:
                     self.tracker_state = self.tracker.snapshot(self.clock_time, not self.paused)
                     self.tracker_state.update(sampled=time.monotonic(), blackout=self.tracker_blackout,
@@ -591,7 +598,9 @@ class Session:
                                               output=self.renderer.patch.display.name if self.renderer else 'o0',
                                               generation=self.preview.generation, aux_generation=self.aux_preview.generation,
                                               path=str(self.path.relative_to(self.root)) if self.path else None,
-                                              controls=[x.describe() for x in self.renderer.patch.controls.values()] if self.renderer else [])
+                                              controls=[x.describe() for x in self.renderer.patch.controls.values()] if self.renderer else [],
+                                              cv=None if self.cv is None else dict(map={str(k): v for k, v in self.cv.mapping.items()},
+                                                                                  samplerate=self.cv.samplerate, error=self.cv.error))
                 if now - sample_start >= .5:
                     self.actual_fps = frames / (now - sample_start)
                     sample_start, frames = now, 0
@@ -746,11 +755,16 @@ def make_server(session, port=8765):
     return server, token
 
 
-def serve(root='.', patch=None, backend='auto', size=(640, 360), fps=30, port=8765, open_browser=True, tracker=False):
+def serve(root='.', patch=None, backend='auto', size=(640, 360), fps=30, port=8765, open_browser=True, tracker=False, cv=None):
     root = Path(root).resolve()
     # Match CLI patch execution: relative asset paths belong to the project.
     os.chdir(root)
-    session = Session(root, patch, backend, size, fps)
+    try:
+        session = Session(root, patch, backend, size, fps, cv=cv)
+    except BaseException:
+        if cv is not None:
+            cv.close()
+        raise
     server = None
     try:
         server, token = make_server(session, port)
