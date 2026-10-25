@@ -2,6 +2,9 @@
 
 [Studio](studio.md) · [Performance sessions](performance-sessions.md) · [Editor walkthrough and video capture guide](gorgon-editor-walkthrough.md)
 
+For JACK/PipeWire audio into Rack and the ES-40 polarity selector, see
+[Gorgon audio routing](gorgon-audio.md).
+
 Gorgon connects the fullscreen tracker study's video and three automation lanes
 to a running HydraPy patch. It is an optional, local Studio workspace, using the
 same session token and loopback boundary. **Patch editor & export** opens the

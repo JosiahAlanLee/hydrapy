@@ -5,6 +5,11 @@ on:
   pull_request:
     paths: ['hydrapy/**', 'tests/test_studio*', 'tests/test_tracker*', '.github/workflows/gorgon.yml']
   workflow_dispatch:
+    inputs:
+      dsp_ref:
+        description: 'Optional DSP_Emulation compatibility ref (default is the pinned baseline)'
+        type: string
+        required: false
 permissions:
   contents: read
 jobs:
@@ -30,14 +35,47 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: JosiahAlanLee/DSP_Emulation
-          ref: main
+          ref: ${{ inputs.dsp_ref || 'cc9e258ce723ecc7baa11dd5bcfd3f29095669f1' }}
           path: .integration/DSP_Emulation
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
         with:
           python-version: '3.13'
       - run: sudo apt-get update && sudo apt-get install -y libjansson-dev
       - run: python -m pip install -e '.[test]'
-      - name: Real Studio with the module on DSP_Emulation main
+      - name: Real Studio with the pinned module baseline
         run: |
           git -C .integration/DSP_Emulation rev-parse HEAD
           make -C .integration/DSP_Emulation/vcv/gorgon/tests e2e
+  native-audio:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [jack, pipewire]
+    env:
+      XDG_RUNTIME_DIR: /tmp/gorgon-pipewire-runtime
+      PIPEWIRE_LATENCY: 256/48000
+      HYDRAPY_JACK_TESTS: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends jackd2 pipewire-bin pipewire-jack
+      - run: python -m pip install -e '.[test,jack]'
+      - name: JACK dummy server and real four-channel loopback
+        if: matrix.backend == 'jack'
+        run: |
+          bash tests/start_audio_server.sh jack
+          python -m pytest -q -s tests/test_studio_jack.py
+      - name: PipeWire daemon and real JACK compatibility loopback
+        if: matrix.backend == 'pipewire'
+        run: |
+          pw-jack bash tests/start_audio_server.sh pipewire
+          pw-jack python -m pytest -q -s tests/test_studio_jack.py
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: gorgon-${{ matrix.backend }}-logs
+          path: /tmp/gorgon-*.log

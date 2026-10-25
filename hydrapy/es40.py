@@ -37,6 +37,27 @@ import numpy as np
 from .tracker_cv import SIGNALS, TrackerCV, parse_map
 
 GATE_SIGNALS = ('clock', 'reset', 'run', 'gate1', 'gate2', 'gate3', 'gate4')
+POLARITIES = ('normal', 'invert_left', 'invert_right', 'invert_both')
+
+
+def flip_pcm24(pcm, mode):
+    """Polarity compensation AFTER encoding, at 24-bit PCM precision.
+
+    Saturation is explicit: +8388608 cannot be represented by a signed 24-bit
+    device. Count this endpoint so a user can distinguish compensation from a
+    proven bit-preserving path. Ordinary voltages and audio never enter here.
+    """
+    if mode not in POLARITIES:
+        raise ValueError('Choose normal, invert_left, invert_right or invert_both')
+    if mode == 'normal':
+        return pcm, 0
+    out = pcm.copy()
+    clipped = 0
+    for column in ((0, 1) if mode == 'invert_both' else (0,) if mode == 'invert_left' else (1,)):
+        words = -(pcm[:, column].astype(np.int64) >> 8)
+        clipped += int(np.count_nonzero(words == 8388608))
+        out[:, column] = (np.clip(words, -8388608, 8388607) << 8).astype(np.int32)
+    return out, clipped
 
 
 class Encoder8GT:
@@ -135,8 +156,11 @@ class ES40CV(TrackerCV):
         self.units = []
         signals = list(dict.fromkeys(self.direct.values()))
         for unit in units:
-            if not isinstance(unit, dict) or set(unit) - {'name', 'channels', 'header', 'map', 'expander'}:
-                raise ValueError('ES-40 entries use name, channels, header, expander and map')
+            if not isinstance(unit, dict) or set(unit) - {'name', 'channels', 'header', 'map', 'expander', 'polarity'}:
+                raise ValueError('ES-40 entries use name, channels, header, expander, map and optional polarity')
+            polarity = unit.get('polarity', 'normal')
+            if polarity not in POLARITIES:
+                raise ValueError('Invalid ES-40 polarity mode')
             expander = unit.get('expander', '8cv')  # preserve existing CV profiles
             if expander not in ('8gt', '8cv'):
                 raise ValueError('ES-40 expander must be 8gt or 8cv')
@@ -156,7 +180,7 @@ class ES40CV(TrackerCV):
             name = unit.get('name', f'ES-40 {len(self.units) + 1}')
             if not isinstance(name, str) or not 1 <= len(name) <= 80:
                 raise ValueError('ES-40 name must contain 1–80 characters')
-            self.units.append(dict(name=name, channels=pair, header=header, expander=expander,
+            self.units.append(dict(name=name, channels=pair, header=header, expander=expander, polarity=polarity,
                                    map={int(k): v for k, v in mapping.items()}))
             signals.extend(v for v in mapping.values() if v not in signals)
         self.encoders = [Encoder8GT() if u['expander'] == '8gt' else Encoder8CV(coherent=True) for u in self.units]
@@ -165,6 +189,7 @@ class ES40CV(TrackerCV):
         super().__init__(dict(enumerate(signals)), samplerate=samplerate, open_stream=False, **options)
         self._silence_frames = 48 if any(u['expander'] == '8cv' for u in self.units) else 1
         self.device = device
+        self.polarity_clips = [0] * len(self.units)
         if open_stream:
             self._open_stream(device, samplerate, blocksize, channels=self.channels, dtype='int32')
 
@@ -173,20 +198,38 @@ class ES40CV(TrackerCV):
         # no meaning as a voltage either. Send 0 V for both. (The vendor's
         # encoder sends full scale for NaN; zero is the safer failure here.)
         volts = np.where(np.isfinite(volts), volts, 0.)
-        for unit, encoder in zip(self.units, self.encoders):
+        for index, (unit, encoder) in enumerate(zip(self.units, self.encoders)):
             cv = np.zeros((len(volts), 8), np.float32)
             for jack, signal in unit['map'].items():
                 cv[:, jack - 1] = volts[:, self.columns[signal]]
             headers = np.zeros((len(volts), 5), np.int32)
             headers[:, unit['header'] - 1] = encoder.encode(cv)
-            outdata[:, unit['channels']] = pack_es40(headers)
+            pcm, clipped = flip_pcm24(pack_es40(headers), unit['polarity'])
+            self.polarity_clips[index] += clipped
+            outdata[:, unit['channels']] = pcm
         for output, signal in self.direct.items():
             value = volts[:, self.columns[signal]] / self.volts_per_fs
             outdata[:, output] = np.clip(value * 2147483648., -2147483648, 2147483647).astype(np.int32)
 
     def describe(self):
-        return dict(device=self.device, es40=self.units, direct=self.direct, samplerate=self.samplerate,
+        return dict(device=self.device, es40=[dict(u, polarity_clips=self.polarity_clips[i]) for i, u in enumerate(self.units)],
+                    polarity_routes=self.polarity_routes(), direct=self.direct, samplerate=self.samplerate,
                     error=self.error, status=self.status, underflows=self.underflows)
+
+    def polarity_routes(self):
+        return [dict(id=json.dumps([self.device, *u['channels']], separators=(',', ':')),
+                     name=f"{u['name']} · {self.device} · channels {u['channels'][0]}/{u['channels'][1]}",
+                     mode=u['polarity'], clipped=self.polarity_clips[i]) for i, u in enumerate(self.units)]
+
+    def set_polarity(self, route, mode):
+        if mode not in POLARITIES:
+            raise ValueError('Invalid polarity mode')
+        for item, unit in zip(self.polarity_routes(), self.units):
+            if item['id'] == route:
+                old = unit['polarity']
+                unit['polarity'] = mode
+                return old
+        raise ValueError('That ES-40 output pair is not active')
 
 
 class CVGroup:
@@ -199,8 +242,17 @@ class CVGroup:
 
     def describe(self):
         devices = [output.describe() for output in self.outputs]
-        return dict(devices=devices, error='; '.join(d['error'] for d in devices if d['error']),
+        return dict(devices=devices, polarity_routes=self.polarity_routes(), error='; '.join(d['error'] for d in devices if d['error']),
                     underflows=sum(d['underflows'] for d in devices))
+
+    def polarity_routes(self):
+        return [r for output in self.outputs for r in output.polarity_routes()]
+
+    def set_polarity(self, route, mode):
+        for output in self.outputs:
+            if any(r['id'] == route for r in output.polarity_routes()):
+                return output.set_polarity(route, mode)
+        raise ValueError('That ES-40 output pair is not active')
 
     def close(self):
         # Always close all devices, even if one driver fails during shutdown.

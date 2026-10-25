@@ -170,3 +170,13 @@ details[open] > summary { color: var(--mint); border-color: #6f8d77; background:
   .audio-control { grid-column: 3; min-width: 0; margin-left: 0; }
   .audio-control .meter { display: none; }
 }
+
+#polarityControls label { display: grid; gap: 6px; margin-top: 12px; }
+#polarityControls select { width: 100%; }
+#polarityStatus { color: #efc48d; }
+
+.jack-settings { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 10px; }
+.jack-settings summary { font-size: 11px; }
+.jack-settings > button { width: 100%; margin-top: 10px; }
+.jack-settings label input { width: 58%; }
+#jackPorts { white-space: pre-wrap; overflow-wrap: anywhere; font: 9px var(--mono); line-height: 1.6; color: var(--mint); }
