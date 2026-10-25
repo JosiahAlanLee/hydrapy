@@ -89,10 +89,11 @@ default lead:
 | Period | Rack's capture after Studio's ports | Breaks hit after GATE 1 | OFFSET for a voice played from the gates |
 | --- | --- | --- | --- |
 | 256 frames | 10.7 ms (16 ms in two JACK1 runs) | 16–22 ms | about −20 ms |
-| 1024 frames | 24–31 ms | 67–74 ms | about −70 ms |
+| 1024 frames | 22–31 ms | 65–74 ms | about −70 ms |
 
-At 1024 frames, Gorgon's capture queue ran dry once in each run, inserting 1–5 ms
-of silence, and then held steady. At 256 frames it stayed exact for 60 seconds.
+At 1024 frames, Gorgon's capture queue ran dry up to twice in a run, mostly in
+the first two seconds, inserting 1–5 ms of silence each time, and then held
+steady. At 256 frames it stayed exact for 60 seconds.
 Measure end-to-end audio/video latency on the actual workstation.
 
 ## ES-40 data stays on its own route
@@ -168,9 +169,10 @@ The same chain then ran in the desktop's own PipeWire session for 60 seconds at
 each of its default 1024-frame period and 256. The Digi003 was present, and a
 guard removed any link from the test clients to it; none appeared. Clock,
 gates, Vastish and Studio's counters were as above, with the capture behaviour
-in the table under Timing and levels. A Rack Pro not signed in to a VCV account
-processed no audio, so these runs used Rack Free. The Digi003/ES-40 outputs
-and a signed-in Rack Pro were not part of them.
+in the table under Timing and levels. Rack Pro 2.6.6 signed in to the user's VCV
+account then ran the same chain there at 1024 frames, headless and windowed,
+with the same results; unsigned, Rack Pro processed no audio, which is why the
+earlier runs used Rack Free. The Digi003/ES-40 outputs were not part of any run.
 
 Linux CI runs isolated native JACK/dummy and PipeWire daemons separately,
 checking the audio loopback, encoded gate/CV words, live polarity changes,
