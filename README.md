@@ -69,9 +69,9 @@ the master clock and doesn't follow an external one.
   through a DC-coupled interface such as an Expert Sleepers ES-3, or through an
   ES-40 with ESX-8GT/ESX-8CV expanders over encoded S/PDIF. PortAudio and native
   JACK/PipeWire are both supported.
-- **VCV Rack:** the [Gorgon module](https://github.com/JosiahAlanLee/DSP_Emulation/tree/main/vcv/gorgon)
-  in DSP_Emulation follows the playhead on Rack's sample clock. It puts the score
-  on Rack jacks and sends CV back into the patch's controls and transport.
+- **VCV Rack:** the [Gorgon module](https://github.com/JosiahAlanLee/Gorgon/tree/main/rack)
+  follows the playhead on Rack's sample clock. It puts the score on Rack jacks
+  and sends CV back into the patch's controls and transport.
 - **Audio:** an optical soundtrack read from the picture and a synthesized
   breaks kit are published as JACK/PipeWire ports for Rack to capture.
 
@@ -81,10 +81,15 @@ hydrapy studio patches/gorgon_corridor.py --tracker --cv-device "Digi 003" --cv-
 ```
 
 **Status:** in development. The software is tested in CI, including Chromium,
-real JACK and PipeWire daemons, and the Rack bridge from DSP_Emulation. Physical
+real JACK and PipeWire daemons, and the Rack module end to end. Physical
 interfaces, the ES-40 digital path and end-to-end A/V latency still need
-validating on the workstation. Scenes (rows that switch the visual chain) are
-being built.
+validating on the workstation.
+
+The tracker runs here, in Studio. The project's centre is the
+[Gorgon repository](https://github.com/JosiahAlanLee/Gorgon): the Rack module,
+the [contract](https://github.com/JosiahAlanLee/Gorgon/tree/main/spec) every
+piece implements (score format, bridge API, signal semantics) and the
+integration tests. A change to any of those starts there.
 
 [Tracker guide](docs/gorgon-tracker.md) · [Editor walkthrough](docs/gorgon-editor-walkthrough.md) ·
 [JACK/PipeWire audio](docs/gorgon-audio.md) · [ES-40 setup](docs/es40.md)

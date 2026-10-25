@@ -8,7 +8,7 @@ actual interface and modular; container tests do not replace them.
 ## Before recording
 
 1. Use the HydraPy checkout containing the editor workflow changes. Record
-   `git rev-parse --short HEAD` for both HydraPy and DSP_Emulation in the video notes.
+   `git rev-parse --short HEAD` for both HydraPy and Gorgon in the video notes.
 2. Close other Studio instances. The Rack bridge discovers one advertised Studio
    through `~/.hydrapy/studio.json`.
 3. Launch from the HydraPy repository:
