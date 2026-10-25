@@ -231,6 +231,34 @@ function renderBindings(controls){
     select.classList.toggle('missing',!!name&&!controls.some(p=>p.name===name));
   }
 }
+let jackState=null;
+function renderJackAudio(audio){
+  if(!audio)return;
+  jackState=audio;
+  $('jackEnableBtn').textContent=audio.active?'Disable JACK audio ports':audio.error?'Retry JACK audio':'Enable JACK audio ports';
+  $('jackEnableBtn').setAttribute('aria-pressed',audio.active);
+  if(document.activeElement!==$('opticalGain'))$('opticalGain').value=audio.config.optical_gain;
+  if(document.activeElement!==$('breaksGain'))$('breaksGain').value=audio.config.breaks_gain;
+  if(document.activeElement!==$('audioLead'))$('audioLead').value=audio.config.lead_blocks;
+  $('jackStatus').textContent=audio.error||(!audio.active?'Audio ports disabled.':`${audio.samplerate} Hz · ${audio.blocksize} frames · buffer lead ${audio.buffer_lead_ms.toFixed(1)} ms · ${audio.xruns} xruns · ${audio.underruns} source underruns`);
+  $('jackPorts').textContent=audio.ports.join('\n');
+}
+function renderPolarity(routes){
+  const parent=$('polarityControls'),signature=JSON.stringify(routes.map(({id,name,mode})=>({id,name,mode})));
+  if(parent.dataset.signature!==signature){
+    parent.replaceChildren();parent.dataset.signature=signature;
+    for(const route of routes){
+      const label=document.createElement('label'),name=document.createElement('span'),select=document.createElement('select');
+      name.textContent=route.name;select.setAttribute('aria-label','ES-40 polarity '+route.name);
+      for(const [value,text] of [['normal','Normal polarity'],['invert_left','Invert left'],['invert_right','Invert right'],['invert_both','Invert both']])select.add(new Option(text,value));
+      select.value=route.mode;
+      select.onchange=async()=>{select.disabled=true;try{await api('cv_polarity',{route:route.id,mode:select.value});}catch(error){select.value=route.mode;toast(error.message);}finally{select.disabled=false;}};
+      label.append(name,select);parent.append(label);
+    }
+  }
+  const active=routes.filter(r=>r.mode!=='normal'),clipped=routes.reduce((n,r)=>n+r.clipped,0);
+  $('polarityStatus').textContent=active.length?`ES-40 polarity inversion active on ${active.length} pair(s).${clipped?' Full-scale clipping encountered; verify the digital path.':''}`:'';
+}
 async function pollRemote(){
   const started=performance.now(), epoch=transportEpoch;
   try{
@@ -260,6 +288,8 @@ async function pollRemote(){
     $('resolution').textContent=result.size.join(' × ');
     $('cvStatus').textContent=!result.cv?'CV off · configure at launch':result.cv.error?`CV error: ${result.cv.error}`:`CV active · ${result.cv.underflows||0} underflows`;
     $('cvStatus').title=result.cv?JSON.stringify(result.cv,null,2):'';
+    $('cvPorts').textContent=(result.cv?.ports||[]).join('\n');
+    if(!outputType){renderPolarity(result.cv?.polarity_routes||[]);renderJackAudio(result.audio);}
   }catch(error){
     playing=false;stopVoices();$('backendStatus').textContent=error.message;
     $('connectionStatus').textContent='Studio disconnected';
@@ -654,6 +684,16 @@ if(outputType){
       history.clear();redrawScore();$('editConnection').hidden=true;$('savedState').textContent='Server score loaded';
     }catch(error){toast(error.message);}
   };
+  let audioRequest=false;
+  async function configureJack(enabled){
+    if(audioRequest)return;
+    audioRequest=true;$('jackEnableBtn').disabled=true;
+    try{renderJackAudio(await api('jack_audio',{enabled,optical_gain:Number($('opticalGain').value),breaks_gain:Number($('breaksGain').value),lead_blocks:Number($('audioLead').value)}));}
+    catch(error){toast(error.message);$('jackStatus').textContent=error.message;}
+    finally{audioRequest=false;$('jackEnableBtn').disabled=false;}
+  }
+  $('jackEnableBtn').onclick=()=>configureJack(!jackState?.active);
+  ['opticalGain','breaksGain','audioLead'].forEach(id=>$(id).onchange=()=>configureJack(!!jackState?.active));
   $('automationBtn').onclick=()=>transport(()=>({enabled:!remote?.enabled}));
   ['z','roll','feedback'].forEach(lane=>$('bind_'+lane).onchange=()=>changeScore('parameter binding',()=>{state.bindings[lane]=$('bind_'+lane).value;}));
   $('loadPatch').onclick=async()=>{try{if(!await flushScore())return;await api('load',{path:$('patchSelect').value});$('patchDialog').close();}catch(error){toast(error.message);}};

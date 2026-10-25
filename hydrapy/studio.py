@@ -22,6 +22,7 @@ from .controls import apply_controls, carry_controls
 from .inspect import catalog, capabilities
 from .studio_preview import Preview
 from .studio_tracker import Tracker, number
+from .studio_audio import StudioAudio, settings as audio_settings
 
 
 def digest(text):
@@ -111,6 +112,28 @@ class Session:
         # Optional tracker CV output (a TrackerCV); opened by the caller so a
         # device error is reported before Studio starts.
         self.cv = cv
+        self.output_settings = {}
+        self.audio = StudioAudio()
+        settings_path = self.root / '.hydrapy' / 'outputs.json'
+        if settings_path.is_file():
+            try:
+                self.output_settings = json.loads(settings_path.read_text())
+                if not isinstance(self.output_settings, dict):
+                    raise ValueError('Output settings must be an object')
+                polarity = self.output_settings.get('polarity', {})
+                from .es40 import POLARITIES
+                if not isinstance(polarity, dict) or any(v not in POLARITIES for v in polarity.values()):
+                    raise ValueError('Invalid saved polarity settings')
+                if 'audio' in self.output_settings:
+                    audio_settings(self.output_settings['audio'])
+                if cv is not None and hasattr(cv, 'polarity_routes'):
+                    for route in cv.polarity_routes():
+                        mode = polarity.get(route['id'])
+                        if mode is not None:
+                            cv.set_polarity(route['id'], mode)
+            except (ValueError, OSError, TypeError, AttributeError) as exc:
+                self.output_settings = {}
+                self.notice = f'Output settings were not restored: {exc}'
         self.preview_profile, self.gpu_query = False, None
         self.render_metrics, self.preview_error = {}, ''
         self.preview_dirty = True
@@ -125,6 +148,12 @@ class Session:
             except Exception:
                 self.close()
                 raise
+        saved_audio = self.output_settings.get('audio')
+        if isinstance(saved_audio, dict):
+            try:
+                self.call('jack_audio', **saved_audio)
+            except Exception as exc:
+                self.notice = f'JACK audio was not restored: {exc}'
 
     def call(self, action, **data):
         if not self.thread.is_alive():
@@ -221,6 +250,7 @@ class Session:
         if old and hasattr(old, 'release'):
             old.release()
         self.renderer, self.path, self.source, self.armed = new, path, source, requested_arm
+        self.audio.attach(patch)
         # A patch's declared display remains authoritative when it is loaded.
         self.tracker.sync_program(patch.display.name, self.clock_time)
         self.gpu_query = None
@@ -306,6 +336,31 @@ class Session:
                 self.last_wall = time.monotonic()
             self.paused = not playing
             return dict(self.tracker.snapshot(self.clock_time, not self.paused), blackout=self.tracker_blackout)
+        elif action == 'jack_audio':
+            old = dict(self.audio.config)
+            state = self.audio.configure(data)
+            prepared = dict(self.output_settings, audio=dict(self.audio.config))
+            try:
+                atomic_text(self.root / '.hydrapy' / 'outputs.json', json.dumps(prepared, indent=2))
+            except BaseException:
+                self.audio.configure(old)
+                raise
+            self.output_settings = prepared
+            return state
+        elif action == 'cv_polarity':
+            if self.cv is None or not hasattr(self.cv, 'set_polarity'):
+                raise ValueError('Start Studio with an ES-40 CV profile to change pair polarity')
+            route, mode = data.get('route'), data.get('mode')
+            old = self.cv.set_polarity(route, mode)
+            prepared = dict(self.output_settings)
+            prepared['polarity'] = dict(prepared.get('polarity', {}), **{route: mode})
+            try:
+                atomic_text(self.root / '.hydrapy' / 'outputs.json', json.dumps(prepared, indent=2))
+            except BaseException:
+                self.cv.set_polarity(route, old)
+                raise
+            self.output_settings = prepared
+            return self.cv.describe()
         elif action == 'bridge_params':
             values = data.get('values')
             if not isinstance(values, dict) or len(values) > 64:
@@ -547,6 +602,7 @@ class Session:
             playing = not self.paused and self.renderer is not None
         if self.cv is not None:
             self.cv.publish(self.tracker, self.clock_time, wall, playing)
+        self.audio.publish(self.tracker, self.clock_time, wall, playing)
         with self.lock:
             self.bridge_state = dict(revision=self.tracker.revision, enabled=self.tracker.enabled,
                                      playing=playing, transport_revision=self.tracker.transport_revision,
@@ -562,7 +618,7 @@ class Session:
                                       generation=self.preview.generation, aux_generation=self.aux_preview.generation,
                                       path=str(self.path.relative_to(self.root)) if self.path else None,
                                       controls=[x.describe() for x in self.renderer.patch.controls.values()] if self.renderer else [],
-                                      cv=None if self.cv is None else self.cv.describe())
+                                      cv=None if self.cv is None else self.cv.describe(), audio=self.audio.describe())
 
     def _run(self):
         sample_start, frames = time.monotonic(), 0
@@ -654,6 +710,7 @@ class Session:
         finally:
             self.running = False
             self._publish_playhead(time.monotonic(), playing=False)
+            self.audio.close()
             self.gpu_query = None  # dispose timer on the GL context's thread
             self.preview.close()
             self.aux_preview.close()

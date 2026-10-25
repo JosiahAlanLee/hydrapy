@@ -70,6 +70,41 @@ def test_score_edit_seek_tempo_save_reload_and_real_patch(workspace):
     page.screenshot(path='/tmp/gorgon-integrated-desktop.png')
 
 
+def test_output_polarity_and_audio_controls_are_saved_and_show_failures(workspace):
+    from hydrapy.es40 import ES40CV
+    from test_studio_audio import FakeClient
+    session, page, context, root = workspace
+    session.cv = ES40CV([dict(name='Digital pair', channels=[16, 17], header=1,
+                             expander='8gt', map={'1': 'gate1'})], open_stream=False)
+    session.audio.client_factory = FakeClient
+    # This test exercises controls, requests and saved settings; JACK callbacks
+    # and native server behavior have their own processing/integration tests.
+    session.audio._produce = lambda: None
+    select = page.get_by_label('ES-40 polarity', exact=False)
+    select.wait_for()
+    select.select_option('invert_left')
+    page.wait_for_function("document.getElementById('polarityStatus').textContent.includes('inversion active')")
+    saved = json.loads((root/'.hydrapy/outputs.json').read_text())
+    assert list(saved['polarity'].values()) == ['invert_left']
+    page.reload()
+    page.wait_for_function('gorgonPreview.frames>=1')
+    assert page.get_by_label('ES-40 polarity', exact=False).input_value() == 'invert_left'
+    page.locator('#jackEnableBtn').click()
+    page.get_by_role('button', name='Disable JACK audio ports', exact=True).wait_for()
+    assert 'HydraPy:optical_L' in page.locator('#jackPorts').text_content()
+    page.locator('#audioLead').select_option('4')
+    page.wait_for_function("document.getElementById('jackStatus').textContent.includes('10.7 ms')")
+    assert json.loads((root/'.hydrapy/outputs.json').read_text())['audio']['lead_blocks'] == 4
+    page.locator('#jackEnableBtn').click()
+    page.get_by_role('button', name='Enable JACK audio ports', exact=True).wait_for()
+    def fail(*a, **kw): raise RuntimeError('test: no JACK server')
+    session.audio.client_factory = fail
+    page.locator('#jackEnableBtn').click()
+    page.get_by_role('button', name='Retry JACK audio', exact=True).wait_for()
+    assert 'no JACK server' in page.locator('#jackStatus').text_content()
+    assert not json.loads((root/'.hydrapy/outputs.json').read_text())['audio']['enabled']
+
+
 def test_independent_output_windows_routing_blackout_and_closed_controller(workspace):
     session, page, context, root = workspace
     with page.expect_popup() as window:
@@ -388,11 +423,13 @@ def test_revision_conflict_keeps_local_recovery_without_overwriting_other_contro
     assert recovered['patterns'][0]['audio'][1][1]['note'] == 'F-4'
     assert session.tracker.document['bpm'] == 110
     assert session.tracker.document['patterns'][0]['audio'][1][1] is None
+    # Freeze the score only until its conflicting edit is rejected; subsequent
+    # transport checks must see live acknowledgements rather than a frozen poll.
+    page.unroute('**/api/tracker')
     page.locator('#blackoutBtn').click()
     page.wait_for_function("document.getElementById('blackoutBtn').getAttribute('aria-pressed')==='true'")
     assert session.tracker_blackout  # independent of the rejected edit
     page.locator('#blackoutBtn').click()
-    page.unroute('**/api/tracker')
     page.once('dialog', lambda dialog: dialog.accept())
     page.locator('#reloadScoreBtn').click()
     page.locator('#editConnection').wait_for(state='hidden')

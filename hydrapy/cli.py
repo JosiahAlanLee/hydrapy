@@ -189,6 +189,7 @@ def main(argv=None):
     cv_output = studio.add_mutually_exclusive_group()
     cv_output.add_argument("--cv-device", help="send direct CV on this audio device (see `hydrapy devices`)")
     cv_output.add_argument("--cv-profile", help="JSON routing profile for ES-40 / ESX-8GT or ESX-8CV units and direct CV")
+    studio.add_argument("--cv-backend", choices=["portaudio", "jack"], default="portaudio", help="CV transport; with JACK, --cv-device is the client name")
     studio.add_argument("--cv-map", default="0", help="first channel for the default eight signals, or e.g. 8=clock,9=reset,10=gate1")
     studio.add_argument("--cv-ppqn", type=int, default=4, help="clock pulses per quarter note (default 4: sixteenths)")
     studio.add_argument("--cv-offset-ms", type=float, default=0., help="send CV earlier (+) or later (-) than the picture")
@@ -239,10 +240,16 @@ def main(argv=None):
         from .studio import serve
         cv = None
         try:
-            options = dict(ppqn=a.cv_ppqn, offset_ms=a.cv_offset_ms, pitch_zero=a.cv_pitch_zero)
+            options = dict(ppqn=a.cv_ppqn, offset_ms=a.cv_offset_ms, pitch_zero=a.cv_pitch_zero, backend=a.cv_backend)
             if a.cv_profile:
+                import json
+                from pathlib import Path
                 from .es40 import load_profile
-                cv = load_profile(a.cv_profile, **options)
+                settings_path = Path(a.root) / '.hydrapy' / 'outputs.json'
+                saved = json.loads(settings_path.read_text()) if settings_path.is_file() else {}
+                # Restore compensation before the first hardware callback,
+                # including the initial zero-voltage encoded DAC commands.
+                cv = load_profile(a.cv_profile, polarity_settings=saved.get('polarity', {}), **options)
             elif a.cv_device is not None:
                 from .tracker_cv import TrackerCV, parse_map
                 device = int(a.cv_device) if a.cv_device.isdigit() else a.cv_device
