@@ -68,6 +68,30 @@ def test_all_header_bytes_survive_packing_together():
         assert np.array_equal(unpack(packed, h + 1), headers[:, h])
 
 
+
+def test_out_of_range_header_bytes_clamp_instead_of_spilling():
+    headers = np.zeros((3, 5), np.int32)
+    headers[:, 1] = [-5, 300, 2**31 - 1]
+    packed = pack_es40(headers)
+    assert list(unpack(packed, 2)) == [0, 255, 255]
+    for h in (1, 3, 4, 5):
+        assert not unpack(packed, h).any()
+
+
+@pytest.mark.parametrize('bad', [np.nan, np.inf, -np.inf])
+def test_non_finite_volts_send_zero_volts_without_corrupting_other_headers(bad):
+    cv = ES40CV([unit((2, 3), 1)], direct='0=clock', open_stream=False)
+    values = np.zeros((96, len(cv.mapping)))
+    values[:, cv.columns['pitch1']] = bad
+    values[:, cv.columns['clock']] = bad
+    out = np.zeros((96, 8), np.int32)
+    cv._write_volts(out, values)
+    assert [p[2] for p in decode(unpack(out[:, [2, 3]], 1))[:3]] == [2048, 2048, 2048]
+    for h in (2, 3, 4, 5):
+        assert not unpack(out[:, [2, 3]], h).any()
+    assert not out[:, 0].any()
+
+
 def test_dac_calibration_clipping_and_packet_sample_hold():
     volts = np.tile([0., 1., -1., 5., -5., 20., -20., 1/12], (48, 1))
     volts[1:3, 0] = 5.  # changes after first packet starts must not tear its value
