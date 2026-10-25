@@ -44,6 +44,8 @@ def test_score_edit_seek_tempo_save_reload_and_real_patch(workspace):
     page.get_by_role('button', name='Play', exact=True).wait_for()
     clock = session.clock_time
     page.get_by_role('button', name='Select pattern 3: ASCENT', exact=True).click()
+    assert session.tracker.beat(session.clock_time) < 1  # selecting is no longer a seek
+    page.locator('#seekCellBtn').click()
     page.wait_for_function("document.getElementById('position').textContent.startsWith('009')")
     assert session.clock_time == clock  # tracker seek did not seek the renderer
     page.locator('#tempo').fill('90')
@@ -228,3 +230,170 @@ def test_browser_synth_continues_across_repeated_pattern_wraps(workspace):
     # Two oscillators per FM note, once per 4.8-second loop.
     page.wait_for_function('synthOscillators>=6', timeout=17000)
     assert page.evaluate('synthOscillators') == 6
+
+
+def test_keyboard_entry_focus_and_edit_cursor_do_not_seek(workspace):
+    session, page, context, root = workspace
+    session.call('tracker_transport', enabled=True, playing=False, beat=8)
+    page.wait_for_timeout(250)
+    transport = session.tracker.transport_revision
+    page.locator('[data-row="1"][data-col="1"]').click()
+    page.keyboard.press('Enter'); page.keyboard.press('Enter')
+    assert page.evaluate('document.activeElement.dataset.col') == '1'
+    page.wait_for_timeout(250)
+    assert session.tracker.document['patterns'][0]['audio'][1][1] is None
+    page.locator('#entryStep').select_option('4')
+    page.locator('#pianoBtn').click()
+    page.keyboard.press('z'); page.keyboard.press('s')
+    assert page.evaluate('document.activeElement.dataset.row') == '9'
+    page.wait_for_timeout(250)
+    notes = session.tracker.document['patterns'][0]['audio'][1]
+    assert notes[1]['note'] == 'C-4' and notes[5]['note'] == 'C#4'
+    page.keyboard.press('b')  # piano entry takes precedence over Blackout inside the grid
+    page.wait_for_timeout(250)
+    assert not session.tracker_blackout
+    assert session.tracker.document['patterns'][0]['audio'][1][9]['note'] == 'G-4'
+    page.locator('[data-row="2"][data-col="4"]').click()
+    page.locator('#cellValue').fill('0.82'); page.locator('#cellValue').press('Tab')
+    page.get_by_role('button', name='Select pattern 3: ASCENT', exact=True).click()
+    page.wait_for_timeout(250)
+    assert session.tracker.transport_revision == transport
+    assert session.tracker.beat(session.clock_time) == 8
+    assert session.tracker.document['patterns'][0]['keys']['z'][1] == {'r': 2, 'v': .82}
+    page.locator('#seekCellBtn').click()
+    page.wait_for_function("document.getElementById('position').textContent.startsWith('009')")
+    assert session.tracker.transport_revision > transport
+
+
+def test_mixed_block_edit_transpose_undo_redo_and_transport_preservation(workspace):
+    session, page, context, root = workspace
+    transport = session.tracker.transport_revision
+    for row, note in [(1, 'C4'), (2, 'D4')]:
+        page.locator(f'[data-row="{row}"][data-col="1"]').click()
+        page.locator('#noteInput').fill(note); page.locator('#noteInput').press('Tab')
+    page.locator('[data-row="1"][data-col="1"]').click()
+    page.locator('[data-row="2"][data-col="2"]').click(modifiers=['Shift'])
+    assert page.locator('#selectionInfo').inner_text() == '2 × 2 cells'
+    page.locator('#copyBtn').click()
+    page.locator('[data-row="8"][data-col="1"]').click(); page.locator('#pasteBtn').click()
+    page.locator('[data-row="8"][data-col="1"]').click()
+    page.locator('[data-row="9"][data-col="2"]').click(modifiers=['Shift'])
+    page.locator('#velocityInput').fill('77');page.locator('#velocityInput').press('Tab')
+    page.locator('#applyVelocityBtn').click()
+    page.locator('[data-transpose="12"]').click()
+    page.locator('#undoBtn').click(); page.locator('#redoBtn').click()
+    page.wait_for_timeout(350)
+    notes = session.tracker.document['patterns'][0]['audio'][1]
+    assert notes[1]['note'] == 'C-4' and notes[2]['note'] == 'D-4'
+    assert notes[8]['note'] == 'C-5' and notes[9]['note'] == 'D-5'
+    assert notes[8]['vel'] == notes[9]['vel'] == 77
+    assert session.tracker.document['patterns'][0]['audio'][2][9] is None
+    assert session.tracker.transport_revision == transport
+    assert page.evaluate('document.activeElement.dataset.col') == '2'
+    page.locator('[data-row="9"][data-col="1"]').click()
+    page.keyboard.press('Shift+ArrowDown')
+    assert page.locator('#selectionInfo').inner_text() == '2 × 1 cells'
+    page.keyboard.press('Delete'); page.keyboard.press('Control+z')
+    page.wait_for_timeout(250)
+    assert session.tracker.document['patterns'][0]['audio'][1][9]['note'] == 'D-5'
+
+
+def test_pattern_tools_import_undo_and_explicit_launch(workspace):
+    session, page, context, root = workspace
+    page.locator('#patternMenu summary').click()
+    page.locator('#patternName').fill('Study <1>'); page.locator('#patternName').press('Tab')
+    page.locator('#duplicateTarget').select_option('1')
+    page.locator('#duplicatePatternBtn').click()
+    page.wait_for_timeout(250)
+    assert session.tracker.document['patterns'][0] == session.tracker.document['patterns'][1]
+    page.get_by_role('button', name='Select pattern 2: Study <1>', exact=True).click()
+    page.locator('#patternMenu summary').click(); page.locator('#clearPatternBtn').click()
+    assert page.locator('[data-row="0"][data-col="0"]').inner_text() == '···'
+    page.locator('#undoBtn').click()
+    page.wait_for_timeout(250)
+    assert session.tracker.document['patterns'][1]['audio'][0][0] is not None
+    document = json.loads(json.dumps(session.tracker.document)); document['bpm'] = 99
+    file = root / 'other.json'; file.write_text(json.dumps(document))
+    page.locator('#importFile').set_input_files(file)
+    page.wait_for_function("document.getElementById('tempo').value==='99'")
+    page.locator('#undoBtn').click()
+    page.wait_for_function("document.getElementById('tempo').value==='138'")
+    page.get_by_role('button', name='Play from pattern 2', exact=True).click()
+    page.get_by_role('button', name='Pause', exact=True).wait_for()
+    assert session.tracker.enabled and not session.paused
+    assert session.tracker.beat(session.clock_time) >= 16
+
+
+def test_editor_and_file_actions_remain_accessible_at_laptop_and_phone_sizes(workspace):
+    session, page, context, root = workspace
+    page.set_viewport_size({'width': 1366, 'height': 768})
+    page.locator('[data-row="1"][data-col="1"]').click()
+    for selector in ['#noteInput', '#velocityInput', '#seekCellBtn', '#saveBtn']:
+        box = page.locator(selector).bounding_box()
+        assert box and 0 <= box['y'] and box['y'] + box['height'] < 768, selector
+    page.screenshot(path='/tmp/gorgon-editor-laptop.png')
+    for width in [960, 390]:
+        page.set_viewport_size({'width': width, 'height': 844})
+        assert page.locator('#saveBtn').is_visible()
+        page.locator('#fileMenu summary').click()
+        for selector in ['#importBtn', '#restoreBtn', '#studioLink', '#choosePatchBtn', '#downloadScoreBtn']:
+            assert page.locator(selector).is_visible(), (width, selector)
+        page.locator('#fileMenu summary').click()
+    page.locator('#viewMenu summary').click(); page.locator('#textSize').select_option('large')
+    assert page.locator('.cell').first.evaluate('(e)=>parseFloat(getComputedStyle(e).fontSize)') >= 14
+    page.locator('#viewMenu summary').click()
+    page.locator('[data-row="1"][data-col="1"]').click()
+    page.keyboard.press('ArrowRight');page.keyboard.press('ArrowRight');page.keyboard.press('ArrowRight');page.keyboard.press('ArrowRight')
+    assert page.evaluate('document.activeElement.dataset.col') == '5'
+    page.screenshot(path='/tmp/gorgon-editor-phone.png', full_page=True)
+
+
+@pytest.mark.parametrize('accepted_before_disconnect', [False, True])
+def test_edit_recovery_after_transport_failure(workspace, accepted_before_disconnect):
+    session, page, context, root = workspace
+    def interrupt(route):
+        if accepted_before_disconnect:
+            route.fetch()  # server accepted the edit, but the reply never reached the controller
+        route.fulfill(status=503, json={'error': 'Simulated connection interruption'})
+    page.route('**/api/tracker_score', interrupt, times=1)
+    page.locator('[data-row="1"][data-col="1"]').click()
+    page.locator('#noteInput').fill('E4');page.locator('#noteInput').press('Tab')
+    page.locator('#editConnection').wait_for(state='visible')
+    with page.expect_download() as download:
+        page.locator('#recoveryBtn').click()
+    recovered = json.loads(Path(download.value.path()).read_text())
+    assert recovered['patterns'][0]['audio'][1][1]['note'] == 'E-4'
+    page.locator('#retryScoreBtn').click()
+    page.locator('#editConnection').wait_for(state='hidden')
+    page.wait_for_timeout(250)
+    assert session.tracker.document['patterns'][0]['audio'][1][1]['note'] == 'E-4'
+    with page.expect_download() as download:
+        page.locator('#saveBtn').click()
+    assert json.loads(Path(download.value.path()).read_text()) == recovered
+
+
+def test_revision_conflict_keeps_local_recovery_without_overwriting_other_controller(workspace):
+    session, page, context, root = workspace
+    snapshot = dict(session.tracker_state, server_now=time.monotonic())
+    page.route('**/api/tracker', lambda route: route.fulfill(json=snapshot))
+    other = json.loads(json.dumps(session.tracker.document));other['bpm'] = 110
+    session.call('tracker_score', document=other, revision=session.tracker.revision)
+    page.locator('[data-row="1"][data-col="1"]').click()
+    page.locator('#noteInput').fill('F4');page.locator('#noteInput').press('Tab')
+    page.locator('#editConnection').wait_for(state='visible')
+    assert not page.locator('#retryScoreBtn').is_visible()
+    with page.expect_download() as download:
+        page.locator('#saveBtn').click()  # Save falls back to a local recovery file
+    recovered = json.loads(Path(download.value.path()).read_text())
+    assert recovered['patterns'][0]['audio'][1][1]['note'] == 'F-4'
+    assert session.tracker.document['bpm'] == 110
+    assert session.tracker.document['patterns'][0]['audio'][1][1] is None
+    page.locator('#blackoutBtn').click()
+    page.wait_for_function("document.getElementById('blackoutBtn').getAttribute('aria-pressed')==='true'")
+    assert session.tracker_blackout  # independent of the rejected edit
+    page.locator('#blackoutBtn').click()
+    page.unroute('**/api/tracker')
+    page.once('dialog', lambda dialog: dialog.accept())
+    page.locator('#reloadScoreBtn').click()
+    page.locator('#editConnection').wait_for(state='hidden')
+    assert page.locator('#tempo').input_value() == '110'

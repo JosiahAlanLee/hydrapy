@@ -1,6 +1,6 @@
 # Gorgon tracker: first connected workspace
 
-[Studio](studio.md) · [Performance sessions](performance-sessions.md)
+[Studio](studio.md) · [Performance sessions](performance-sessions.md) · [Editor walkthrough and video capture guide](gorgon-editor-walkthrough.md)
 
 Gorgon connects the fullscreen tracker study's video and three automation lanes
 to a running HydraPy patch. It is an optional, local Studio workspace, using the
@@ -28,12 +28,24 @@ Studio's existing execution and hardware staging rules.
   **F**. Routing selects `o0`–`o3` independently. Program also selects Studio's
   displayed/recorded output; Auxiliary never changes that selection.
 - Four patterns each contain 64 sixteenth-note rows. Select audio cells and use
-  Note / Velocity to edit them; Enter toggles browser synth hits. Select visual cells, then edit the curve or slider.
+  the Note / Velocity editor directly below the grid; Enter toggles browser synth
+  hits and retains keyboard focus. Piano keys adds QWERTY note entry, octave and
+  row advance controls. Shift+click, drag or Shift+arrows select blocks; Copy, Cut,
+  Paste, transpose, block velocity and 100-step Undo/Redo edit them. Pattern tools
+  renames, copies and clears patterns. Arrangement cards show real event activity.
+  Selecting cells or patterns does not seek; Seek to row, Alt+Enter in the grid,
+  a double-click on a row number or a card’s ▶ button does. Manual editing turns
+  Follow off. Select visual cells, then edit the value, curve or slider.
   Hold changes at the exact key row; Linear and Smooth interpolate between keys.
 - Bind Dolly Z, Roll and Feedback to named patch parameters. Missing bindings are
   marked in the selectors; empty bindings disconnect. Lane units are 0–1, degrees,
   and 0–0.9; there is no hidden normalization to a parameter's range. Declared
   modulation continues to add to the automated base value.
+- File actions stay available at narrow widths; View provides larger text, a
+  collapsible instrument palette and an automation-curve toggle. A failed edit
+  preserves a downloadable local recovery copy; Retry checks whether the server
+  accepted a reply that was lost. A real revision conflict requires an explicit
+  choice of the server score.
 - **Save session** writes `.hydrapy/tracker.json` and downloads JSON.
   **Restore saved score** or **Import score** reloads it explicitly. Browser reload
   reconnects to the server score. Edits are validated and revision-checked;
@@ -217,7 +229,9 @@ Tests cover exact hold boundaries, interpolation, tempo continuity, loop/seek
 semantics, validation, revision rejection, persistence, authenticated routes,
 independent outputs, and CPU/GL export equivalence with feedback and a held
 simulation rate. Existing expensive four-output feedback/audio checks also
-exercise Auxiliary demand. Browser tests edit, save, import and reload scores;
+exercise Auxiliary demand. Browser tests edit notes with the keyboard, preserve focus and playback position,
+copy and transpose blocks, undo pattern operations/imports, exercise narrow
+layouts and recover interrupted or rejected edits. They also save, import and reload scores;
 open both outputs; exercise blackout; close the controller; and slow decoding
 to verify one outstanding preview request per viewer.
 

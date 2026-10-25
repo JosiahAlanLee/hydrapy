@@ -21,7 +21,7 @@ jobs:
       - name: Tracker and independent output windows in Chromium
         env:
           HYDRAPY_BROWSER_TESTS: '1'
-        run: python -m pytest -q tests/test_tracker_scheduler.py tests/test_studio_tracker_browser.py tests/test_studio_preview_browser.py
+        run: python -m pytest -q tests/test_tracker_editor.py tests/test_tracker_scheduler.py tests/test_studio_tracker_browser.py tests/test_studio_preview_browser.py
   vcv:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
