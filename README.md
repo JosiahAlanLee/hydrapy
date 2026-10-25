@@ -3,8 +3,9 @@
 [Hydra](https://hydra.ojack.xyz), Olivia Jack’s video synth, in Python — with
 modulation signals, feedback, generative geometry, painted film and drawn sound.
 Render with NumPy or GLSL, export a standalone WebGL page, or connect a modular synth.
+It also includes **Gorgon**, a CV and audio/video tracker in development, which works with VCV Rack.
 
-[Documentation](docs/README.md) · [Operator reference](docs/operators.md) · [Example patches](patches/)
+[Documentation](docs/README.md) · [Operator reference](docs/operators.md) · [Example patches](patches/) · [Gorgon tracker](#gorgon-a-cv-and-av-tracker)
 
 [![Animated tour of hydrapy effects and example patches](docs/tour.gif)](docs/tour.mp4)
 
@@ -52,6 +53,41 @@ hydrapy studio patches/studio_feedback.py
 
 [Studio guide](docs/studio.md) · [Installation and walkthrough](docs/getting-started.md) ·
 [Rendering and hardware encoding](docs/rendering-and-export.md)
+
+## Gorgon: a CV and A/V tracker
+
+Gorgon is a tracker inside Studio for sequencing a picture and a modular synth
+from one score. Four 64-row patterns hold note lanes and automation lanes.
+Python owns the playhead, and every output follows it: the patch's parameters,
+the browser audition synth, hardware control voltage and VCV Rack. Gorgon is
+the master clock and doesn't follow an external one.
+
+- **Visuals:** automation lanes are bound to a patch's named controls, with
+  Program and Auxiliary outputs for separate monitors.
+- **CV out:** clock, reset, run, gates, held 1 V/oct pitch, velocity and
+  automation are generated per sample in the audio callback. They go out
+  through a DC-coupled interface such as an Expert Sleepers ES-3, or through an
+  ES-40 with ESX-8GT/ESX-8CV expanders over encoded S/PDIF. PortAudio and native
+  JACK/PipeWire are both supported.
+- **VCV Rack:** the [Gorgon module](https://github.com/JosiahAlanLee/DSP_Emulation/tree/main/vcv/gorgon)
+  in DSP_Emulation follows the playhead on Rack's sample clock. It puts the score
+  on Rack jacks and sends CV back into the patch's controls and transport.
+- **Audio:** an optical soundtrack read from the picture and a synthesized
+  breaks kit are published as JACK/PipeWire ports for Rack to capture.
+
+```sh
+hydrapy studio patches/gorgon_corridor.py --tracker
+hydrapy studio patches/gorgon_corridor.py --tracker --cv-device "Digi 003" --cv-map 8
+```
+
+**Status:** in development. The software is tested in CI, including Chromium,
+real JACK and PipeWire daemons, and the Rack bridge from DSP_Emulation. Physical
+interfaces, the ES-40 digital path and end-to-end A/V latency still need
+validating on the workstation. Scenes (rows that switch the visual chain) are
+being built.
+
+[Tracker guide](docs/gorgon-tracker.md) · [Editor walkthrough](docs/gorgon-editor-walkthrough.md) ·
+[JACK/PipeWire audio](docs/gorgon-audio.md) · [ES-40 setup](docs/es40.md)
 
 ## Explore
 
