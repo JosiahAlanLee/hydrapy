@@ -1,0 +1,29 @@
+{
+  "format": "hydrapy-cv-1",
+  "devices": [
+    {
+      "device": "REPLACE with the Digi 003 device from hydrapy devices",
+      "samplerate": 48000,
+      "es40": [
+        {
+          "name": "Digi 003 rack ES-40",
+          "channels": [
+            16,
+            17
+          ],
+          "header": null,
+          "map": {
+            "1": "pitch1",
+            "2": "gate1",
+            "3": "pitch2",
+            "4": "gate2",
+            "5": "clock",
+            "6": "reset",
+            "7": "vel1",
+            "8": "z"
+          }
+        }
+      ]
+    }
+  ]
+}
