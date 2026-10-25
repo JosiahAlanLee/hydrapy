@@ -1,6 +1,6 @@
-"""ES-40 + ESX-8CV transport, compatible with Expert Sleepers' Rack encoders.
+"""ES-40 + ESX-8GT/8CV transport, compatible with Expert Sleepers' Rack encoders.
 
-Protocol adapted from src/8CV.cpp and src/ES40.cpp at
+Protocol adapted from src/8GT.cpp, src/8CV.cpp and src/ES40.cpp at
 https://github.com/expertsleepersltd/vcvrack-encoders/tree/95496e8a955407889bbab94cf404cf356802bb76
 The following upstream license covers this adaptation:
 
@@ -35,6 +35,28 @@ from pathlib import Path
 import numpy as np
 
 from .tracker_cv import SIGNALS, TrackerCV, parse_map
+
+GATE_SIGNALS = ('clock', 'reset', 'run', 'gate1', 'gate2', 'gate3', 'gate4')
+
+
+class Encoder8GT:
+    """One bit per gate: jack 1 is bit 0, jack 8 is bit 7, every sample.
+
+    Match Rack's hysteresis: set at >= 1 V, clear below 0.5 V, otherwise hold.
+    """
+    def __init__(self):
+        self.bits = np.zeros(8, dtype=bool)
+
+    def encode(self, volts):
+        if not len(volts):
+            return np.empty(0, np.int32)
+        volts = np.asarray(volts, np.float32)
+        high = volts >= 1.
+        changed = high | (volts < .5)
+        index = np.maximum.accumulate(np.where(changed, np.arange(len(volts))[:, None], -1), axis=0)
+        bits = np.where(index >= 0, high[np.maximum(index, 0), np.arange(8)], self.bits)
+        self.bits = bits[-1].copy()
+        return np.sum(bits * (1 << np.arange(8)), axis=1, dtype=np.int32)
 
 
 class Encoder8CV:
@@ -98,8 +120,8 @@ def channel(value):
 class ES40CV(TrackerCV):
     """One audio device, optionally multiple ES-40 pairs plus direct DC outputs.
 
-    The score evaluator runs once. Each physical ES-40 has its own multiplex
-    phase and one ESX-8CV. Use a CVGroup for units on separate audio devices.
+    The score evaluator runs once. Each configured ES-40 has one ESX-8GT or
+    ESX-8CV with independent encoder state. Use CVGroup for separate devices.
     """
     def __init__(self, units, *, direct=None, device=None, samplerate=48000,
                  blocksize=256, open_stream=True, **options):
@@ -112,8 +134,11 @@ class ES40CV(TrackerCV):
         self.units = []
         signals = list(dict.fromkeys(self.direct.values()))
         for unit in units:
-            if not isinstance(unit, dict) or set(unit) - {'name', 'channels', 'header', 'map'}:
-                raise ValueError('ES-40 entries use name, channels, header and map')
+            if not isinstance(unit, dict) or set(unit) - {'name', 'channels', 'header', 'map', 'expander'}:
+                raise ValueError('ES-40 entries use name, channels, header, expander and map')
+            expander = unit.get('expander', '8cv')  # preserve existing CV profiles
+            if expander not in ('8gt', '8cv'):
+                raise ValueError('ES-40 expander must be 8gt or 8cv')
             pair, header, mapping = unit.get('channels'), unit.get('header'), unit.get('map')
             if not isinstance(pair, list) or len(pair) != 2 or pair[0] == pair[1]:
                 raise ValueError('Each ES-40 needs two distinct S/PDIF audio channels [left, right]')
@@ -124,17 +149,20 @@ class ES40CV(TrackerCV):
             if type(header) is not int or not 1 <= header <= 5:
                 raise ValueError('ES-40 expansion header must be 1–5')
             if not isinstance(mapping, dict) or not mapping or any(str(k) not in tuple(map(str, range(1, 9))) or v not in SIGNALS for k, v in mapping.items()):
-                raise ValueError('ESX-8CV map uses jack numbers 1–8 and tracker signal names')
+                raise ValueError('Expander map uses jack numbers 1–8 and tracker signal names')
+            if expander == '8gt' and any(v not in GATE_SIGNALS for v in mapping.values()):
+                raise ValueError('ESX-8GT carries gates only: use clock, reset, run or gate1–gate4; route pitch CV to a CV output')
             name = unit.get('name', f'ES-40 {len(self.units) + 1}')
             if not isinstance(name, str) or not 1 <= len(name) <= 80:
                 raise ValueError('ES-40 name must contain 1–80 characters')
-            self.units.append(dict(name=name, channels=pair, header=header, map={int(k): v for k, v in mapping.items()}))
+            self.units.append(dict(name=name, channels=pair, header=header, expander=expander,
+                                   map={int(k): v for k, v in mapping.items()}))
             signals.extend(v for v in mapping.values() if v not in signals)
-        self.encoders = [Encoder8CV(coherent=True) for _ in self.units]
+        self.encoders = [Encoder8GT() if u['expander'] == '8gt' else Encoder8CV(coherent=True) for u in self.units]
         self.columns = {name: i for i, name in enumerate(signals)}
         self.channels = max(used) + 1
         super().__init__(dict(enumerate(signals)), samplerate=samplerate, open_stream=False, **options)
-        self._silence_frames = 48  # complete the current cycle, then send eight zeros
+        self._silence_frames = 48 if any(u['expander'] == '8cv' for u in self.units) else 1
         self.device = device
         if open_stream:
             self._open_stream(device, samplerate, blocksize, channels=self.channels, dtype='int32')
@@ -214,17 +242,20 @@ def load_profile(path, *, open_stream=True, **options):
     return group
 
 
-def diagnostic_wav(path, *, header=1, samplerate=48000):
-    """18 seconds: zero, then 1 V on jacks 1..8 in turn, then zero.
+def diagnostic_wav(path, *, header=1, samplerate=48000, expander='8cv'):
+    """18 seconds: off, then jacks 1..8 individually, with off intervals.
 
     A stereo 24-bit WAV for testing the digital path independently of Studio.
-    Intended only for a bit-preserving S/PDIF route to an ES-40.
+    8GT: one 5 V gate at a time. 8CV: one 1 V output at a time.
+    Intended only for a bit-preserving S/PDIF route to the matching expander.
     """
     if type(header) is not int or not 1 <= header <= 5:
         raise ValueError('ES-40 expansion header must be 1–5')
     if samplerate not in (44100, 48000):
         raise ValueError('Use 44100 or 48000 Hz')
-    encoder = Encoder8CV()
+    if expander not in ('8gt', '8cv'):
+        raise ValueError('Choose expander 8gt or 8cv')
+    encoder = Encoder8GT() if expander == '8gt' else Encoder8CV()
     with wave.open(str(path), 'wb') as wav:
         wav.setnchannels(2)
         wav.setsampwidth(3)
@@ -232,7 +263,7 @@ def diagnostic_wav(path, *, header=1, samplerate=48000):
         for step in range(18):
             cv = np.zeros((samplerate, 8), np.float32)
             if 1 <= step <= 16 and step % 2:
-                cv[:, (step - 1) // 2] = 1.
+                cv[:, (step - 1) // 2] = 5. if expander == '8gt' else 1.
             headers = np.zeros((samplerate, 5), np.int32)
             headers[:, header - 1] = encoder.encode(cv)
             words = pack_es40(headers).astype('<i4').view(np.uint8).reshape(-1, 4)

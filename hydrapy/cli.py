@@ -188,12 +188,13 @@ def main(argv=None):
     studio.add_argument("--tracker", action="store_true", help="open the Gorgon tracker workspace")
     cv_output = studio.add_mutually_exclusive_group()
     cv_output.add_argument("--cv-device", help="send direct CV on this audio device (see `hydrapy devices`)")
-    cv_output.add_argument("--cv-profile", help="JSON routing profile for ES-40 / ESX-8CV units and direct CV")
+    cv_output.add_argument("--cv-profile", help="JSON routing profile for ES-40 / ESX-8GT or ESX-8CV units and direct CV")
     studio.add_argument("--cv-map", default="0", help="first channel for the default eight signals, or e.g. 8=clock,9=reset,10=gate1")
     studio.add_argument("--cv-ppqn", type=int, default=4, help="clock pulses per quarter note (default 4: sixteenths)")
     studio.add_argument("--cv-offset-ms", type=float, default=0., help="send CV earlier (+) or later (-) than the picture")
     studio.add_argument("--cv-pitch-zero", type=int, default=60, help="MIDI note at 0 V (default 60 = C4); pitch is 1 V/oct")
-    diagnostic = sub.add_parser("es40-check", help="write an encoded S/PDIF diagnostic WAV for an ES-40 + ESX-8CV")
+    diagnostic = sub.add_parser("es40-check", help="write an encoded S/PDIF diagnostic WAV for an ES-40 expander")
+    diagnostic.add_argument("--expander", required=True, choices=["8gt", "8cv"], help="match the physical expander: gate (8gt) or CV (8cv)")
     diagnostic.add_argument("-o", "--out", required=True, help="24-bit stereo WAV destination; data, not listening audio")
     diagnostic.add_argument("--header", type=int, choices=range(1, 6), default=1, help="ES-40 expansion header (1–5)")
     diagnostic.add_argument("--samplerate", type=int, choices=[44100, 48000], default=48000)
@@ -218,9 +219,10 @@ def main(argv=None):
 
     if a.cmd == "es40-check":
         from .es40 import diagnostic_wav
-        diagnostic_wav(a.out, header=a.header, samplerate=a.samplerate)
+        diagnostic_wav(a.out, header=a.header, samplerate=a.samplerate, expander=a.expander)
+        level = 'one 5 V gate' if a.expander == '8gt' else '1 V'
         print(f'{a.out}: 18 s, {a.samplerate} Hz / 24-bit S/PDIF data. Route only to ES-40 at unity, without mixing or resampling.\n'
-              'Zero, then 1 V on each ESX-8CV jack in turn for 1 s, with 1 s zero between steps; ends at zero.')
+              f'ESX-{a.expander.upper()}: zero, then {level} on each jack in turn for 1 s, with 1 s zero between steps; ends at zero.')
         return
 
     if a.cmd == "session":
