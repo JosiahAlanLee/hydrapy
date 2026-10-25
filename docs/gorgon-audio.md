@@ -23,7 +23,11 @@ through the audio graph.
    (`HydraPy`), channels 1–4. When Rack opens that device it connects the four
    HydraPy ports to those capture channels itself, in the order below; check
    them in your JACK/PipeWire patchbay. With any other device, connect them
-   there by hand, using the actual port names the patchbay shows.
+   there by hand, using the actual port names the patchbay shows. Under
+   PipeWire, Rack can occasionally open the wrong JACK device while a patch
+   loads. It looks the device up by name in one list and opens it from another,
+   and a client that has just closed can reorder the second. If the HydraPy
+   ports are not connected to Rack, select the device again or reload the patch.
 5. Patch Gorgon's audio jacks into a Rack mixer or processing chain, then an
    ordinary Audio output module for listening. Enable browser **Sound** only
    when you also want the independent browser audition synth.
@@ -79,10 +83,16 @@ default optical gain 0.5 limits a full-scale waveform to ±5 V. The separate
 direct CV) for gates, clock, reset, run, velocity, Z and feedback. Pitch stays
 1 V/oct, roll stays ±5 V, and audio scaling is independent of that choice.
 **OFFSET** adjusts Rack's score/CV timing; it does not move received PCM.
-At 48 kHz/256 with the default lead, Rack's capture arrived 10.7 ms after
-Studio's ports (16 ms in two JACK1 runs), and a Breaks hit reached Gorgon's BRK
-jacks 16–22 ms after its GATE 1 pulse (about 21.5 ms in four runs of five). An
-OFFSET of about −20 ms lines up a Rack voice played from the gates with Breaks.
+Both delays below grow with the server period. Measured at 48 kHz with the
+default lead:
+
+| Period | Rack's capture after Studio's ports | Breaks hit after GATE 1 | OFFSET for a voice played from the gates |
+| --- | --- | --- | --- |
+| 256 frames | 10.7 ms (16 ms in two JACK1 runs) | 16–22 ms | about −20 ms |
+| 1024 frames | 24–31 ms | 67–74 ms | about −70 ms |
+
+At 1024 frames, Gorgon's capture queue ran dry once in each run, inserting 1–5 ms
+of silence, and then held steady. At 256 frames it stayed exact for 60 seconds.
 Measure end-to-end audio/video latency on the actual workstation.
 
 ## ES-40 data stays on its own route
@@ -154,9 +164,13 @@ Vastish sounded on every gate. Gorgon's four captured channels matched Studio's
 ports sample for sample, to within float rounding (largest difference 3×10⁻⁸).
 Studio's counters stayed at zero on PipeWire. On JACK1 they showed 2 underruns
 and 3 late packets since Studio's start, and the captured audio still matched.
-A Rack Pro not signed in to a VCV account processed no audio, so the run used
-Rack Free. The live desktop session, the Digi003/ES-40 and a signed-in Rack Pro
-were not part of it.
+The same chain then ran in the desktop's own PipeWire session for 60 seconds at
+each of its default 1024-frame period and 256. The Digi003 was present, and a
+guard removed any link from the test clients to it; none appeared. Clock,
+gates, Vastish and Studio's counters were as above, with the capture behaviour
+in the table under Timing and levels. A Rack Pro not signed in to a VCV account
+processed no audio, so these runs used Rack Free. The Digi003/ES-40 outputs
+and a signed-in Rack Pro were not part of them.
 
 Linux CI runs isolated native JACK/dummy and PipeWire daemons separately,
 checking the audio loopback, encoded gate/CV words, live polarity changes,
