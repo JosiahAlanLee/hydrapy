@@ -150,10 +150,13 @@ def capture():
     withdraw(advertised,token);server.shutdown();server.server_close();session.close()
     (OUT/'timeline.json').write_text(json.dumps(meta,indent=2))
     (OUT/'score.json').write_text(json.dumps(session.tracker.document,indent=2))
-    # Crop the PCM capture to the demonstration interval. Rack's native fallback
-    # engine supplies audio-rate processing without a physical sound device.
+    # Locate t0 on recorded wall-time markers, after the audio driver starts.
     native=json.loads((OUT/'rack-audio.json').read_text())
-    run('ffmpeg','-hide_banner','-loglevel','error','-y','-f','f32le','-ar',str(int(native['sample_rate'])),'-ac','1','-i',str(OUT/'rack-audio.f32'),'-ss',str(t0-native['start']),'-t','106',str(OUT/'rack.wav'))
+    import numpy as np
+    meter=np.genfromtxt(OUT/'rack-audio.csv',delimiter=',',names=True)
+    start_sample_time=float(np.interp(t0,meter['wall'],meter['time']))
+    print('Native audio clock:',float(meter['time'][-1]-start_sample_time),'seconds from t0',flush=True)
+    run('ffmpeg','-hide_banner','-loglevel','error','-y','-f','f32le','-ar',str(int(native['sample_rate'])),'-ac','1','-i',str(OUT/'rack-audio.f32'),'-ss',str(start_sample_time),'-t','106',str(OUT/'rack.wav'))
     (OUT/'rack-audio.f32').unlink()
     print('CAPTURE COMPLETE',flush=True)
 

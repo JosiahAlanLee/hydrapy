@@ -1,5 +1,6 @@
 // Recording fixture for the demonstration only; never shipped in GorgonBridge.
 #include "plugin.hpp"
+#include <audio.hpp>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -51,6 +52,22 @@ struct DemoCapture : Module {
   }
 };
 struct DemoCaptureWidget : ModuleWidget {
+  bool audioReady = false;
+  void step() override {
+    ModuleWidget::step();
+    if (audioReady || !module) return;
+    auto* driver = audio::getDriver(2);
+    auto* sink = APP->engine->getModule(98);
+    if (!driver || !sink) return;
+    for (int id : driver->getDeviceIds()) {
+      if (driver->getDeviceNumOutputs(id) < 2) continue;
+      std::string name = driver->getDeviceName(id);
+      json_t* state = json_pack("{s:{s:i,s:s,s:i,s:i}}", "audio", "driver", 2,
+        "deviceName", name.c_str(), "sampleRate", 48000, "blockSize", 512);
+      sink->dataFromJson(state); json_decref(state);
+      audioReady = true; break;
+    }
+  }
   DemoCaptureWidget(DemoCapture* m) {
     setModule(m); box.size = Vec(120,380);
     for(int i=0;i<9;i++) addInput(createInputCentered<PJ301MPort>(Vec(25+(i%3)*35,40+(i/3)*50),m,i));
