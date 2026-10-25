@@ -12,7 +12,7 @@ export async function api(name, data, signal) {
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 export class PreviewStream {
   constructor(bus) {
-    Object.assign(this, {bus, output:'', generation:-1, revision:0, image:null, stopped:false,
+    Object.assign(this, {bus, output:'', generation:-1, revision:0, image:null, stopped:false, painted:new WeakMap(),
       stats:{frames:0, samples:[], error:'', output:''}});
     this.loop();
     document.addEventListener('visibilitychange', () => { this.revision++; this.controller?.abort(); });
@@ -34,7 +34,7 @@ export class PreviewStream {
       let url;
       try {
         const started = performance.now();
-        const response = await fetch(`/api/frame?bus=${this.bus}&output=${output}&after=${this.after ?? -1}`,
+        const response = await fetch(`/api/frame?bus=${this.bus}&output=${output}&after=${this.after ?? -1}&thumbnails=0`,
           {headers, signal:controller.signal});
         if (response.status === 204) { await delay(40); continue; }
         if (!response.ok) throw new Error(`Preview HTTP ${response.status}`);
@@ -70,12 +70,18 @@ export class PreviewStream {
     const context = canvas.getContext('2d'), rect = canvas.getBoundingClientRect();
     const width = Math.max(1, Math.round(rect.width * Math.min(devicePixelRatio, 2)));
     const height = Math.max(1, Math.round(rect.height * Math.min(devicePixelRatio, 2)));
-    if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
+    const resized = canvas.width !== width || canvas.height !== height;
+    if (resized) { canvas.width = width; canvas.height = height; }
+    // The UI playhead can animate at 60 Hz while images arrive more slowly.
+    // Each canvas keeps its own paint state (the tracker has two preview sizes).
+    const image = blackout ? null : this.image, previous = this.painted.get(canvas);
+    if (!resized && previous && previous.image === image && previous.width === width && previous.height === height) return;
     context.fillStyle = '#000'; context.fillRect(0, 0, width, height);
     if (!blackout && this.image) {
       const scale = Math.min(width / this.image.width, height / this.image.height);
       const w = this.image.width * scale, h = this.image.height * scale;
       context.drawImage(this.image, (width-w)/2, (height-h)/2, w, h);
     }
+    this.painted.set(canvas, {image, width, height});
   }
 }

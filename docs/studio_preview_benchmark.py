@@ -3,6 +3,8 @@
 python docs/studio_preview_benchmark.py --backend gl --size 640x360 --json preview.json
 Requires optional playwright + `python -m playwright install chromium`.
 --checkout /path/to/base runs the SAME harness against an older checkout.
+--view outputs opens Gorgon, program and auxiliary windows; --case gorgon uses
+the four-output demo patch. No screen/video capture runs during measurement.
 """
 from __future__ import annotations
 
@@ -26,6 +28,19 @@ src(o1).scale(1.01).blend(osc(18, .1, .5).modulate(noise(3), .2), .15).blur(2, 2
 voronoi(7, .3).modulate(noise(5), .2).blur(2, 3).out(o2)
 src(o0).blend(src(o1), .4).add(src(o2), .2).blur(2, 2).out(o3)
 render(o3)
+''',
+    'gorgon': '''from hydrapy import *
+z = Param('Dolly Z', .35, min=0, max=1)
+roll = Param('Roll', 0, min=-45, max=45)
+feedback = Param('Feedback', .25, min=0, max=.9)
+hue = Param('Hue', .2, min=0, max=1)
+set_bpm(138)
+osc(12,.035,.6).kaleid(6).modulate(noise(2.4,.08),.12).scale(1+z*.7).rotate(
+    roll*.01745329252).color(.48,.82,.68).hue(hue).contrast(1.3).out(o1)
+src(o3).scale(1.008).rotate(.003).blend(src(o1),1-feedback).out(o3)
+src(o1).blend(src(o3),.6).saturate(1.3).out(o0)
+src(o3).edge().color(.7,.9,1).out(o2)
+render(o0)
 ''',
 }
 
@@ -53,30 +68,74 @@ def measure(playwright, args, name):
             if args.profile and hasattr(session, 'preview_profile'):
                 session.call('preview_profile', enabled=True)
             browser = playwright.chromium.launch(headless=True)
-            page = browser.new_page(viewport={'width': 1440, 'height': 1000})
             errors = []
-            page.on('pageerror', lambda error: errors.append(str(error)))
-            # Legacy Studio replaces src; the new page reports decoded presentations.
-            page.add_init_script('''window.legacyFrames = 0;
-                document.addEventListener('load', e => {
-                    if (e.target.id === 'preview') window.legacyFrames++;
-                }, true);''')
-            page.goto(f'http://127.0.0.1:{server.server_port}/#{token}')
-            count = 'window.hydrapyPreview ? window.hydrapyPreview.frames : window.legacyFrames'
-            page.wait_for_function('(' + count + ') >= 3', timeout=30000)
+            routes = {'studio': '/'} if args.view == 'studio' else {'tracker': '/tracker/'}
+            if args.view == 'outputs':
+                routes.update(program='/tracker/?output=program', aux='/tracker/?output=aux')
+            stats_expr = 'window.hydrapyPreview' if args.view == 'studio' else 'window.gorgonPreview'
+            count = f'({stats_expr} ? {stats_expr}.frames : window.legacyFrames)'
+            pages, clients = {}, {}
+            for label, route in routes.items():
+                # Separate contexts keep all three surfaces visible in headless Chromium.
+                page = browser.new_page(viewport={'width': 1440, 'height': 1000})
+                page.on('pageerror', lambda error: errors.append(str(error)))
+                page.add_init_script('''window.legacyFrames = 0; window.previewPaints = 0;
+                    document.addEventListener('load', e => {
+                        if (e.target.id === 'preview') window.legacyFrames++;
+                    }, true);
+                    const draw = CanvasRenderingContext2D.prototype.drawImage;
+                    CanvasRenderingContext2D.prototype.drawImage = function(...args) {
+                        if (['previewCanvas','sceneThumb','outputCanvas'].includes(this.canvas.id)) window.previewPaints++;
+                        return draw.apply(this, args);
+                    };''')
+                page.goto(f'http://127.0.0.1:{server.server_port}{route}#{token}')
+                if label in ('program', 'aux'):
+                    page.locator('#outputDismiss').click()
+                page.wait_for_function(count + ' >= 3', timeout=30000)
+                clients[label] = page.context.new_cdp_session(page)
+                clients[label].send('Performance.enable')
+                pages[label] = page
+            if args.view != 'studio':
+                session.call('tracker_transport', enabled=True, playing=True)
+            def metrics(client):
+                return {m['name']: m['value'] for m in client.send('Performance.getMetrics')['metrics']}
+            page = next(iter(pages.values()))
             page.wait_for_timeout(args.warmup * 1000)
-            page.evaluate('if (window.hydrapyPreview) window.hydrapyPreview.samples.length = 0')
-            first, render_first, started = page.evaluate(count), session.renderer.frame, time.monotonic()
+            first, before = {}, {}
+            for label, view in pages.items():
+                view.evaluate(f'if ({stats_expr}) {stats_expr}.samples.length = 0; window.previewPaints = 0')
+                first[label], before[label] = view.evaluate(count), metrics(clients[label])
+            readbacks = []
+            read_frame = session._read_frame
+            def measured_read():
+                start = time.perf_counter()
+                try:
+                    return read_frame()
+                finally:
+                    readbacks.append((time.perf_counter() - start) * 1000)
+            session._read_frame = measured_read
+            render_first, cpu_start, started = session.renderer.frame, time.process_time(), time.monotonic()
             page.wait_for_timeout(args.seconds * 1000)
             duration = time.monotonic() - started
-            shown = page.evaluate(count) - first
-            stats = page.evaluate('window.hydrapyPreview || null')
-            report = dict(case=name, display_fps=shown / duration,
-                          render_fps=(session.renderer.frame - render_first) / duration,
-                          seconds=duration, displayed=shown, browser=browser.version,
-                          timings=summarize(stats['samples']) if stats else {},
-                          errors=errors + [x for x in (session.error,
-                              getattr(session, 'preview_error', ''), (stats or {}).get('error', '')) if x])
+            report = dict(case=name, view=args.view, seconds=duration, browser=browser.version,
+                          render_fps=(session.renderer.frame-render_first)/duration,
+                          server_cpu_seconds_per_second=(time.process_time()-cpu_start)/duration,
+                          readbacks_per_second=len(readbacks)/duration,
+                          readback_timings=summarize([{'readback_ms': v} for v in readbacks]), views={})
+            session._read_frame = read_frame
+            for label, view in pages.items():
+                stats = view.evaluate(stats_expr + ' || null')
+                after = metrics(clients[label])
+                report['views'][label] = dict(display_fps=(view.evaluate(count)-first[label])/duration,
+                    preview_paints_per_second=view.evaluate('window.previewPaints')/duration,
+                    timings=summarize(stats['samples']) if stats else {},
+                    browser_seconds_per_second={k: (after[k]-before[label][k])/duration
+                        for k in ('TaskDuration', 'ScriptDuration', 'LayoutDuration', 'RecalcStyleDuration')})
+                if stats and stats.get('error'):
+                    errors.append(stats['error'])
+            primary = next(iter(report['views'].values()))
+            report.update(display_fps=primary['display_fps'], timings=primary['timings'],
+                          errors=errors+[x for x in (session.error, getattr(session, 'preview_error', '')) if x])
             if hasattr(session, 'preview'):
                 report['queue'] = {k: v for k, v in session.preview.snapshot().items() if k != 'thumbnails'}
             if report['errors']:
@@ -97,6 +156,7 @@ def main():
     parser.add_argument('--seconds', type=float, default=5)
     parser.add_argument('--warmup', type=float, default=2)
     parser.add_argument('--case', action='append', choices=list(PATCHES))
+    parser.add_argument('--view', choices=['studio', 'gorgon', 'outputs'], default='studio')
     parser.add_argument('--profile', action='store_true', help='opt in to GPU timer queries')
     parser.add_argument('--checkout', type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument('--json', type=Path)
@@ -112,7 +172,7 @@ def main():
     sys.path.insert(0, str(args.checkout.resolve()))
     from playwright.sync_api import sync_playwright
     import hydrapy
-    report = dict(backend=args.backend, size=args.size, target_fps=args.fps, gpu_profile=args.profile,
+    report = dict(backend=args.backend, size=args.size, target_fps=args.fps, view=args.view, gpu_profile=args.profile,
                   python=platform.python_version(), platform=platform.platform(),
                   package=str(Path(hydrapy.__file__).resolve()),
                   commit=subprocess.check_output(['git', '-C', str(args.checkout), 'rev-parse', 'HEAD'], text=True).strip(),

@@ -1,0 +1,53 @@
+name: Preview benchmark
+on:
+  push:
+    branches: [codex/gorgon-preview-efficiency]
+  workflow_dispatch:
+    inputs:
+      baseline:
+        description: Baseline commit or ref to compare with the selected workflow ref
+        default: origin/main
+        required: true
+permissions:
+  contents: read
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      OPENBLAS_NUM_THREADS: '1'
+      OMP_NUM_THREADS: '1'
+      LP_NUM_THREADS: '1'
+      BASELINE_REF: ${{ inputs.baseline || '5a43240914a7bc78c48c62d9a9aac7f01c14f6a0' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - run: sudo apt-get update && sudo apt-get install -y libegl1-mesa-dev libgl1-mesa-dri
+      - run: python -m pip install -e '.[gpu]' 'playwright==1.51.0'
+      - run: python -m playwright install --with-deps chromium
+      - name: Compare identical workloads, alternating order
+        run: |
+          git worktree add --detach /tmp/hydrapy-preview-base "$BASELINE_REF"
+          mkdir -p benchmark-results
+          for round in 1 2 3; do
+            order="baseline candidate"
+            if [ "$round" = 2 ]; then order="candidate baseline"; fi
+            for version in $order; do
+              checkout="$GITHUB_WORKSPACE"
+              if [ "$version" = baseline ]; then checkout=/tmp/hydrapy-preview-base; fi
+              python docs/studio_preview_benchmark.py --checkout "$checkout" --backend gl \
+                --size 640x360 --fps 30 --view outputs --case single --case gorgon \
+                --warmup 2 --seconds 5 --json "benchmark-results/$version-$round.json"
+            done
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: preview-benchmark
+          path: benchmark-results/
+          retention-days: 7

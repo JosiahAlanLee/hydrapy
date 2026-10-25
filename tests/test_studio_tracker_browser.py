@@ -128,6 +128,37 @@ def test_import_validation_hold_boundary_and_slow_decode_are_bounded(workspace):
     assert len(page.evaluate('gorgonPreview.samples'))<=300
 
 
+def test_held_previews_skip_repaints_but_resize_route_and_blackout_still_draw(workspace):
+    session, page, context, root = workspace
+    session.call('pause', paused=True)
+    page.wait_for_timeout(300)  # let the last decoded frame reach both canvases
+    assert not session.preview.thumbnails  # Gorgon does not use Studio's output picker
+    page.evaluate('''() => {
+      window.previewPaints={};
+      const draw=CanvasRenderingContext2D.prototype.drawImage;
+      CanvasRenderingContext2D.prototype.drawImage=function(...args){
+        previewPaints[this.canvas.id]=(previewPaints[this.canvas.id]||0)+1;
+        return draw.apply(this,args);
+      };
+    }''')
+    page.wait_for_timeout(250)
+    assert page.evaluate('previewPaints.previewCanvas||0') == 0
+    assert page.evaluate('previewPaints.sceneThumb||0') == 0
+
+    page.set_viewport_size({'width':1200, 'height':900})
+    page.wait_for_function('(previewPaints.previewCanvas||0)>0')
+    pixel = """() => {const c=document.getElementById('previewCanvas');
+      return Array.from(c.getContext('2d').getImageData(c.width/2,c.height/2,1,1).data);} """
+    assert page.evaluate(pixel)[0] > 60
+    session.call('output', index=1)
+    page.wait_for_function('gorgonPreview.output === "o1"')
+    page.wait_for_function('(' + pixel + ')()[1] > 195')
+    page.locator('#blackoutBtn').click()
+    page.wait_for_function('(' + pixel + ')().slice(0,3).every(v=>v===0)')
+    page.locator('#blackoutBtn').click()
+    page.wait_for_function('(' + pixel + ')()[1] > 195')
+
+
 def test_pitched_note_edit_audition_frequency_and_reload(workspace):
     session, page, context, root = workspace
     # Select an existing event without erasing it, then enter a note beyond the
