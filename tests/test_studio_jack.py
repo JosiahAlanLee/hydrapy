@@ -4,6 +4,7 @@ HYDRAPY_JACK_TESTS=1 requires an already-running server; failures do not skip.
 CI runs the same test once with jackd's dummy backend and once with PipeWire.
 """
 import os
+import errno
 import time
 from types import SimpleNamespace
 
@@ -44,7 +45,19 @@ def test_real_ports_preserve_four_channels_pause_and_reconnect():
         for track, value in zip(tracks, [.4, -.8]):
             track.listeners[0](np.full(4096, value, np.float32))
         def connect():
-            for source, sink in zip(audio.ports, ports): receiver.connect(source.name, sink.name)
+            # PipeWire propagates new/replaced ports to other clients
+            # asynchronously. An immediate name lookup can still see the old
+            # registration after reconnect. Wait for the graph, not audio data.
+            deadline = time.monotonic() + 2
+            for source, sink in zip(audio.ports, ports):
+                while True:
+                    try:
+                        receiver.connect(source.name, sink.name)
+                        break
+                    except jack.JackErrorCode as exc:
+                        if exc.code not in (errno.EINVAL, errno.ENOENT) or time.monotonic() >= deadline:
+                            raise
+                        time.sleep(.01)
         connect()
         time.sleep(.8)
         samples = np.concatenate(captured[-max(1, int(.4 * receiver.samplerate / receiver.blocksize)):])
