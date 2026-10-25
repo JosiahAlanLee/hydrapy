@@ -42,6 +42,9 @@ def validate(document):
     if not isinstance(d, dict) or d.get('format') != 'hydrapy-tracker-1':
         raise ValueError('Expected a hydrapy-tracker-1 score')
     number(d.get('bpm'), 60, 200, 'Tempo')
+    # bool is a numeric subclass in Python, but JSON false is not the key C.
+    # The Rack parser and score schema distinguish booleans from numbers too.
+    number(d.get('key'), 0, 7, 'Key')
     if d.get('key') not in (0, 2, 5, 7):
         raise ValueError('Choose C, D, F or G minor')
     if type(d.get('pattern')) is not int or not 0 <= d['pattern'] < 4:
