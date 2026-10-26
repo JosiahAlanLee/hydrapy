@@ -1,5 +1,5 @@
 import {api, PreviewStream} from './backend.js';
-import {noteMidi, noteFrequency, canonicalNote} from './notes.js';
+import {noteMidi, noteFrequency, canonicalNote, breaksVoice} from './notes.js';
 import {ScoreHistory, bounds, getCell, putCell, copyBlock, readBlock, pasteBlock, clearBlock,
   transposeBlock, setBlockVelocity, pianoNote, activity, SCENE, SCENE_NAME, kindOf} from './editor.js';
 const $ = id => document.getElementById(id);
@@ -360,10 +360,11 @@ function connectVoice(source,gain,t,duration){source.connect(gain);gain.connect(
 function noteFreq(note){return noteFrequency(note, state.key);}
 function soundHit(track,hit,t){
   if(!audioContext||!master||!hit)return;const vel=hit.vel/127;if(vel<=0)return;if((track===1||track===2)&&noteMidi(hit.note)===null)return;
-  if(track===0&&hit.note==='C-2'){
+  const drum=track===0?breaksVoice(hit.note):null;
+  if(drum==='kick'){
     const o=audioContext.createOscillator(),g=audioContext.createGain();o.frequency.setValueAtTime(145,t);o.frequency.exponentialRampToValueAtTime(44,t+.13);g.gain.setValueAtTime(.95*vel,t);g.gain.exponentialRampToValueAtTime(.001,t+.29);connectVoice(o,g,t,.3);
   }else if(track===0){
-    const snare=hit.note==='D-2',n=audioContext.createBufferSource(),f=audioContext.createBiquadFilter(),g=audioContext.createGain();n.buffer=noiseBuffer;f.type='highpass';f.frequency.value=snare?1000:7200;n.connect(f);f.connect(g);g.connect(master);g.gain.setValueAtTime(vel*(snare?.44:.18),t);g.gain.exponentialRampToValueAtTime(.001,t+(snare?.15:.04));voices.add(n);n.onended=()=>{voices.delete(n);n.disconnect();f.disconnect();g.disconnect();};n.start(t,mod(t*.17,1));n.stop(t+(snare?.17:.06));
+    const snare=drum==='snare',n=audioContext.createBufferSource(),f=audioContext.createBiquadFilter(),g=audioContext.createGain();n.buffer=noiseBuffer;f.type='highpass';f.frequency.value=snare?1000:7200;n.connect(f);f.connect(g);g.connect(master);g.gain.setValueAtTime(vel*(snare?.44:.18),t);g.gain.exponentialRampToValueAtTime(.001,t+(snare?.15:.04));voices.add(n);n.onended=()=>{voices.delete(n);n.disconnect();f.disconnect();g.disconnect();};n.start(t,mod(t*.17,1));n.stop(t+(snare?.17:.06));
   }else if(track===1){
     const o=audioContext.createOscillator(),m=audioContext.createOscillator(),mg=audioContext.createGain(),g=audioContext.createGain();const freq=noteFreq(hit.note);o.frequency.value=freq;m.frequency.value=freq*2;mg.gain.setValueAtTime(freq*2,t);mg.gain.exponentialRampToValueAtTime(1,t+.3);m.connect(mg);mg.connect(o.frequency);g.gain.setValueAtTime(.17*vel,t);g.gain.exponentialRampToValueAtTime(.001,t+.5);connectVoice(o,g,t,.52);voices.add(m);m.onended=()=>{voices.delete(m);m.disconnect();mg.disconnect();};m.start(t);m.stop(t+.52);
   }else if(track===2){
