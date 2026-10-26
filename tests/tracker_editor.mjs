@@ -97,3 +97,14 @@ test('SCENE cells copy, paste only into SCENE, validate clipboard names and coun
   putCell(p,5,SCENE,{name:'drift'});
   assert.deepEqual(activity(p)[5],{audio:0,keys:1});
 });
+
+test('a block from a mixed editor cannot paste into hidden page columns', () => {
+  const source=score().patterns[0],destination=score().patterns[0];
+  putCell(source,0,3,{note:'C-4',vel:100});putCell(source,0,4,{v:.9});
+  const before=structuredClone(destination.keys);
+  const block=copyBlock(source,{r0:0,r1:0,c0:3,c1:4});
+  const result=pasteBlock(destination,{row:8,col:3},block,{lastColumn:3});
+  assert.deepEqual(result,{written:1,skipped:1});
+  assert.deepEqual(destination.audio[3][8],{note:'C-4',vel:100});
+  assert.deepEqual(destination.keys,before);
+});

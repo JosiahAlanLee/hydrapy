@@ -24,6 +24,13 @@ Studio's existing execution and hardware staging rules.
 
 ## Control surface and displays
 
+- **Audio / Visual** are two pages of the same pattern. Audio shows Breaks,
+  FM hits, Sub and Texture; Visual shows Dolly Z, Roll, Feedback and Scene,
+  with the automation curve and patch bindings. Click a page tab or press
+  **Tab while the grid has focus**. The pattern and edit row stay in place,
+  each page remembers its lane, and playback continues. **Shift+Tab** leaves
+  the grid; Tab in a form keeps normal field navigation. Page choice is remembered
+  in that browser tab and does not change the saved score or CV/Rack output.
 - **Space** starts automation or pauses; **F** enters fullscreen; **B** blacks out
   Gorgon's browser monitors. Blackout does not alter rendering, recording,
   snapshots, exports, or an external video device.
@@ -34,7 +41,10 @@ Studio's existing execution and hardware staging rules.
   the Note / Velocity editor directly below the grid; Enter toggles browser synth
   hits and retains keyboard focus. Piano keys adds QWERTY note entry, octave and
   row advance controls. Shift+click, drag or Shift+arrows select blocks; Copy, Cut,
-  Paste, transpose, block velocity and 100-step Undo/Redo edit them. Pattern tools
+  Paste, transpose, block velocity and 100-step Undo/Redo edit them. **All** or
+  Ctrl/Cmd+A selects only the current page's four lanes. Switching pages clears
+  a block selection; Delete and Paste cannot reach hidden lanes. Undo/Redo
+  returns to the page of the edit. Pattern tools
   renames, copies and clears patterns. Arrangement cards show real event activity.
   Selecting cells or patterns does not seek; Seek to row, Alt+Enter in the grid,
   a double-click on a row number or a card’s ▶ button does. Manual editing turns
