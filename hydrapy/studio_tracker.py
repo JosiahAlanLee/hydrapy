@@ -11,6 +11,8 @@ import math
 import re
 from pathlib import Path
 
+from .sound_controls import controls, validate_sounds
+
 LANES = {'z': (0., 1., .35), 'roll': (-45., 45., 0.), 'feedback': (0., .9, .25)}
 SCENE_NAME = re.compile(r'[A-Za-z0-9_-]{1,24}')
 
@@ -39,8 +41,9 @@ def number(value, low, high, label):
 def validate(document):
     """Copy before validation so accepted scores cannot change behind the renderer."""
     d = copy.deepcopy(document)
-    if not isinstance(d, dict) or d.get('format') != 'hydrapy-tracker-1':
-        raise ValueError('Expected a hydrapy-tracker-1 score')
+    if not isinstance(d, dict) or d.get('format') not in ('hydrapy-tracker-1', 'hydrapy-tracker-2'):
+        raise ValueError('Expected a hydrapy-tracker-1 or hydrapy-tracker-2 score')
+    validate_sounds(d)
     number(d.get('bpm'), 60, 200, 'Tempo')
     # bool is a numeric subclass in Python, but JSON false is not the key C.
     # The Rack parser and score schema distinguish booleans from numbers too.
@@ -76,6 +79,10 @@ def validate(document):
                 if hit is not None:
                     if not isinstance(hit, dict):
                         raise ValueError('Expected a note and velocity')
+                    if 'locks' in hit:
+                        if d['format'] != 'hydrapy-tracker-2':
+                            raise ValueError('Sound locks require hydrapy-tracker-2')
+                        controls(hit['locks'], machine=True)
                     note_midi(hit.get('note'))
                     number(hit.get('vel'), 0, 127, 'Velocity')
         if not isinstance(p.get('keys'), dict) or set(p['keys']) != set(LANES) or not isinstance(p.get('easing'), dict):

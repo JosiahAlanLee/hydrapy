@@ -1,3 +1,4 @@
+import {SOUND_KEYS, ensureSounds} from './sounds.js';
 import {api, PreviewStream} from './backend.js';
 import {noteMidi, noteFrequency, canonicalNote, breaksVoice} from './notes.js';
 import {ScoreHistory, bounds, getCell, putCell, copyBlock, readBlock, pasteBlock, clearBlock,
@@ -467,9 +468,9 @@ function renderRows(){
       const t=tracks[c];
       const key=getCell(p,r,c),isSelected=selected.row===r&&selected.col===c;
       const inBlock=r>=box.r0&&r<=box.r1&&c>=box.c0&&c<=box.c1;
-      const content=key?(t.scene?sceneLabel(key):t.visual?formatValue(t.id,key.v):`${escapeHTML(key.note)}<span class="velocity">${hex(key.vel)}</span>`):'···';
+      const content=key?(t.scene?sceneLabel(key):t.visual?formatValue(t.id,key.v):`${escapeHTML(key.note)}${Object.keys(key.locks??{}).length?'<i class=lock-mark title="Sound locks">●</i>':''}<span class="velocity">${hex(key.vel)}</span>`):'···';
       const missing=t.scene&&key&&remote&&!patchScenes.some(x=>x.name===key.name);
-      html+=`<button role="gridcell" aria-colindex="${index+2}" tabindex="${isSelected?'0':'-1'}" class="cell ${t.visual?'visual':''} ${t.scene?'scene':''} ${missing?'missing':''} ${!key?'empty':''} ${isSelected?'selected':''} ${inBlock?'in-selection':''} ${c<4&&state.mutes[c]?'muted':''}" data-row="${r}" data-col="${c}" aria-label="${t.name}, row ${hex(r)}, ${key?(t.scene?escapeHTML(key.name)+(missing?' (not in this patch)':''):t.visual?formatValue(t.id,key.v):escapeHTML(key.note)):'empty'}" aria-selected="${inBlock}">${content}</button>`;
+      html+=`<button role="gridcell" aria-colindex="${index+2}" tabindex="${isSelected?'0':'-1'}" class="cell ${t.visual?'visual':''} ${t.scene?'scene':''} ${missing?'missing':''} ${!key?'empty':''} ${isSelected?'selected':''} ${inBlock?'in-selection':''} ${c<4&&state.mutes[c]?'muted':''}" data-row="${r}" data-col="${c}" aria-label="${t.name}, row ${hex(r)}, ${key?(t.scene?escapeHTML(key.name)+(missing?' (not in this patch)':''):t.visual?formatValue(t.id,key.v):escapeHTML(key.note)+(Object.keys(key.locks??{}).length?', sound locks':'')):'empty'}" aria-selected="${inBlock}">${content}</button>`;
     });html+='</div>';
   }
   grid.innerHTML=html;lastStep=-1;
@@ -549,6 +550,12 @@ function updateInspector(){
   const hit=selected.col<4?p.audio[selected.col][selected.row]:null;
   const kind=kindOf(selected.col);
   $('noteEditor').hidden=kind!=='audio';$('visualCellEditor').hidden=!tracks[selected.col].visual;$('sceneEditor').hidden=kind!=='scene';
+  $('soundEditor').hidden=kind!=='audio';
+  if(kind==='audio')for(const key of SOUND_KEYS){
+    $('track-'+key).value=(key==='machine'?state.sounds?.[selected.col]?.machine:state.sounds?.[selected.col]?.params[key])??'';
+    $('lock-'+key).value=hit?.locks?.[key]??'';
+    $('lock-'+key).disabled=!hit;
+  }
   $('noteInput').value=hit?.note||tracks[selected.col].note||'C-4';
   $('velocityInput').value=hit?.vel??entryVelocity;$('auditionBtn').disabled=!hit;
   $('selectedHint').textContent=kind==='audio'?'Enter toggles · Note and velocity write on change':
@@ -708,7 +715,7 @@ if(outputType){
     try{
       block=readBlock(JSON.stringify(block));
       let result;
-      changeScore('paste cells',()=>{result=pasteBlock(state.patterns[editPattern],selected,block,{lastColumn:PAGE_COLUMNS[editorPage].at(-1)});});
+      changeScore('paste cells',()=>{if(block.rows.some(row=>row.some(cell=>cell?.locks)))ensureSounds(state);result=pasteBlock(state.patterns[editPattern],selected,block,{lastColumn:PAGE_COLUMNS[editorPage].at(-1)});});
       if(result)toast(`Pasted ${result.written} cells.${result.skipped?' '+result.skipped+' outside this page/pattern or in incompatible lanes were skipped.':''}`);
     }catch(error){toast(error.message);}
   }
@@ -730,8 +737,29 @@ if(outputType){
     if(selected.col>=4)return;
     try{
       note=canonicalNote(note.toUpperCase().trim());entryVelocity=velocity();
-      changeScore('write note',()=>putCell(state.patterns[editPattern],selected.row,selected.col,{note,vel:entryVelocity}));
+      changeScore('write note',()=>putCell(state.patterns[editPattern],selected.row,selected.col,{...getCell(state.patterns[editPattern],selected.row,selected.col),note,vel:entryVelocity}));
     }catch(error){toast(error.message);}
+  }
+  for(const scope of ['track','lock'])for(const key of SOUND_KEYS){
+    const label=document.createElement('label');label.textContent=key==='machine'?'Machine':key.toUpperCase();
+    const input=document.createElement('input');input.id=`${scope}-${key}`;input.type='number';input.min=0;input.max=key==='machine'?191:127;input.step=1;input.placeholder=scope==='track'?'Native':'Inherit';
+    input.setAttribute('aria-label',`${scope==='track'?'Track default':'Hit lock'} ${key}`);label.append(input);$(scope+'SoundFields').append(label);
+    input.onchange=()=>{
+      if(selected.col>=4)return;
+      const empty=input.value.trim()==='',value=Number(input.value);
+      if(!empty&&(!Number.isInteger(value)||value<0||value>Number(input.max))){toast(`Enter an integer from 0 to ${input.max}, or leave blank.`);updateInspector();return;}
+      const hit=getCell(state.patterns[editPattern],selected.row,selected.col);if(scope==='lock'&&!hit)return;
+      changeScore(scope==='track'?'track sound default':'hit sound lock',()=>{
+        ensureSounds(state);
+        if(scope==='track'){
+          const sound=state.sounds[selected.col];
+          if(key==='machine')sound.machine=empty?null:value;else if(empty)delete sound.params[key];else sound.params[key]=value;
+        }else{
+          hit.locks??={};if(empty)delete hit.locks[key];else hit.locks[key]=value;
+          if(!Object.keys(hit.locks).length)delete hit.locks;
+        }
+      });
+    };
   }
   $('noteInput').onchange=()=>writeNote();
   $('velocityInput').onchange=()=>{

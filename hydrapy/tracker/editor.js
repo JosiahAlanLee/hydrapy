@@ -1,5 +1,6 @@
 // Score operations have no DOM, audio clock, or transport side effects.
 import {noteMidi, canonicalNote} from './notes.js';
+import {validateLocks} from './sounds.js';
 
 export const LANES = ['z', 'roll', 'feedback'];
 const LIMITS = [[0, 1], [-45, 45], [0, .9]];
@@ -8,10 +9,10 @@ export const SCENE = 7;
 export const SCENE_NAME = /^[A-Za-z0-9_-]{1,24}$/;
 // What a column holds, so blocks only paste into columns of the same kind.
 export const kindOf = col => col < 4 ? 'audio' : col < SCENE ? LANES[col - 4] : 'scene';
-const EDITABLE = ['patterns', 'bpm', 'key', 'mutes', 'bindings'];
+const EDITABLE = ['format', 'sounds', 'patterns', 'bpm', 'key', 'mutes', 'bindings'];
 const clone = value => structuredClone(value);
 const snapshot = score => Object.fromEntries(EDITABLE.map(key => [key, clone(score[key])]));
-const apply = (score, data) => EDITABLE.forEach(key => { score[key] = clone(data[key]); });
+const apply = (score, data) => EDITABLE.forEach(key => { if (data[key] === undefined) delete score[key]; else score[key] = clone(data[key]); });
 
 export class ScoreHistory {
   constructor(limit = 100) { this.limit = limit; this.clear(); }
@@ -64,7 +65,7 @@ export function putCell(pattern, row, col, value) {
     if (value) pattern.scenes.push({r: row, name: value.name, fade: value.fade ?? 0});
     pattern.scenes.sort((a, b) => a.r - b.r);
   } else if (col < 4) {
-    pattern.audio[col][row] = value ? {note: value.note, vel: value.vel} : null;
+    pattern.audio[col][row] = value ? {note: value.note, vel: value.vel, ...('locks' in value ? {locks:clone(validateLocks(value.locks))} : {})} : null;
   } else {
     const lane = LANES[col - 4];
     pattern.keys[lane] = pattern.keys[lane].filter(key => key.r !== row);
@@ -94,6 +95,7 @@ export function readBlock(text) {
       if (!value || typeof value !== 'object') throw new Error('Invalid clipboard cell.');
       if (block.columns[c] === 'audio') {
         value.note = canonicalNote(value.note);
+        if ('locks' in value) validateLocks(value.locks);
         if (!Number.isInteger(value.vel) || value.vel < 0 || value.vel > 127) throw new Error('Invalid clipboard velocity.');
       } else if (block.columns[c] === 'scene') {
         if (typeof value.name !== 'string' || !SCENE_NAME.test(value.name)) throw new Error('Invalid clipboard scene name.');

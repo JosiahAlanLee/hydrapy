@@ -206,3 +206,9 @@ details[open] > summary { color: var(--mint); border-color: #6f8d77; background:
 .jack-settings > button { width: 100%; margin-top: 10px; }
 .jack-settings label input { width: 58%; }
 #jackPorts,#cvPorts { white-space: pre-wrap; overflow-wrap: anywhere; font: 9px var(--mono); line-height: 1.6; color: var(--mint); }
+
+#soundEditor {margin:12px 0; padding:10px; border:1px solid var(--line, #333);}
+#soundEditor summary {cursor:pointer;} #soundEditor p {max-width:80ch;font-size:12px;line-height:1.6;}
+#soundEditor fieldset {margin-top:10px;border:1px solid #3e4848;} .sound-fields {display:flex;flex-wrap:wrap;gap:10px;}
+.sound-fields label {display:grid;gap:4px;font-size:11px;} .sound-fields input {width:70px;}
+.lock-mark {color:#efbb68;font-size:7px;margin-left:4px;}

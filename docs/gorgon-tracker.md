@@ -356,3 +356,22 @@ the Ubuntu physical GPU, multiple monitors, fullscreen permissions, audio-device
 latency, ADAT/CV hardware, or model inference contention. On the workstation, test
 both outputs at the intended size/fps during training, inspect each timing stage,
 and compare an audible click with a visible flash before setting A/V compensation.
+
+
+### External Rack sound controls
+
+The Audio page's selected-cell inspector has **External Rack instrument** controls.
+Set a track's machine (0–191) and P1–P8 (raw integers 0–127), then override any
+of them on individual hits. Blank fields inherit. A blank track machine uses
+the instrument's selected machine; blank track parameters use that machine's
+native defaults. A dot marks a hit with locks. Every hit starts from its track
+defaults, so a lock never leaks into the next unlocked hit. Clearing a cell
+removes its locks; note and velocity changes, transpose and clipboard preserve them.
+Undo also restores the score format when undoing the first sound edit.
+
+Editing sound controls upgrades the saved document to `hydrapy-tracker-2`.
+Older Gorgon/HydraPy versions reject this format. Untouched legacy scores keep
+`hydrapy-tracker-1`. These controls reach an adjacent compatible Rack instrument
+through Gorgon's sound link. Browser audition, direct physical CV and visual
+lanes retain their existing behavior. P1–P8 labels and machine availability are
+instrument-specific; the tracker does not guess a pitch parameter from note names.

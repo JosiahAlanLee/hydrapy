@@ -675,3 +675,29 @@ def test_monitor_switches_discard_delayed_frames_and_controllers_inspect_indepen
     assert max(peak) == 1
     assert all(p.snapshot()['pending'] <= 1 for p in session.monitor_previews.values())
     other.close()
+
+
+def test_external_sound_locks_edit_preserve_notes_undo_and_reload(workspace):
+    session, page, context, root = workspace
+    page.locator('#audioPageTab').click()
+    page.locator('.cell[data-row="0"][data-col="0"]').click()
+    page.locator('#soundEditor summary').click()
+    for selector, value in [('#track-machine', '16'), ('#track-p2', '50'), ('#lock-p1', '0'), ('#lock-p2', '127')]:
+        page.locator(selector).fill(value); page.locator(selector).press('Tab')
+    page.locator('#noteInput').fill('E4'); page.locator('#noteInput').press('Tab')
+    page.wait_for_timeout(450)
+    d = session.tracker.document
+    assert d['format'] == 'hydrapy-tracker-2'
+    assert d['sounds'][0] == {'machine': 16, 'params': {'p2': 50}}
+    assert d['patterns'][0]['audio'][0][0]['locks'] == {'p1': 0, 'p2': 127}
+    assert d['patterns'][0]['audio'][0][0]['note'] == 'E-4'
+    page.locator('#undoBtn').click(); page.locator('#redoBtn').click()
+    page.reload(); page.wait_for_function('gorgonPreview.frames>=1')
+    page.locator('#audioPageTab').click()
+    page.locator('.cell[data-row="0"][data-col="0"]').click()
+    page.locator('#soundEditor summary').click()
+    assert page.locator('#lock-p1').input_value() == '0'
+    assert page.locator('#track-p2').input_value() == '50'
+    page.locator('#lock-p2').fill(''); page.locator('#lock-p2').press('Tab')
+    page.wait_for_timeout(400)
+    assert session.tracker.document['patterns'][0]['audio'][0][0]['locks'] == {'p1': 0}
