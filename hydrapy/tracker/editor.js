@@ -108,11 +108,11 @@ export function readBlock(text) {
   return block;
 }
 
-export function pasteBlock(pattern, start, block) {
+export function pasteBlock(pattern, start, block, {lastColumn = COLUMNS - 1} = {}) {
   let written = 0, skipped = 0;
   block.rows.forEach((row, r) => row.forEach((value, c) => {
     const dest = start.col + c, y = start.row + r;
-    if (dest >= COLUMNS || y > 63) { skipped++; return; }
+    if (dest >= COLUMNS || dest > lastColumn || y > 63) { skipped++; return; }
     const kind = kindOf(dest);
     if (kind !== block.columns[c]) { skipped++; return; }
     putCell(pattern, y, dest, value);

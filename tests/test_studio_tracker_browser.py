@@ -52,6 +52,7 @@ def test_score_edit_seek_tempo_save_reload_and_real_patch(workspace):
     page.locator('#tempo').press('Tab')
     page.wait_for_timeout(350)
     assert session.tracker.document['bpm'] == 90
+    page.get_by_role('tab', name='Visual').click()
     page.locator('#zSlider').fill('0.8')
     page.wait_for_timeout(350)
     assert session.tracker.document['patterns'][2]['keys']['z'][0]['v'] == .8
@@ -144,6 +145,7 @@ def test_import_validation_hold_boundary_and_slow_decode_are_bounded(workspace):
     file = root/'score.json'; file.write_text(json.dumps(d))
     page.locator('#importFile').set_input_files(file)
     page.wait_for_function("document.getElementById('toast').textContent.startsWith('Score loaded')")
+    page.get_by_role('tab', name='Visual').click()
     page.locator('[data-row="16"][data-col="4"]').click()
     assert page.locator('#zValue').text_content() == '0.90'
     accepted = session.tracker.document
@@ -262,6 +264,8 @@ def test_browser_synth_continues_across_repeated_pattern_wraps(workspace):
     }''')
     page.locator('#audioBtn').click()
     page.get_by_role('button', name='Play', exact=True).click()
+    page.wait_for_function('synthOscillators>=2')
+    page.get_by_role('tab', name='Visual').click()
     # Two oscillators per FM note, once per 4.8-second loop.
     page.wait_for_function('synthOscillators>=6', timeout=17000)
     assert page.evaluate('synthOscillators') == 6
@@ -288,6 +292,7 @@ def test_keyboard_entry_focus_and_edit_cursor_do_not_seek(workspace):
     page.wait_for_timeout(250)
     assert not session.tracker_blackout
     assert session.tracker.document['patterns'][0]['audio'][1][9]['note'] == 'G-4'
+    page.get_by_role('tab', name='Visual').click()
     page.locator('[data-row="2"][data-col="4"]').click()
     page.locator('#cellValue').fill('0.82'); page.locator('#cellValue').press('Tab')
     page.get_by_role('button', name='Select pattern 3: ASCENT', exact=True).click()
@@ -379,6 +384,8 @@ def test_editor_and_file_actions_remain_accessible_at_laptop_and_phone_sizes(wor
     page.locator('#viewMenu summary').click()
     page.locator('[data-row="1"][data-col="1"]').click()
     page.keyboard.press('ArrowRight');page.keyboard.press('ArrowRight');page.keyboard.press('ArrowRight');page.keyboard.press('ArrowRight')
+    assert page.evaluate('document.activeElement.dataset.col') == '3'
+    page.keyboard.press('Tab');page.keyboard.press('ArrowRight')
     assert page.evaluate('document.activeElement.dataset.col') == '5'
     page.screenshot(path='/tmp/gorgon-editor-phone.png', full_page=True)
 
@@ -446,6 +453,7 @@ def test_scene_column_entry_fade_copy_undo_playback_and_missing_names(workspace)
     session, page, context, root = workspace
     (root/'s.py').write_text(SCENE_PATCH)
     session.call('load', path='s.py')
+    page.get_by_role('tab', name='Visual').click()
     page.wait_for_function("document.querySelector('[data-row=\"0\"][data-col=\"7\"]') && "
                            "document.querySelector('.track-header.scene')")
     cell = lambda r: page.locator(f'[data-row="{r}"][data-col="7"]')
@@ -481,3 +489,81 @@ def test_scene_column_entry_fade_copy_undo_playback_and_missing_names(workspace)
     # Arrow keys reach the SCENE column and stop there.
     cell(16).click(); page.keyboard.press('ArrowRight')
     assert page.evaluate('document.activeElement.dataset.col') == '7'
+
+
+def test_audio_visual_pages_keep_row_pattern_transport_and_keyboard_focus(workspace):
+    session, page, context, root = workspace
+    assert page.get_by_role('tab', name='Audio').get_attribute('aria-selected') == 'true'
+    assert page.locator('#trackerRows [data-row="0"] [role="gridcell"]').count() == 4
+    assert page.locator('.track-header strong').all_inner_texts() == ['Breaks', 'FM hits', 'Sub', 'Texture']
+    assert not page.locator('.automation').is_visible()
+    page.get_by_role('button', name='Select pattern 3: ASCENT', exact=True).click()
+    page.locator('[data-row="12"][data-col="2"]').click()
+    revision, transport = session.tracker.revision, session.tracker.transport_revision
+    page.keyboard.press('Tab')
+    assert page.get_by_role('tab', name='Visual').get_attribute('aria-selected') == 'true'
+    assert page.get_by_role('tab', name='Audio').get_attribute('aria-selected') == 'false'
+    assert page.evaluate('[document.activeElement.dataset.row,document.activeElement.dataset.col]') == ['12','4']
+    assert '03 / ASCENT' in page.locator('#patternTitle').inner_text()
+    assert page.locator('.track-header strong').all_inner_texts() == ['Dolly Z', 'Roll', 'Feedback', 'Scene']
+    assert page.locator('.automation').is_visible()
+    assert not page.locator('#pianoBtn').is_visible()
+    page.keyboard.press('ArrowRight')
+    page.keyboard.press('Tab')
+    assert page.evaluate('[document.activeElement.dataset.row,document.activeElement.dataset.col]') == ['12','2']
+    page.keyboard.press('Tab')
+    assert page.evaluate('document.activeElement.dataset.col') == '5'  # remembered visual lane
+    assert session.tracker.revision == revision and session.tracker.transport_revision == transport
+    # Shift+Tab leaves the grid, and form Tab keeps ordinary focus navigation.
+    page.keyboard.press('Shift+Tab')
+    assert not page.evaluate("document.getElementById('trackerRows').contains(document.activeElement)")
+    page.get_by_role('tab', name='Audio').click()
+    page.locator('[data-row="12"][data-col="2"]').click()
+    page.locator('#noteInput').focus();page.keyboard.press('Tab')
+    assert page.locator('#velocityInput').evaluate('(e)=>e===document.activeElement')
+    assert page.get_by_role('tab', name='Audio').get_attribute('aria-selected') == 'true'
+    page.get_by_role('tab', name='Audio').focus();page.keyboard.press('ArrowRight')
+    assert page.locator('#visualPageTab').evaluate('(e)=>e===document.activeElement')
+    page.keyboard.press('Home')
+    assert page.locator('#audioPageTab').evaluate('(e)=>e===document.activeElement')
+    # Page switching during playback does not seek, pause, or disable Follow.
+    page.get_by_role('button', name='Play', exact=True).click()
+    page.get_by_role('button', name='Pause', exact=True).wait_for()
+    page.locator('#followBtn').click()
+    assert page.locator('#followBtn').get_attribute('aria-pressed') == 'true'
+    transport = session.tracker.transport_revision
+    page.get_by_role('tab', name='Visual').click()
+    assert not session.paused and session.tracker.transport_revision == transport
+    assert page.locator('#followBtn').get_attribute('aria-pressed') == 'true'
+    page.reload();page.wait_for_function('gorgonPreview.frames>=1')
+    assert page.get_by_role('tab', name='Visual').get_attribute('aria-selected') == 'true'
+
+
+def test_page_scoped_selection_and_undo_never_clear_hidden_lanes(workspace):
+    session, page, context, root = workspace
+    original = json.loads(json.dumps(session.tracker.document['patterns'][0]))
+    page.locator('[data-row="0"][data-col="0"]').click()
+    page.keyboard.press('Control+a')
+    assert page.locator('#selectionInfo').inner_text() == '64 × 4 cells'
+    page.keyboard.press('Delete');page.wait_for_timeout(250)
+    pattern = session.tracker.document['patterns'][0]
+    assert all(hit is None for lane in pattern['audio'] for hit in lane)
+    assert pattern['keys'] == original['keys']
+    page.keyboard.press('Tab')
+    assert page.locator('#selectionInfo').inner_text() == '1 cell'
+    page.keyboard.press('Control+z');page.wait_for_timeout(250)
+    assert page.get_by_role('tab', name='Audio').get_attribute('aria-selected') == 'true'
+    assert session.tracker.document['patterns'][0] == original
+    page.keyboard.press('Tab');page.keyboard.press('Control+a');page.keyboard.press('Delete')
+    page.wait_for_timeout(250)
+    pattern = session.tracker.document['patterns'][0]
+    assert pattern['audio'] == original['audio']
+    assert all(not keys for keys in pattern['keys'].values())
+    # Arrow selection clamps at each page's edge instead of reaching hidden lanes.
+    page.locator('[data-row="0"][data-col="4"]').click()
+    page.keyboard.press('Shift+ArrowLeft')
+    assert page.evaluate('document.activeElement.dataset.col') == '4'
+    page.keyboard.press('Tab')
+    page.locator('[data-row="0"][data-col="3"]').click()
+    page.keyboard.press('Shift+ArrowRight')
+    assert page.evaluate('document.activeElement.dataset.col') == '3'

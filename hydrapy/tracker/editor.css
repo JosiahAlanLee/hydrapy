@@ -20,6 +20,18 @@
 .library-collapsed .library { display: none; }
 .library-collapsed .work-area { grid-template-columns: minmax(0, 1fr) 274px; }
 .editor-stack { gap: 10px; }
+.lane-pages { display: flex; align-items: center; gap: 5px; flex-shrink: 0; }
+.lane-pages button { padding: 8px 14px; font-size: 12px; border-radius: 4px; color: var(--muted); }
+.lane-pages button span { margin-left: 12px; font: 9px var(--mono); opacity: .65; }
+.lane-pages button[aria-selected=true] { color: var(--mint); background: #23392e; border-color: #759c80; }
+.page-switch-hint { margin-left: auto; color: var(--muted); font: 9px var(--mono); }
+body[data-editor-page=audio] .automation,
+body[data-editor-page=audio] .visual-controls,
+body[data-editor-page=audio] .bindings,
+body[data-editor-page=audio] #curveVisibilityBtn,
+body[data-editor-page=visual] .audio-palette,
+body[data-editor-page=visual] .cell-editor .entry-settings,
+body[data-editor-page=visual] .transpose-tools { display: none; }
 .tracker { min-height: 300px; overflow: visible; }
 .tracker-heading { height: 35px; padding: 0 10px; }
 .tracker-heading > div { min-width: 0; gap: 5px; }
@@ -41,12 +53,12 @@ details[open] > summary { color: var(--mint); border-color: #6f8d77; background:
 .file-popover input, .file-popover select { width: 100%; min-width: 0; padding: 7px; border: 1px solid var(--line); background: #101a15; color: var(--text); }
 .file-popover button:hover { background: #2b4033; }
 .track-headers { height: 39px; padding-right: 6px; }
-.track-headers, .tracker-row { grid-template-columns: 36px repeat(4, minmax(72px, 1fr)) repeat(3, minmax(78px, .95fr)) minmax(84px, 1fr); }
+.track-headers, .tracker-row { grid-template-columns: 36px repeat(4, minmax(80px, 1fr)); }
 /* SCENE: the patch scene that starts on a row. A name the loaded patch doesn't declare is struck through. */
 .tracker-row .cell.scene { color: #c9b6e4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tracker-row .cell.scene.missing { color: #8a7f96; text-decoration: line-through; }
 .track-header.scene strong { color: #c9b6e4; }
-.tracker-row { min-width: 558px; }
+.tracker-row { min-width: 356px; }
 .track-header { padding: 5px 6px; }
 .track-header strong { font-size: 10px; }
 .track-header span { font-size: 7px; color: #8ba392; margin-top: 4px; }
@@ -135,6 +147,7 @@ details[open] > summary { color: var(--mint); border-color: #6f8d77; background:
   .monitor-wrap { aspect-ratio: 16/9; }
 }
 @media (max-width: 740px) {
+  .page-switch-hint { font-size: 8px; max-width: 110px; text-align: right; }
   .studio { display: flex; height: auto; }
   .topbar { height: auto; min-height: 48px; flex-wrap: wrap; gap: 5px 10px; padding: 8px 10px; }
   .project-name { display: none; }

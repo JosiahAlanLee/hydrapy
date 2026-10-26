@@ -37,7 +37,12 @@ const defaults = () => ({version:1,format:'hydrapy-tracker-1',bindings:{z:'Dolly
 
 let state=defaults();
 let playing=false,anchorBeat=state.pattern*16,anchorTime=performance.now(),blackout=false,follow=true;
-let selected={row:0,col:4},curve='z',lastStep=-1,lastPattern=-1;
+const PAGE_COLUMNS={audio:[0,1,2,3],visual:[4,5,6,7]};
+let editorPage='audio';
+try{if(sessionStorage.getItem('gorgon-editor-page')==='visual')editorPage='visual';}catch{}
+const pageColumns={audio:0,visual:4};
+let selected={row:0,col:pageColumns[editorPage]},curve='z',lastStep=-1,lastPattern=-1;
+let switchingPage=false;
 let editPattern=0, selectionAnchor=null, clipboard=null, pianoEntry=false, entryVelocity=90;
 let curveDirty=true, curvePaint=null;
 const history = new ScoreHistory();
@@ -359,8 +364,36 @@ function renderPatterns(){
   $('patterns').querySelectorAll('[data-pattern]').forEach(b=>b.onclick=()=>selectPattern(Number(b.dataset.pattern)));
   $('patterns').querySelectorAll('[data-launch]').forEach(b=>b.onclick=()=>launchPattern(Number(b.dataset.launch)));
 }
+function syncEditorPage(){
+  const next=selected.col<4?'audio':'visual';
+  if(next!==editorPage){editorPage=next;selectionAnchor=null;}
+  pageColumns[editorPage]=selected.col;
+  document.body.dataset.editorPage=editorPage;
+  try{sessionStorage.setItem('gorgon-editor-page',editorPage);}catch{}
+  document.querySelectorAll('button[data-editor-page]').forEach(button=>{
+    const active=button.dataset.editorPage===editorPage;
+    button.setAttribute('aria-selected',active);button.tabIndex=active?0:-1;
+  });
+  $('laneEditor').setAttribute('aria-labelledby',editorPage+'PageTab');
+  $('trackerRows').setAttribute('aria-label',editorPage==='audio'?'Audio pattern editor':'Visual pattern editor');
+  $('trackerRows').setAttribute('aria-colcount','5');
+  $('trackerRows').setAttribute('aria-description','Tab switches Audio and Visual pages. Shift+Tab leaves the grid.');
+  $('libraryBtn').textContent=editorPage==='audio'?'Instruments':'Visual source';
+  $('libraryBtn').title=editorPage==='audio'?'Show or hide instruments':'Show or hide the visual source';
+}
+function selectEditorPage(next,{focus=false}={}){
+  if(!PAGE_COLUMNS[next])return;
+  pageColumns[editorPage]=selected.col;
+  selected.col=pageColumns[next];selectionAnchor=null;
+  switchingPage=true;
+  try{
+    renderHeaders();renderRows();renderInstruments();updateInspector();
+    if(focus)focusCell(true);
+  }finally{switchingPage=false;}
+}
 function renderHeaders(){
-  $('trackHeaders').innerHTML='<div class="track-header row-index">ROW</div>'+tracks.map((t,i)=>`<div class="track-header ${t.visual?'visual':''} ${t.scene?'scene':''}"><div><strong>${t.name}</strong>${i<4?`<button class="mute" data-mute="${i}" aria-label="Mute ${t.name}" aria-pressed="${state.mutes[i]}">M</button>`:''}</div><span>${t.sub}</span></div>`).join('');
+  syncEditorPage();
+  $('trackHeaders').innerHTML='<div class="track-header row-index">ROW</div>'+PAGE_COLUMNS[editorPage].map(i=>{const t=tracks[i];return `<div class="track-header ${t.visual?'visual':''} ${t.scene?'scene':''}"><div><strong>${t.name}</strong>${i<4?`<button class="mute" data-mute="${i}" aria-label="Mute ${t.name}" aria-pressed="${state.mutes[i]}">M</button>`:''}</div><span>${t.sub}</span></div>`;}).join('');
   $('trackHeaders').querySelectorAll('[data-mute]').forEach(b=>b.onclick=()=>{
     changeScore('mute lane',()=>{state.mutes[Number(b.dataset.mute)]=!state.mutes[Number(b.dataset.mute)];});stopVoices();
   });
@@ -374,15 +407,17 @@ function nextSceneName(p,row){
   return names[(names.indexOf(above?.name)+1)%names.length];
 }
 function renderRows(){
+  if((selected.col<4?'audio':'visual')!==editorPage)renderHeaders();
   const grid=$('trackerRows'),hadFocus=grid.contains(document.activeElement),p=state.patterns[editPattern],box=selectionBox();let html='';
   for(let r=0;r<64;r++){
     html+=`<div class="tracker-row ${r%4===0?'beat':''} ${r%16===0?'bar':''}" role="row" data-row="${r}"><button class="row-number" role="rowheader" tabindex="-1" data-seek-row="${r}" title="Double-click to seek to row ${hex(r)}">${hex(r)}</button>`;
-    tracks.forEach((t,c)=>{
+    PAGE_COLUMNS[editorPage].forEach((c,index)=>{
+      const t=tracks[c];
       const key=getCell(p,r,c),isSelected=selected.row===r&&selected.col===c;
       const inBlock=r>=box.r0&&r<=box.r1&&c>=box.c0&&c<=box.c1;
       const content=key?(t.scene?sceneLabel(key):t.visual?formatValue(t.id,key.v):`${escapeHTML(key.note)}<span class="velocity">${hex(key.vel)}</span>`):'···';
       const missing=t.scene&&key&&remote&&!patchScenes.some(x=>x.name===key.name);
-      html+=`<button role="gridcell" tabindex="${isSelected?'0':'-1'}" class="cell ${t.visual?'visual':''} ${t.scene?'scene':''} ${missing?'missing':''} ${!key?'empty':''} ${isSelected?'selected':''} ${inBlock?'in-selection':''} ${c<4&&state.mutes[c]?'muted':''}" data-row="${r}" data-col="${c}" aria-label="${t.name}, row ${hex(r)}, ${key?(t.scene?escapeHTML(key.name)+(missing?' (not in this patch)':''):t.visual?formatValue(t.id,key.v):escapeHTML(key.note)):'empty'}" aria-selected="${inBlock}">${content}</button>`;
+      html+=`<button role="gridcell" aria-colindex="${index+2}" tabindex="${isSelected?'0':'-1'}" class="cell ${t.visual?'visual':''} ${t.scene?'scene':''} ${missing?'missing':''} ${!key?'empty':''} ${isSelected?'selected':''} ${inBlock?'in-selection':''} ${c<4&&state.mutes[c]?'muted':''}" data-row="${r}" data-col="${c}" aria-label="${t.name}, row ${hex(r)}, ${key?(t.scene?escapeHTML(key.name)+(missing?' (not in this patch)':''):t.visual?formatValue(t.id,key.v):escapeHTML(key.note)):'empty'}" aria-selected="${inBlock}">${content}</button>`;
     });html+='</div>';
   }
   grid.innerHTML=html;lastStep=-1;
@@ -426,6 +461,7 @@ function seekSelected(){
 function selectCell(row,col,extend=false){
   if(extend){if(!selectionAnchor)selectionAnchor={...selected};}else selectionAnchor=null;
   selected={row,col};if(tracks[col].visual)curve=tracks[col].id;
+  pageColumns[editorPage]=col;
   if(playing&&follow)setFollow(false);
   updateSelection();updateInspector();
 }
@@ -446,6 +482,8 @@ function setKey(id,value){
   }
 }
 function updateInspector(){
+  if((selected.col<4?'audio':'visual')!==editorPage){renderHeaders();renderRows();renderInstruments();}
+  pageColumns[editorPage]=selected.col;
   curveDirty=true;
   const p=state.patterns[editPattern];$('patternTitle').textContent=`${pad(editPattern+1)} / ${p.name}`;
   $('patternName').value=p.name;
@@ -545,6 +583,15 @@ if(outputType){
   $('audioBtn').onclick=async()=>{state.sound=!state.sound;if(state.sound)await ensureAudio();if(master)master.gain.setTargetAtTime(state.sound?.23:0,audioContext.currentTime,.02);if(!state.sound)stopVoices();updateControls();saveLocal();};
   $('fullscreenBtn').onclick=fullscreen;$('programBtn').onclick=()=>openOutput('program');$('expandPreview').onclick=()=>openOutput('program');$('auxBtn').onclick=()=>openOutput('aux');$('blackoutBtn').onclick=toggleBlackout;
   $('followBtn').onclick=()=>setFollow(!follow);
+  document.querySelectorAll('button[data-editor-page]').forEach(button=>{
+    button.onclick=()=>selectEditorPage(button.dataset.editorPage);
+    button.onkeydown=e=>{
+      if(!['ArrowLeft','ArrowRight','Home','End'].includes(e.key))return;
+      e.preventDefault();
+      const next=e.key==='Home'?'audio':e.key==='End'?'visual':editorPage==='audio'?'visual':'audio';
+      selectEditorPage(next);$(next+'PageTab').focus();
+    };
+  });
   $('seekCellBtn').onclick=seekSelected;
   $('trackerRows').addEventListener('dblclick',e=>{
     const row=e.target.closest('[data-seek-row]');
@@ -574,14 +621,15 @@ if(outputType){
     if(!dragMoved&&e.detail===0)selectCell(Number(cell.dataset.row),Number(cell.dataset.col),e.shiftKey);
     dragMoved=false;
   });
-  document.querySelector('.editor-stack').addEventListener('focusin',()=>{if(playing&&follow)setFollow(false);});
+  document.querySelector('.editor-stack').addEventListener('focusin',e=>{if(playing&&follow&&!switchingPage&&!e.target.closest('button[data-editor-page]'))setFollow(false);});
   ['z','roll','feedback'].forEach(id=>$(id+'Slider').addEventListener('input',()=>setKey(id,Number($(id+'Slider').value))));
   $('curveTabs').querySelectorAll('button').forEach(b=>b.onclick=()=>{curve=b.dataset.curve;selected.col=tracks.findIndex(t=>t.id===curve);selectionAnchor=null;renderRows();updateInspector();});
   $('easeButtons').querySelectorAll('button').forEach(b=>b.onclick=()=>changeScore('interpolation',()=>{state.patterns[editPattern].easing[curve]=b.dataset.ease;}));
   $('clearCellBtn').onclick=clearCell;
   $('undoBtn').onclick=()=>restoreHistory();$('redoBtn').onclick=()=>restoreHistory(true);
   function selectBlock(all=false){
-    selectionAnchor={row:0,col:all?0:selected.col};selected={row:63,col:all?tracks.length-1:selected.col};
+    const columns=PAGE_COLUMNS[editorPage];
+    selectionAnchor={row:0,col:all?columns[0]:selected.col};selected={row:63,col:all?columns.at(-1):selected.col};
     setFollow(false);updateSelection();updateInspector();focusCell();
   }
   $('selectLaneBtn').onclick=()=>selectBlock();$('selectAllBtn').onclick=()=>selectBlock(true);
@@ -596,8 +644,8 @@ if(outputType){
     try{
       block=readBlock(JSON.stringify(block));
       let result;
-      changeScore('paste cells',()=>{result=pasteBlock(state.patterns[editPattern],selected,block);});
-      if(result)toast(`Pasted ${result.written} cells.${result.skipped?' '+result.skipped+' outside the pattern or in incompatible lanes were skipped.':''}`);
+      changeScore('paste cells',()=>{result=pasteBlock(state.patterns[editPattern],selected,block,{lastColumn:PAGE_COLUMNS[editorPage].at(-1)});});
+      if(result)toast(`Pasted ${result.written} cells.${result.skipped?' '+result.skipped+' outside this page/pattern or in incompatible lanes were skipped.':''}`);
     }catch(error){toast(error.message);}
   }
   $('copyBtn').onclick=()=>copySelection();$('cutBtn').onclick=()=>copySelection(true);$('pasteBtn').onclick=()=>pasteSelection();
@@ -759,6 +807,9 @@ if(outputType){
     if(command&&e.key.toLowerCase()==='s'){e.preventDefault();$('saveBtn').click();return;}
     if(form)return;
     const inGrid=!!target.closest('#trackerRows');
+    if(inGrid&&e.key==='Tab'&&!command&&!e.altKey&&!e.shiftKey){
+      e.preventDefault();selectEditorPage(editorPage==='audio'?'visual':'audio',{focus:true});return;
+    }
     if(command){
       const key=e.key.toLowerCase();
       if(key==='z'){e.preventDefault();restoreHistory(e.shiftKey);}
@@ -788,7 +839,8 @@ if(outputType){
       e.preventDefault();let r=selected.row,c=selected.col;
       if(e.key==='Home')r=0;else if(e.key==='End')r=63;else if(e.key==='PageUp')r-=16;else if(e.key==='PageDown')r+=16;
       else {r+=e.key==='ArrowDown'?1:e.key==='ArrowUp'?-1:0;c+=e.key==='ArrowRight'?1:e.key==='ArrowLeft'?-1:0;}
-      selectCell(clamp(r,0,63),clamp(c,0,tracks.length-1),e.shiftKey);focusCell(true);
+      const columns=PAGE_COLUMNS[editorPage];
+      selectCell(clamp(r,0,63),clamp(c,columns[0],columns.at(-1)),e.shiftKey);focusCell(true);
     }
     if(e.key==='Delete'||e.key==='Backspace'){e.preventDefault();clearCell();}
     if(e.key==='Enter'){e.preventDefault();if(e.altKey)seekSelected();else toggleCell();}

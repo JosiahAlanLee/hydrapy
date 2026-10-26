@@ -33,10 +33,19 @@ labels are hexadecimal: `0F` precedes `10`, and `3F` is row 63. Arrangement card
 show actual note activity in green and explicit automation keys in amber; they
 are not audio waveforms.
 
+The editor opens on **Audio**, with its four note lanes. **Visual** shows the
+three automation lanes, Scene, the curve and patch bindings. Click the page tabs,
+or press **Tab in the grid** to switch at the same pattern and row. Each page
+remembers its selected lane. Playback and output windows continue on both pages.
+Shift+Tab leaves the grid, and Tab in Note, Velocity or other forms navigates
+between fields normally. The browser tab remembers the page across reloads;
+page choice is not part of the score.
+
 ## 1. Explain playback and editing separately
 
 1. Press **Space** to start; show the musical position and moving green row.
-2. Press Space again to pause. Click a different cell, including a visual cell.
+2. Press Space again to pause. Click a different cell. Switch to **Visual** to
+   select a visual cell, then return to **Audio**.
    The amber edit cursor moves; the transport position does not.
 3. Select another arrangement card. This changes the pattern being edited.
 4. Click **Seek to row**. This explicitly moves playback to that pattern and row.
@@ -54,7 +63,7 @@ A seek does not rewind an audio file or clear the patch's feedback.
 
 ## 2. Enter a pitched phrase
 
-1. Pause, select pattern 1 and an empty **FM hits** cell, such as row `01`.
+1. Open **Audio**, pause, select pattern 1 and an empty **FM hits** cell, such as row `01`.
 2. Show the selected-cell editor immediately beneath the grid. Type `E4` in
    **Note**, then Tab. It displays as `E-4`; both spellings mean E4.
 3. Set **Velocity** to `100`, then Tab. **Audition** turns browser Sound on and
@@ -83,7 +92,9 @@ sequence so entered note names and heard pitches match. Notes currently use
 2. Click **Copy**, select an empty destination, then **Paste**. Empty cells in
    the copied rectangle overwrite destination cells too.
 3. Demonstrate **Cut**, then Undo. **Lane** selects every row in the current
-   lane; **All** or Ctrl/Cmd+A in the grid selects the whole pattern.
+   lane; **All** or Ctrl/Cmd+A in the grid selects the four lanes on the current
+   page. Switching pages clears the block. Delete and Paste affect visible
+   lanes only; Undo/Redo returns to the page containing that edit.
 4. Select the pasted notes and press **+12** to move up an octave. **−1** and
    **+1** move by semitones. Alt+Up/Down are the keyboard equivalents; add Shift
    for octaves. AIR events are not transposed. A range-limit failure changes none
@@ -101,6 +112,9 @@ only into the same lane type, so roll degrees cannot become feedback amounts.
 Blocks crop at the pattern edge and report skipped cells.
 
 ## 4. Shape visual automation
+
+Open **Visual** before this section. Tab switches back to Audio when the grid
+has focus; it does not seek or interrupt either kind of output.
 
 1. Select a **Dolly Z** cell. The bottom editor changes to an exact numeric value
    and **Write key**. Enter `0.65`, then Tab; playback stays where it was.
