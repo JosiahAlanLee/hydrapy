@@ -133,7 +133,9 @@ function saveLocal(){
   pendingScore = structuredClone(state);
   if(conflicted||scoreFailed)return;
   $('savedState').textContent = 'Applying edit…';
-  clearTimeout(scoreTimer); scoreTimer = setTimeout(flushScore, 120);
+  // Studio says how long to gather edits: 120 ms normally, 0 with a native output, where an
+  // edit goes at once and later ones ride with the next request while one is in flight.
+  clearTimeout(scoreTimer); scoreTimer = setTimeout(flushScore, remote.edit_delay_ms ?? 120);
 }
 async function flushScore(){
   clearTimeout(scoreTimer);
@@ -240,6 +242,31 @@ function renderBindings(controls){
   }
 }
 let jackState=null;
+// Display menu: Program fullscreen from Studio's own window, drawn straight from the GPU (Linux).
+let nativeState=null;
+function renderNative(native){
+  nativeState=native||null;
+  const menu=$('displayMenu');
+  menu.hidden=!native||(!native.available&&!native.supported);
+  if(menu.hidden)return;
+  const select=$('nativeMonitor'), button=$('nativeToggleBtn');
+  const options=native.available?[...native.monitors.map(m=>[m.name,`${m.name} · ${m.width}×${m.height}${m.refresh?` · ${m.refresh} Hz`:''}${m.primary?' · primary':''}`]),['window','A window on this desktop']]:[];
+  const key=JSON.stringify(options);
+  if(select.dataset.options!==key){
+    select.innerHTML=options.map(([value,label])=>`<option value="${escapeHTML(value)}">${escapeHTML(label)}</option>`).join('');
+    select.dataset.options=key;select.dataset.chosen='';
+  }
+  const want=native.where||select.dataset.chosen||native.monitor||native.suggested;
+  if(document.activeElement!==select&&options.some(([value])=>value===want))select.value=want;
+  select.disabled=button.disabled=!native.available;
+  button.setAttribute('aria-pressed',String(!!native.active));
+  const windowed=(native.active?native.where:select.value)==='window';
+  button.textContent=native.active?(windowed?'Close Program window':'Close fullscreen output')
+    :(windowed?'Show Program in a window':'Show Program fullscreen');
+  $('nativeStatus').textContent=!native.available?native.note:native.active
+    ?`${native.where} · ${native.size.join(' × ')} · ${Math.round(native.refresh)} Hz · budget ${native.budget_ms==null?'–':native.budget_ms.toFixed(1)} ms · ${native.missed} missed`
+    :'Drawn straight from the GPU at the display’s refresh. Studio renders at the monitor’s size while it shows.';
+}
 function renderJackAudio(audio){
   if(!audio)return;
   jackState=audio;
@@ -295,12 +322,14 @@ async function pollRemote(){
       $('sceneMeta').textContent=result.output.toUpperCase();
     }
     $('connectionStatus').textContent=result.playing?'Transport running':'Transport paused';
-    $('backendStatus').textContent=result.error||(result.path?`${result.backend} · ${result.fps.toFixed(1)} render fps · ${result.path}`:'Load a patch to begin');
-    $('resolution').textContent=result.size.join(' × ');
+    const native=result.native?.active?` · ${result.native.where==='window'?'native window':'fullscreen '+result.native.where} ${Math.round(result.native.refresh)} Hz`:'';
+    $('backendStatus').textContent=result.error||(result.path?`${result.backend} · ${result.fps.toFixed(1)} render fps${native} · ${result.path}`:'Load a patch to begin');
+    // While Program shows fullscreen, this monitor is a small confidence preview of it.
+    $('resolution').textContent=result.native?.active?`${result.size.join(' × ')} · ${result.native.where==='window'?'in a window':'on '+result.native.where} · preview`:result.size.join(' × ');
     $('cvStatus').textContent=!result.cv?'CV off · configure at launch':result.cv.error?`CV error: ${result.cv.error}`:`CV active · ${result.cv.underflows||0} underflows`;
     $('cvStatus').title=result.cv?JSON.stringify(result.cv,null,2):'';
     $('cvPorts').textContent=(result.cv?.ports||[]).join('\n');
-    if(!outputType){renderPolarity(result.cv?.polarity_routes||[]);renderJackAudio(result.audio);}
+    if(!outputType){renderPolarity(result.cv?.polarity_routes||[]);renderJackAudio(result.audio);renderNative(result.native);}
   }catch(error){
     playing=false;stopVoices();$('backendStatus').textContent=error.message;
     $('connectionStatus').textContent='Studio disconnected';
@@ -564,6 +593,15 @@ if(outputType){
 }else{
   const outputPresence={program:0,aux:0};
   function toggleBlackout(){return transport(()=>({blackout:!blackout}),{score:false});}
+  // Switching on can reload the patch at the monitor's size (shaders compile), so allow it time.
+  async function setNative(enabled){
+    const button=$('nativeToggleBtn');button.disabled=true;
+    try{renderNative(await api('native_output',{enabled,monitor:$('nativeMonitor').value},AbortSignal.timeout(30000)));}
+    catch(error){toast(error.message);}
+    finally{button.disabled=!nativeState?.available;}
+  }
+  $('nativeToggleBtn').onclick=()=>{$('displayMenu').open=false;setNative($('nativeToggleBtn').getAttribute('aria-pressed')!=='true');};
+  $('nativeMonitor').onchange=()=>{$('nativeMonitor').dataset.chosen=$('nativeMonitor').value;if(nativeState?.active)setNative(true);else renderNative(nativeState);};
   listen(m=>{if(m.type==='presence'&&['program','aux'].includes(m.kind))outputPresence[m.kind]=Date.now();});
   function openOutput(kind){
     const u=new URL(location.href);u.search='';u.searchParams.set('output',kind);u.searchParams.set('session',sessionId);
@@ -831,6 +869,7 @@ if(outputType){
       }
     }
     if(e.code==='Space'){e.preventDefault();togglePlay();return;}
+    if(e.shiftKey&&e.key.toLowerCase()==='f'&&nativeState?.available){e.preventDefault();setNative(!nativeState.active);return;}
     if(e.key.toLowerCase()==='f'){e.preventDefault();fullscreen();return;}
     if(e.key.toLowerCase()==='b'){e.preventDefault();toggleBlackout();return;}
     if(!inGrid)return;
@@ -847,7 +886,7 @@ if(outputType){
   });
   renderPatterns();renderHeaders();renderRows();renderInstruments();updateControls();updateInspector();drawVisual($('sceneThumb'),0,'full');
   setInterval(scheduler,25);
-  setInterval(()=>{for(const k of ['program','aux']){const connected=Date.now()-outputPresence[k]<2600;$(k+'Btn').classList.toggle('connected',connected);$(k+'Status').textContent=connected?'Window connected':'Open output';$(k==='aux'?'routeAux':'routeProgram').classList.toggle('mint',connected);}},800);
+  setInterval(()=>{for(const k of ['program','aux']){const fullscreen=k==='program'&&nativeState?.active;const connected=fullscreen||Date.now()-outputPresence[k]<2600;$(k+'Btn').classList.toggle('connected',connected);$(k+'Status').textContent=fullscreen?(nativeState.where==='window'?'In a window':`Fullscreen on ${nativeState.where}`):connected?'Window connected':'Open output';$(k==='aux'?'routeAux':'routeProgram').classList.toggle('mint',connected);}},800);
   function frame(){
     const beat=nowBeat(),step=Math.floor(beat*4),pattern=Math.floor(beat/16),row=step%64;
     if(playing&&follow&&editPattern!==pattern){editPattern=pattern;selectionAnchor=null;renderPatterns();renderRows();updateInspector();}

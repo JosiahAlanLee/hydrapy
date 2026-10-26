@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections import deque
 from contextlib import nullcontext
 import json
 import math
@@ -28,6 +29,16 @@ from .studio_audio import StudioAudio, settings as audio_settings
 
 def digest(text):
     return hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+
+# Commands whose effect is on screen; their latency samples follow them to the frame that shows them.
+VISIBLE = frozenset(('tracker_score', 'tracker_transport', 'controls', 'reset_controls', 'output', 'mouse',
+                     'bridge_params', 'pause'))
+
+
+def percentile(values, q):
+    values = sorted(v for v in values if v is not None)
+    return values[min(len(values) - 1, int(q * len(values)))] if values else None
 
 
 def project_path(root, name):
@@ -88,14 +99,36 @@ class Recorder:
 
 
 class Session:
-    def __init__(self, root, patch=None, backend='auto', size=(640, 360), fps=30., cv=None):
-        self.root, self.backend, self.size, self.fps = Path(root).resolve(), backend, tuple(size), float(fps)
+    def __init__(self, root, patch=None, backend='auto', size=(640, 360), fps=30., cv=None, native=None,
+                 edit_delay_ms=None):
+        """``native``: None renders as always (no window). ``'available'`` renders in a hidden
+        window's context so the tracker's Display menu can show Program fullscreen (Linux, X
+        display, glfw; otherwise the menu says why not). A monitor name or index, or
+        ``'window'``, also shows it there at start; ``size=None`` then renders at its size.
+        ``edit_delay_ms``: how long the tracker editor gathers edits before sending them
+        (default 120, or 0 while the native output is showing)."""
+        self.native_mode, self.native, self.native_note = native, None, None
+        self.native_start = native if native not in (None, 'available') else None
+        self.native_restore_size = None
+        if size is None and self.native_start is None:
+            size = (640, 360)
+        self.root, self.backend, self.size, self.fps = Path(root).resolve(), backend, size and tuple(size), float(fps)
+        self.standard_fps = self.fps
         if not self.root.is_dir() or backend not in ('auto', 'cpu', 'gl'):
             raise ValueError('Choose an existing root and auto/cpu/gl backend')
         if not math.isfinite(self.fps) or not 1 <= self.fps <= 120:
             raise ValueError('Preview fps must be between 1 and 120')
-        if len(self.size) != 2 or any(not isinstance(x, int) or not 16 <= x <= 4096 for x in self.size):
+        if self.size is not None and (len(self.size) != 2 or any(not isinstance(x, int) or not 16 <= x <= 4096
+                                                                 for x in self.size)):
             raise ValueError('Preview dimensions must be 16–4096 pixels')
+        self.edit_delay_override = None if edit_delay_ms is None else float(edit_delay_ms)
+        if self.edit_delay_override is not None and (not math.isfinite(self.edit_delay_override)
+                                                     or not 0 <= self.edit_delay_override <= 2000):
+            raise ValueError('Edit delay must be 0–2000 ms')
+        # Latency of on-screen commands: received (HTTP), applied, rendered, shown (native flip).
+        self.latency, self.latency_pending, self.frame_index = deque(maxlen=2000), [], 0
+        self.native_frames, self.pacer = deque(maxlen=600), None
+        self.native_ready = threading.Event()
         self.commands, self.lock = queue.Queue(), threading.Lock()
         self.running, self.paused, self.armed = True, False, False
         self.renderer, self.path, self.source = None, None, ''
@@ -137,12 +170,26 @@ class Session:
                 self.notice = f'Output settings were not restored: {exc}'
         self.preview_profile, self.gpu_query = False, None
         self.render_metrics, self.preview_error = {}, ''
-        self.preview_dirty = True
+        self.preview_dirty, self.preview_taken = True, 0.
         self.recorder, self.record_path, self.last_frame = None, None, None
         self.jobs, self.job_processes = {}, {}
         self.recent = []
         self.thread = threading.Thread(target=self._run, daemon=True, name='hydrapy-render')
         self.thread.start()
+        if native is not None:
+            # The window and its GL context are made on the render thread, before any patch loads.
+            if not self.native_ready.wait(30):
+                self.native_note = 'The native output window did not open in 30 s.'
+            if self.native_start is not None:
+                if self.native is None:
+                    self.close()
+                    raise RuntimeError(f'Native output: {self.native_note}')
+                try:
+                    # Fill the monitor unless a size was asked for.
+                    self.call('native_output', enabled=True, monitor=self.native_start, match_size=size is None)
+                except Exception:
+                    self.close()
+                    raise
         if patch:
             try:
                 self.call('load', path=patch)
@@ -156,11 +203,20 @@ class Session:
             except Exception as exc:
                 self.notice = f'JACK audio was not restored: {exc}'
 
+    @property
+    def edit_delay_ms(self):
+        """The tracker editor's edit gathering: as asked, else 0 while the native output shows, else 120."""
+        if self.edit_delay_override is not None:
+            return self.edit_delay_override
+        return 0. if self.native is not None and self.native.active else 120.
+
     def call(self, action, **data):
+        received = time.monotonic()
         if not self.thread.is_alive():
             raise RuntimeError('The preview thread has stopped; restart Studio')
+        mark = data.pop('_mark', None)  # a client's label for its latency sample
         result = queue.Queue(1)
-        self.commands.put((action, data, result))
+        self.commands.put((action, data, result, received, mark))
         response = result.get(timeout=90)
         if isinstance(response, Exception):
             raise response
@@ -193,6 +249,8 @@ class Session:
                 self.backend_note = 'This patch contains CPU-only operations.'
             else:
                 # Only context creation failure selects CPU. Shader errors must remain visible.
+                if ctx is None and self.native is not None:
+                    ctx = self.native.ctx  # render into the window's context: no copy between contexts
                 if ctx is None:
                     from .backend_gl import _create_context
                     try:
@@ -319,6 +377,8 @@ class Session:
             except Exception as e:
                 info['midi_error'] = str(e)
             return info
+        if action == 'native_output':
+            return self._native_output(data)
         if not self.renderer:
             raise ValueError('Load a patch first')
         patch = self.renderer.patch
@@ -530,30 +590,52 @@ class Session:
         self.job_processes[job_id] = proc
         return self.jobs[job_id]
 
-    def _read_frame(self):
+    def _read_frame(self, size=None):
+        """The displayed output as RGB; ``size`` scales it on the GPU first (GL renderer)."""
         from .backend_np import to_uint8
         r = self.renderer
+        if size is not None and hasattr(r, 'read_scaled'):
+            return r.read_scaled(size)
         return r.read() if hasattr(r, 'read') else to_uint8(r.displayed(), r.patch.composite_alpha)
+
+    # While Program shows fullscreen, the editor's monitor is a confidence preview: small and at
+    # most this rate, so its readback and JPEG never compete with the frames going to the screen.
+    CONFIDENCE_SIZE, CONFIDENCE_FPS = (480, 270), 20.
+
+    def _confidence_size(self):
+        native = getattr(self, 'native', None)  # previews are also driven from bare sessions in tests
+        if native is None or not native.active:
+            return None
+        w, h = self.size
+        scale = min(self.CONFIDENCE_SIZE[0] / w, self.CONFIDENCE_SIZE[1] / h, 1.)
+        return max(16, round(w * scale)), max(16, round(h * scale))
 
     def _pictures(self, *, force=False, recorded=None, query=None):
         r, now = self.renderer, time.monotonic()
-        main, thumbnail = self.preview.plan(now, changed=not self.paused or self.preview_dirty)
+        confidence = self._confidence_size()
+        changed = not self.paused or self.preview_dirty
+        if confidence and not force and now - getattr(self, 'preview_taken', 0.) < 1 / self.CONFIDENCE_FPS:
+            changed = False  # the editor's request stays pending until the next capture
+        main, thumbnail = self.preview.plan(now, changed=changed)
         chosen = r.patch.display
         frame = recorded[0] if recorded is not None else None
         main_frame = frame
         metrics = dict(self.render_metrics)
         if main or force:
             started = time.monotonic()
+            small = confidence is not None and frame is None
             if frame is None:
-                frame = self._read_frame()
+                frame = self._read_frame(confidence) if confidence else self._read_frame()
             metrics.update(readback_ms=recorded[1] if recorded is not None else (time.monotonic() - started) * 1000,
                            captured=time.monotonic())
             # read() has already completed the preceding GPU commands. Do not
             # query results before readback or add a finish() to the render loop.
             if query is not None:
                 metrics['gpu_ms'] = query.elapsed / 1_000_000
-            self.last_frame = frame
-            main_frame = frame
+            if not small:  # snapshots and Auxiliary reuse full frames only
+                self.last_frame = frame
+                main_frame = frame
+            self.preview_taken = now
             cache = None
             if self.path and self.clock_time > 1:
                 cache = self.root / '.hydrapy' / 'previews' / (digest(str(self.path.relative_to(self.root)))[:16] + '.jpg')
@@ -642,111 +724,310 @@ class Session:
                                       controls=[x.describe() for x in self.renderer.patch.controls.values()] if self.renderer else [],
                                       scenes=[dict(name=name, output=f'o{value[0]}') for name, value in self.renderer.patch.scenes.items()]
                                       if self.renderer else [],
-                                      cv=None if self.cv is None else self.cv.describe(), audio=self.audio.describe())
+                                      cv=None if self.cv is None else self.cv.describe(), audio=self.audio.describe(),
+                                      edit_delay_ms=self.edit_delay_ms, native=self._native_info())
+
+    def _command(self, item):
+        action, data, result, received, mark = item
+        try:
+            value = self._handle(action, data)
+            if action not in ('source', 'check', 'presets', 'devices', 'mouse'):
+                self.error = ''
+            result.put(value)
+        except Exception as exc:
+            self.error = ''.join(traceback.format_exception_only(type(exc), exc)).strip()
+            if action in ('load', 'save', 'restart', 'connections'):
+                self.notice = 'Edit rejected. Previous patch retained.'
+            result.put(ValueError(self.error))
+        if action in VISIBLE:
+            self.latency_pending.append(dict(action=action, mark=mark, received=received, applied=time.monotonic()))
+
+    def _step(self, now):
+        """Advance the clock and render one frame. Returns (GPU query or None, rendered)."""
+        query = None
+        if self.paused:
+            return query, False
+        self.clock_time += now - self.last_wall
+        try:
+            transport = self.renderer.patch.transport if self.armed else None
+            if transport:
+                self.renderer.patch.bpm = transport.bpm
+                self.clock_time = transport.now()
+            if self.preview_profile and hasattr(self.renderer, 'ctx'):
+                if self.gpu_query is None:
+                    try:
+                        self.gpu_query = self.renderer.ctx.query(time=True)
+                    except Exception:
+                        self.preview_profile = False
+                query = self.gpu_query
+            self._publish_playhead(now, playing=True)
+            render_started = time.monotonic()
+            self.tracker.apply(self.renderer.patch, self.clock_time)
+            with query if query is not None else nullcontext():
+                self.renderer.step(self.clock_time)
+            self.render_metrics = dict(render_cpu_ms=(time.monotonic() - render_started) * 1000,
+                                       frame_started=render_started, gpu_ms=None)
+            return query, True
+        except Exception as exc:
+            self.error, self.paused = f'Render paused: {type(exc).__name__}: {exc}', True
+            return query, False
+
+    def _readbacks(self, query):
+        """Recording and the browser's previews: everything that reads a frame back."""
+        recorded = None
+        if self.recorder:
+            try:
+                # Recording uses every synthesis frame, independently of
+                # the browser's lower-rate JPEG thumbnails.
+                read_started = time.monotonic()
+                self.last_frame = self._read_frame()
+                recorded = (self.last_frame, (time.monotonic() - read_started) * 1000)
+                self.recorder.push(self.last_frame)
+            except Exception as exc:
+                self.error = str(exc)
+                recorder, self.recorder = self.recorder, None
+                try:
+                    recorder.close()
+                except Exception:
+                    pass
+        try:
+            self._pictures(recorded=recorded, query=query)
+            self.preview_error = ''
+        except Exception as exc:
+            # A transport failure must not pause synthesis or live hooks.
+            self.preview_error = f'{type(exc).__name__}: {exc}'
+
+    def _housekeeping(self, now):
+        """Status, measured fps, window events and the patch file watch, once per loop."""
+        self.last_wall = now
+        if self.native is not None and self.native.poll() and self.native.active:
+            self._native_output(dict(enabled=False))  # its window was closed on the desktop
+        self._publish_playhead(now)
+        if now - self._sample_start >= .5:
+            self.actual_fps = self._frames / (now - self._sample_start)
+            self._sample_start, self._frames = now, 0
+            self._publish()
+        if self.path and now - self.last_watch > .5 and not self.recorder:
+            self.last_watch = now
+            try:
+                stamp = (self.path, self.path.stat().st_mtime_ns)
+                if stamp != self.stamp:
+                    self._load(str(self.path.relative_to(self.root)))
+            except Exception as exc:
+                self.error, self.notice = str(exc), 'Edit rejected. Previous patch retained.'
+
+    def _resize(self, size):
+        """Render at another size: the patch reloads in place (clock and score carry on; feedback restarts)."""
+        if self.recorder:
+            raise ValueError('Stop recording before changing the output size.')
+        old, self.size = self.size, tuple(size)
+        if self.path:
+            try:
+                self._load(str(self.path.relative_to(self.root)))
+            except Exception:
+                self.size = old
+                raise
+
+    def _save_output_setting(self, key, value):
+        prepared = dict(self.output_settings, **{key: value})
+        try:
+            atomic_text(self.root / '.hydrapy' / 'outputs.json', json.dumps(prepared, indent=2))
+        except OSError:
+            return  # a read-only workspace still works; the choice is just not remembered
+        self.output_settings = prepared
+
+    def _native_output(self, data):
+        """Show Program fullscreen on a monitor (or in a window), or hide it again."""
+        from .studio_native import Pacer
+        if self.native is None:
+            raise ValueError(self.native_note or 'Fullscreen output is available when Studio is started with '
+                                                 '`hydrapy studio` on Linux.')
+        enabled, match = data.get('enabled', not self.native.active), data.get('match_size', True)
+        if type(enabled) is not bool or type(match) is not bool:
+            raise ValueError('enabled and match_size must be true or false')
+        if enabled:
+            saved = self.output_settings.get('native')
+            monitor = data.get('monitor') or (saved.get('monitor') if isinstance(saved, dict) else None) \
+                or self.native.default_monitor()
+            if not isinstance(monitor, str):
+                raise ValueError('monitor must be a monitor name, an index or "window"')
+            target = self.native.target_size(monitor)  # an unknown monitor fails here, before anything changes
+            if match and self.size != target:
+                if not self.native.active:
+                    self.native_restore_size = self.size
+                self._resize(target)
+            self.native.show(monitor)
+            self.pacer = Pacer()
+            with self.lock:
+                self.native_frames.clear()
+            self.fps = min(self.native.refresh, 120.)
+            self._start_at = time.monotonic()
+            self._save_output_setting('native', dict(monitor=monitor))
+            self.notice = f'Program fullscreen on {monitor}.' if monitor != 'window' else 'Program in a window.'
+        elif self.native.active:
+            self.native.hide()
+            self.fps = self.standard_fps
+            if self.native_restore_size is not None:
+                size, self.native_restore_size = self.native_restore_size, None
+                self._resize(size)
+            self.notice = 'Fullscreen output closed.'
+        return self._native_info()
+
+    def _settle_latency(self, rendered, submitted=None, shown=None):
+        if self.latency_pending:
+            with self.lock:
+                for sample in self.latency_pending:
+                    sample.update(rendered=rendered, submitted=submitted, shown=shown, frame=self.frame_index)
+                    self.latency.append(sample)
+            self.latency_pending = []
+        self.frame_index += 1
+
+    def _native_info(self):
+        """The fullscreen output's state for the editor and latency reports (render thread only)."""
+        if self.native is None:
+            return None if self.native_mode is None else dict(available=False, active=False, note=self.native_note,
+                                                              supported=sys.platform.startswith('linux'))
+        saved = self.output_settings.get('native')
+        return dict(self.native.describe(), note=None, monitor=saved.get('monitor') if isinstance(saved, dict) else None,
+                    budget_ms=self.pacer.budget(self.native.period) * 1000 if self.pacer else None)
+
+    def latency_report(self, last=200):
+        """Recent on-screen commands with each stage in milliseconds, and a summary per action."""
+        def ms(a, b):
+            return None if a is None or b is None else (b - a) * 1000
+        with self.lock:
+            samples = list(self.latency)[-last:]
+            native = self.tracker_state.get('native')
+            frames = list(self.native_frames)[-last:]
+        rows = []
+        for s in samples:
+            rows.append(dict(action=s['action'], mark=s['mark'], frame=s['frame'],
+                             queue_ms=ms(s['received'], s['applied']),
+                             to_render_ms=ms(s['applied'], s['rendered']),
+                             to_flip_ms=ms(s['rendered'] or s['applied'], s['shown']),
+                             total_ms=ms(s['received'], s['shown'] or s['rendered'])))
+        summary = {}
+        for action in sorted({r['action'] for r in rows}):
+            totals = [r['total_ms'] for r in rows if r['action'] == action]
+            summary[action] = dict(n=len(totals), p50=percentile(totals, .5), p95=percentile(totals, .95),
+                                   max=max((t for t in totals if t is not None), default=None))
+        frame_rows = [dict(late_start_ms=ms(f['planned'], f['began']), work_ms=ms(min(f['planned'], f['began']), f['ready']),
+                           wait_ms=ms(f['ready'], f['flipped']), missed=f['missed'], commands=f['commands'])
+                      for f in frames]
+        showing = self.native is not None and self.native.active
+        return dict(native=native, measured_to='flip' if showing else 'render',
+                    edit_delay_ms=self.edit_delay_ms, summary=summary, samples=rows, frames=frame_rows)
+
+    def _open_native(self):
+        """The hidden window whose context Studio renders in, if this machine can show it."""
+        from .studio_native import NativeOutput, unavailable
+        try:
+            self.native_note = unavailable()
+            if self.native_note is None:
+                self.native = NativeOutput()
+        except Exception as exc:
+            self.native_note = f'Fullscreen output unavailable: {exc}'
+        finally:
+            self.native_ready.set()
 
     def _run(self):
-        sample_start, frames = time.monotonic(), 0
+        if self.native_mode is not None:
+            self._open_native()
+        self._sample_start, self._frames, self._start_at = time.monotonic(), 0, time.monotonic()
         try:
             while self.running:
-                started = time.monotonic()
-                try:
-                    action, data, result = self.commands.get(timeout=.001)
-                except queue.Empty:
-                    pass
+                if self.native is not None and self.native.active:
+                    self._native_frame()
                 else:
-                    try:
-                        value = self._handle(action, data)
-                        if action not in ('source', 'check', 'presets', 'devices', 'mouse'):
-                            self.error = ''
-                        result.put(value)
-                    except Exception as exc:
-                        self.error = ''.join(traceback.format_exception_only(type(exc), exc)).strip()
-                        if action in ('load', 'save', 'restart', 'connections'):
-                            self.notice = 'Edit rejected. Previous patch retained.'
-                        result.put(ValueError(self.error))
-                    self._publish()
-                if not self.running:
-                    break
-                now = time.monotonic()
-                if self.renderer:
-                    query = None
-                    if not self.paused:
-                        self.clock_time += now - self.last_wall
-                        try:
-                            transport = self.renderer.patch.transport if self.armed else None
-                            if transport:
-                                self.renderer.patch.bpm = transport.bpm
-                                self.clock_time = transport.now()
-                            if self.preview_profile and hasattr(self.renderer, 'ctx'):
-                                if self.gpu_query is None:
-                                    try:
-                                        self.gpu_query = self.renderer.ctx.query(time=True)
-                                    except Exception:
-                                        self.preview_profile = False
-                                query = self.gpu_query
-                            self._publish_playhead(now, playing=True)
-                            render_started = time.monotonic()
-                            self.tracker.apply(self.renderer.patch, self.clock_time)
-                            with query if query is not None else nullcontext():
-                                self.renderer.step(self.clock_time)
-                            self.render_metrics = dict(render_cpu_ms=(time.monotonic() - render_started) * 1000,
-                                                       frame_started=render_started, gpu_ms=None)
-                            frames += 1
-                        except Exception as exc:
-                            self.error, self.paused = f'Render paused: {type(exc).__name__}: {exc}', True
-                    recorded = None
-                    if self.recorder:
-                        try:
-                            # Recording uses every synthesis frame, independently of
-                            # the browser's lower-rate JPEG thumbnails.
-                            read_started = time.monotonic()
-                            self.last_frame = self._read_frame()
-                            recorded = (self.last_frame, (time.monotonic() - read_started) * 1000)
-                            self.recorder.push(self.last_frame)
-                        except Exception as exc:
-                            self.error = str(exc)
-                            recorder, self.recorder = self.recorder, None
-                            try:
-                                recorder.close()
-                            except Exception:
-                                pass
-                    try:
-                        self._pictures(recorded=recorded, query=query)
-                        self.preview_error = ''
-                    except Exception as exc:
-                        # A transport failure must not pause synthesis or live hooks.
-                        self.preview_error = f'{type(exc).__name__}: {exc}'
-                self.last_wall = now
-                self._publish_playhead(now)
-                if now - sample_start >= .5:
-                    self.actual_fps = frames / (now - sample_start)
-                    sample_start, frames = now, 0
-                    self._publish()
-                if self.path and now - self.last_watch > .5 and not self.recorder:
-                    self.last_watch = now
-                    try:
-                        stamp = (self.path, self.path.stat().st_mtime_ns)
-                        if stamp != self.stamp:
-                            self._load(str(self.path.relative_to(self.root)))
-                    except Exception as exc:
-                        self.error, self.notice = str(exc), 'Edit rejected. Previous patch retained.'
-                time.sleep(max(.001, 1 / self.fps - (time.monotonic() - started)))
+                    self._standard_frame()
         finally:
-            self.running = False
-            self._publish_playhead(time.monotonic(), playing=False)
-            self.audio.close()
-            self.gpu_query = None  # dispose timer on the GL context's thread
-            self.preview.close()
-            self.aux_preview.close()
-            if self.recorder:
-                try:
-                    self.recorder.close()
-                except Exception as exc:
-                    self.error = str(exc)
-            from .live import close_resources
-            close_resources()
-            if hasattr(self.renderer, 'release'):
-                self.renderer.release()
+            self._shutdown()
+
+    def _standard_frame(self):
+        """One command at most, one frame, then sleep to the preview rate."""
+        started = time.monotonic()
+        try:
+            item = self.commands.get(timeout=.001)
+        except queue.Empty:
+            pass
+        else:
+            self._command(item)
+            self._publish()
+        if not self.running:
+            return
+        now = time.monotonic()
+        if self.renderer:
+            query, rendered = self._step(now)
+            self._frames += rendered
+            self._settle_latency(time.monotonic() if rendered else None)
+            self._readbacks(query)
+        self._housekeeping(now)
+        time.sleep(max(.001, 1 / self.fps - (time.monotonic() - started)))
+
+    def _native_frame(self):
+        """One frame for the native output, late-latched to its refresh.
+
+        Commands are applied the moment they arrive, until the frame starts; the frame
+        renders, is drawn to the window and flips at the next refresh. Recording and the
+        browser's previews read back after the flip, off the path to the screen.
+        """
+        handled = 0
+        while self.running:
+            remaining = self._start_at - time.monotonic()
+            try:
+                item = self.commands.get(timeout=remaining) if remaining > 0 else self.commands.get_nowait()
+            except queue.Empty:
+                break
+            self._command(item)
+            handled += 1
+        if not self.running or not self.native.active:  # a command closed it
+            if handled:
+                self._publish()
+            return
+        now, start_at = time.monotonic(), self._start_at
+        query, rendered = (None, False)
+        frame = None
+        if self.renderer:
+            query, rendered = self._step(now)
+            self._frames += rendered
+            if not hasattr(self.renderer, 'ctx'):
+                frame = self._read_frame()
+        rendered_at = time.monotonic() if rendered else None
+        ready, flipped, missed = self.native.present(
+            self.renderer if self.renderer and frame is None else None, frame, blackout=self.tracker_blackout)
+        # Work counts from the planned start: a command handled at the last moment is part of it.
+        self.pacer.record(ready - min(start_at, now), missed)
+        with self.lock:
+            self.native_frames.append(dict(planned=start_at, began=now, ready=ready, flipped=flipped,
+                                           missed=missed, commands=handled))
+        self._settle_latency(rendered_at, ready, flipped)
+        # Everything else waits until the frame is on screen.
+        if handled:
+            self._publish()
+        if self.renderer:
+            self._readbacks(query)
+        self._housekeeping(now)
+        if self.native.active:
+            self._start_at = self.pacer.start_at(flipped, self.native.period)
+
+    def _shutdown(self):
+        self.running = False
+        self._publish_playhead(time.monotonic(), playing=False)
+        self.audio.close()
+        self.gpu_query = None  # dispose timer on the GL context's thread
+        self.preview.close()
+        self.aux_preview.close()
+        if self.recorder:
+            try:
+                self.recorder.close()
+            except Exception as exc:
+                self.error = str(exc)
+        from .live import close_resources
+        close_resources()
+        if hasattr(self.renderer, 'release'):
+            self.renderer.release()
+        if self.native is not None:
+            self.native.close()
 
 
 def make_server(session, port=8765):
@@ -831,6 +1112,8 @@ def make_server(session, port=8765):
                     return self._send(200, state)
                 if parsed.path == '/api/catalog':
                     return self._send(200, {'patches': catalog(session.root)})
+                if parsed.path == '/api/latency':
+                    return self._send(200, session.latency_report(int(args.get('last', ['200'])[0])))
                 if parsed.path == '/api/frame':
                     output = args.get('output', ['o0'])[0]
                     if output not in ('o0', 'o1', 'o2', 'o3'):
@@ -915,12 +1198,13 @@ def withdraw(path, token):
         pass
 
 
-def serve(root='.', patch=None, backend='auto', size=(640, 360), fps=30, port=8765, open_browser=True, tracker=False, cv=None):
+def serve(root='.', patch=None, backend='auto', size=(640, 360), fps=30, port=8765, open_browser=True, tracker=False, cv=None,
+          native=None, edit_delay_ms=None):
     root = Path(root).resolve()
     # Match CLI patch execution: relative asset paths belong to the project.
     os.chdir(root)
     try:
-        session = Session(root, patch, backend, size, fps, cv=cv)
+        session = Session(root, patch, backend, size, fps, cv=cv, native=native, edit_delay_ms=edit_delay_ms)
     except BaseException:
         if cv is not None:
             cv.close()

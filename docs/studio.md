@@ -20,6 +20,14 @@ preview is 640×360 at a target 30 fps. Use `--size 960x540 --fps 24` to change 
 `--port 0` chooses a free port; `--no-browser` just prints the local URL. Keep the full
 URL, including its session fragment. The server binds only to 127.0.0.1.
 
+On Linux with an X display, Studio renders in a hidden window's GL context, so the
+Gorgon tracker's Display menu can show Program fullscreen on a monitor straight
+from the GPU, paced by its refresh ([fullscreen output](gorgon-tracker.md#control-surface-and-displays)).
+`--native-output MONITOR` (a name such as `DP-5`, an index, or `window`) starts with it
+showing and renders at that monitor's size unless `--size` is given;
+`--no-native-output` renders without a window. `--edit-delay-ms` sets how long the
+tracker gathers edits before sending them (120 ms, or 0 while the fullscreen output shows).
+
 The selected preview requests the next available JPEG as soon as the previous image
 is decoded and scheduled for display, independently of the 250 ms controls/status
 poll. At most one request/decode is in flight. Slow clients receive the latest frame;

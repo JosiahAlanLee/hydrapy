@@ -145,11 +145,15 @@ place and lets Studio or incoming Rack CV control the parameters again.
 
 ## 6. Use separate output displays
 
-1. Open **Program**. Move that window to display 2; press **F** there.
+1. Open **Program**. Move that window to display 2; press **F** there. On Linux,
+   **Display › Show Program fullscreen** (**Shift+F**) does this in one step with
+   Studio's own window, drawn straight from the GPU; the controller's monitor then
+   becomes a small preview and keyboard focus stays in the controller. Close it
+   from the same menu.
 2. Open **Auxiliary** on display 3 if available. Select separate `o0`–`o3` routes
    in **Output routing**. Auxiliary does not change Studio's program output.
-3. Show **BLACK OUT** and restore. It affects browser monitors, not the rendering
-   engine, recordings, snapshots, or an external video device.
+3. Show **BLACK OUT** and restore. It affects browser monitors and the fullscreen
+   output, not the rendering engine, recordings, snapshots, or an external video device.
 4. After saving, close the controller briefly. The output windows and Studio's
    automation keep running. The controller's browser synth stops with its window.
 5. Reopen the controller using Studio's URL. Do not promise identical physical
