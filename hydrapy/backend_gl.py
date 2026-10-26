@@ -285,6 +285,9 @@ class GLRenderer:
         if getattr(self, "_small", None) is not None:
             self._small["fbo"].release(); self._small["tex"].release()
             self._small = None
+        if getattr(self, "_scale", None) is not None:
+            self._scale_vao.release(); self._scale.release()
+            self._scale = None
         for fb in self._reduce_targets.values():
             fb["fbo"].release(); fb["tex"].release()
         self._reduce_targets.clear()
@@ -659,6 +662,31 @@ void main() {
         self._present_frame()
         data = self._present["fbo"].read(components=3, dtype="f1")
         return np.frombuffer(data, dtype=np.uint8).reshape(self.size[1], self.size[0], 3)[::-1].copy()
+
+    def carry_outputs(self, old: "GLRenderer"):
+        """Take ``old``'s output histories (the same patch, reloaded in this context).
+
+        Same-size frames are copied exactly; at another size (Studio reloads at a monitor's
+        size when its fullscreen output opens) they are scaled, RGBA intact, so feedback
+        carries on instead of starting from black.
+        """
+        for name, output in old.outs.items():
+            for dst, src in zip(self.outs.get(name, {}).get("ring", []), output["ring"]):
+                if dst["tex"].size == src["tex"].size:
+                    self.ctx.copy_framebuffer(dst["fbo"], src["fbo"])
+                    continue
+                if getattr(self, "_scale", None) is None:
+                    self._scale = self.ctx.program(
+                        vertex_shader=VERTEX_DESKTOP,
+                        fragment_shader="#version 330 core\nuniform sampler2D tex; uniform vec2 resolution; out vec4 f;\n"
+                                        "void main(){ f = texture(tex, gl_FragCoord.xy / resolution); }")
+                    self._scale_vao = self.ctx.vertex_array(self._scale, [(self.vbo, "2f", "position")])
+                dst["fbo"].use()
+                self.ctx.viewport = (0, 0, *dst["tex"].size)
+                src["tex"].use(location=0)
+                self._set(self._scale, "tex", 0)
+                self._set(self._scale, "resolution", tuple(map(float, dst["tex"].size)))
+                self._scale_vao.render(self.gl.TRIANGLES)
 
     def read_scaled(self, size) -> np.ndarray:
         """``read()`` at another size, scaled on the GPU first: a small preview costs a small readback."""

@@ -306,3 +306,38 @@ def test_editor_preview_stays_small_while_recording_with_the_output_showing(reco
     assert s._confidence_size() in sizes  # a scaled read for the editor, not the recording's full frame
     assert None in sizes                  # the recording still reads full frames
     s.call('record')
+
+
+@pytest.mark.parametrize('backend', ['cpu', 'gl'])
+def test_feedback_carries_on_when_the_output_changes_the_render_size(tmp_path, backend):
+    """Opening the fullscreen output reloads the patch at the monitor's size; its feedback history
+    is scaled across instead of starting again from black."""
+    import numpy as np
+    from hydrapy.studio import Session
+    (tmp_path / 'p.py').write_text('from hydrapy import *\nsrc(o0).blend(solid(1, .5, 0), .2).out()\n')
+    try:
+        s = Session(tmp_path, 'p.py', backend=backend, size=(64, 36))
+    except Exception as exc:
+        pytest.skip(f'no {backend} renderer here: {exc}')
+    try:
+        if backend == 'gl' and not hasattr(s.renderer, 'ctx'):
+            pytest.skip('no GL context here')
+        s.call('tracker_transport', enabled=True, playing=True, beat=0)
+        time.sleep(.5)                                  # the feedback converges towards the solid colour
+        s.call('pause', paused=True)
+        handle = s._handle
+
+        def resize(action, data):
+            if action == 'resize_for_test':
+                s._resize((96, 54))
+                return {}
+            return handle(action, data)
+        s._handle = resize
+        s.call('resize_for_test')
+        frame = s.call('snapshot') and s.last_frame     # the first frame at the new size, still paused
+        assert frame.shape == (54, 96, 3)
+        assert frame[..., 0].mean() > 100               # not black: the history came across, scaled
+        if backend == 'cpu':
+            assert {b.shape[:2] for b in s.renderer.env.buffers.values()} == {(54, 96)}
+    finally:
+        s.close()

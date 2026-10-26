@@ -36,6 +36,18 @@ VISIBLE = frozenset(('tracker_score', 'tracker_transport', 'controls', 'reset_co
                      'bridge_params', 'pause'))
 
 
+def rescaled(frame, ratio):
+    """A CPU renderer's frame (h, w, channels) scaled by ``ratio`` (x, y), nearest neighbour."""
+    if ratio == (1., 1.):
+        return frame
+    import numpy as np
+    h, w = frame.shape[:2]
+    nh, nw = max(1, round(h * ratio[1])), max(1, round(w * ratio[0]))
+    ys = np.minimum(((np.arange(nh) + .5) * h / nh).astype(int), h - 1)
+    xs = np.minimum(((np.arange(nw) + .5) * w / nw).astype(int), w - 1)
+    return frame[ys][:, xs]
+
+
 def percentile(values, q):
     values = sorted(v for v in values if v is not None)
     return values[min(len(values) - 1, int(q * len(values)))] if values else None
@@ -314,14 +326,13 @@ class Session:
                 if hasattr(new, '_compile'):
                     new._compile()
                 if old and same:
-                    if hasattr(old, 'outs') and hasattr(new, 'outs'):
-                        for name, output in old.outs.items():
-                            for dst, src in zip(new.outs[name]['ring'], output['ring']):
-                                if dst['tex'].size == src['tex'].size:
-                                    new.ctx.copy_framebuffer(dst['fbo'], src['fbo'])
+                    # Feedback carries on, scaled when the size changed (the fullscreen output opening or closing).
+                    if hasattr(old, 'outs') and hasattr(new, 'carry_outputs'):
+                        new.carry_outputs(old)
                     elif hasattr(old, 'env') and hasattr(new, 'env'):
-                        new.env.buffers = dict(old.env.buffers)
-                        new.env.rings = {k: list(v) for k, v in old.env.rings.items()}
+                        ratio = (new.size[0] / old.size[0], new.size[1] / old.size[1])
+                        new.env.buffers = {k: rescaled(v, ratio) for k, v in old.env.buffers.items()}
+                        new.env.rings = {k: [rescaled(f, ratio) for f in v] for k, v in old.env.rings.items()}
                     new.clock.calls, new.clock.updates = old.clock.calls, old.clock.updates
                     new.clock.last_time = old.clock.last_time
                     new.frame = old.frame
