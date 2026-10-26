@@ -77,10 +77,22 @@ class Recorder:
         except Exception as e:
             self.error = str(e)
 
-    def push(self, frame):
+    def push(self, frame, at=None):
+        """Queue ``frame`` for every recording slot up to ``at`` (default: now).
+
+        Slots are aligned to the first frame, whose time is the middle of slot 0. The native
+        output delivers frames at exactly the recording rate (its refresh), timed by their
+        flip; with slots counted from the moment Record was pressed, a take whose frames
+        happened to fall within their jitter of a slot edge would drop one frame and repeat
+        the next, over and over. Frames from the sleep-paced loop drift through slot edges
+        anyway (it runs a little slower than its rate), and get the same repeats either way.
+        """
         if self.error:
             raise RuntimeError(self.error)
-        target = int((time.monotonic() - self.start) * self.fps) + 1
+        at = time.monotonic() if at is None else at
+        if self.frames == 0:
+            self.start = at - .5 / self.fps
+        target = int((at - self.start) * self.fps) + 1
         for _ in range(target - self.frames):
             try:
                 self.q.put_nowait(frame)
@@ -621,15 +633,18 @@ class Session:
             changed = False  # the editor's request stays pending until the next capture
         main, thumbnail = self.preview.plan(now, changed=changed)
         chosen = r.patch.display
-        frame = recorded[0] if recorded is not None else None
-        main_frame = frame
+        main_frame = recorded[0] if recorded is not None else None
+        # A recording's full frame serves the editor's monitor, except while it is a confidence
+        # preview: a small GPU-scaled read then costs far less than a full-size JPEG.
+        frame = None if confidence else main_frame
         metrics = dict(self.render_metrics)
         if main or force:
             started = time.monotonic()
             small = confidence is not None and frame is None
             if frame is None:
                 frame = self._read_frame(confidence) if confidence else self._read_frame()
-            metrics.update(readback_ms=recorded[1] if recorded is not None else (time.monotonic() - started) * 1000,
+            reused = recorded is not None and not small
+            metrics.update(readback_ms=recorded[1] if reused else (time.monotonic() - started) * 1000,
                            captured=time.monotonic())
             # read() has already completed the preceding GPU commands. Do not
             # query results before readback or add a finish() to the render loop.
@@ -775,8 +790,11 @@ class Session:
             self.error, self.paused = f'Render paused: {type(exc).__name__}: {exc}', True
             return query, False
 
-    def _readbacks(self, query):
-        """Recording and the browser's previews: everything that reads a frame back."""
+    def _readbacks(self, query, shown=None):
+        """Recording and the browser's previews: everything that reads a frame back.
+
+        ``shown``: when the frame reached the screen (the native output's flip), which times
+        it in a recording better than when its readback happened to finish."""
         recorded, recording_failed = None, False
         if self.recorder:
             try:
@@ -785,7 +803,7 @@ class Session:
                 read_started = time.monotonic()
                 self.last_frame = self._read_frame()
                 recorded = (self.last_frame, (time.monotonic() - read_started) * 1000)
-                self.recorder.push(self.last_frame)
+                self.recorder.push(self.last_frame, shown)
             except Exception as exc:
                 self.error = str(exc)
                 recording_failed = True
@@ -1028,7 +1046,7 @@ class Session:
         if handled:
             self._publish()
         if self.renderer:
-            self._readbacks(query)
+            self._readbacks(query, shown=flipped)
         self._housekeeping(now)
         if self.native.active:
             self._start_at = self.pacer.start_at(flipped, self.native.period)
