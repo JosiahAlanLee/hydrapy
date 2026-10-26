@@ -526,8 +526,11 @@ class Session:
         elif action == 'record':
             if self.recorder:
                 recorder, self.recorder = self.recorder, None
-                recorder.close()
-                self.notice = 'Video recording saved.'
+                try:
+                    recorder.close()
+                    self.notice = 'Video recording saved.'
+                finally:
+                    self._restore_native_size()
                 return dict(file=str(recorder.path.relative_to(self.root)))
             self.record_path = self._new_output('mp4')
             self.recorder = Recorder(self.record_path, self.fps)
@@ -774,7 +777,7 @@ class Session:
 
     def _readbacks(self, query):
         """Recording and the browser's previews: everything that reads a frame back."""
-        recorded = None
+        recorded, recording_failed = None, False
         if self.recorder:
             try:
                 # Recording uses every synthesis frame, independently of
@@ -785,6 +788,7 @@ class Session:
                 self.recorder.push(self.last_frame)
             except Exception as exc:
                 self.error = str(exc)
+                recording_failed = True
                 recorder, self.recorder = self.recorder, None
                 try:
                     recorder.close()
@@ -796,6 +800,8 @@ class Session:
         except Exception as exc:
             # A transport failure must not pause synthesis or live hooks.
             self.preview_error = f'{type(exc).__name__}: {exc}'
+        if recording_failed:
+            self._restore_native_size()
 
     def _housekeeping(self, now):
         """Status, measured fps, window events and the patch file watch, once per loop."""
@@ -828,6 +834,23 @@ class Session:
                 self.size = old
                 raise
 
+    def _restore_native_size(self):
+        """Restore after the output closes, once recording no longer needs fixed-size frames."""
+        if self.native_restore_size is None or self.recorder or (self.native is not None and self.native.active):
+            return
+        error, notice = self.error, self.notice
+        try:
+            if self.size != self.native_restore_size:
+                self._resize(self.native_restore_size)
+        except Exception as exc:
+            # Window-close events run outside the command exception guard. A bad patch on disk
+            # must retain the working renderer and original size to restore, rather than end the set.
+            self.notice = f'Previous render size was not restored: {exc}'
+        else:
+            self.native_restore_size = None
+            self.notice = notice
+        self.error = error  # reloading must not erase a recording failure
+
     def _save_output_setting(self, key, value):
         prepared = dict(self.output_settings, **{key: value})
         try:
@@ -853,9 +876,11 @@ class Session:
                 raise ValueError('monitor must be a monitor name, an index or "window"')
             target = self.native.target_size(monitor)  # an unknown monitor fails here, before anything changes
             if match and self.size != target:
-                if not self.native.active:
-                    self.native_restore_size = self.size
+                previous_size = self.size
                 self._resize(target)
+                # Reopening while a recording keeps its larger size must keep the original target.
+                if self.native_restore_size is None:
+                    self.native_restore_size = previous_size
             self.native.show(monitor)
             self.pacer = Pacer()
             with self.lock:
@@ -867,10 +892,8 @@ class Session:
         elif self.native.active:
             self.native.hide()
             self.fps = self.standard_fps
-            if self.native_restore_size is not None:
-                size, self.native_restore_size = self.native_restore_size, None
-                self._resize(size)
-            self.notice = 'Fullscreen output closed.'
+            self.notice = 'Fullscreen output closed.' + (' Recording continues.' if self.recorder else '')
+            self._restore_native_size()
         return self._native_info()
 
     def _settle_latency(self, rendered, submitted=None, shown=None):
