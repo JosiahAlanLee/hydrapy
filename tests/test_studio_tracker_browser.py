@@ -567,3 +567,25 @@ def test_page_scoped_selection_and_undo_never_clear_hidden_lanes(workspace):
     page.locator('[data-row="0"][data-col="3"]').click()
     page.keyboard.press('Shift+ArrowRight')
     assert page.evaluate('document.activeElement.dataset.col') == '3'
+
+
+def test_display_menu_hidden_without_native_output_and_explains_without_a_display(workspace, tmp_path, monkeypatch):
+    session, page, context, root = workspace
+    assert page.locator('#displayMenu').is_hidden()  # this Studio renders without a window
+    monkeypatch.delenv('DISPLAY', raising=False)
+    other = tmp_path / 'native'
+    other.mkdir()
+    (other / 'p.py').write_text((root / 'p.py').read_text())
+    native = Session(other, 'p.py', backend='cpu', size=(64, 36), fps=30, native='available')
+    server, token = make_server(native, 0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        tab = context.new_page()
+        tab.goto(f'http://127.0.0.1:{server.server_port}/tracker/#{token}')
+        tab.wait_for_function("!document.getElementById('displayMenu').hidden")
+        tab.click('#displayMenu summary')
+        assert 'display' in tab.text_content('#nativeStatus').lower()
+        assert tab.is_disabled('#nativeToggleBtn') and tab.is_disabled('#nativeMonitor')
+        tab.close()
+    finally:
+        server.shutdown(); server.server_close(); native.close()

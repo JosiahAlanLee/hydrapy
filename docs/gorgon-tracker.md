@@ -32,11 +32,25 @@ Studio's existing execution and hardware staging rules.
   the grid; Tab in a form keeps normal field navigation. Page choice is remembered
   in that browser tab and does not change the saved score or CV/Rack output.
 - **Space** starts automation or pauses; **F** enters fullscreen; **B** blacks out
-  Gorgon's browser monitors. Blackout does not alter rendering, recording,
-  snapshots, exports, or an external video device.
+  Gorgon's browser monitors and the fullscreen output. Blackout does not alter
+  rendering, recording, snapshots, exports, or an external video device.
 - Open **Program** and **Auxiliary**, move each window to its monitor, then press
   **F**. Routing selects `o0`–`o3` independently. Program also selects Studio's
   displayed/recorded output; Auxiliary never changes that selection.
+- On Linux, **Display › Show Program fullscreen** (**Shift+F**) shows Program on a
+  chosen monitor in Studio's own window, drawn from the texture it was rendered
+  into at the display's refresh: no readback, JPEG or browser in between. Edits
+  are sent at once and applied as they arrive, so an edit or cue is on screen at
+  the next refresh (on the workstation's 60 Hz screen, about 15 ms typical and
+  22 ms at most from the moment Studio receives it). While it shows, Studio renders
+  at the monitor's size (the patch reloads in place; feedback restarts; the old
+  size returns when it closes) and the editor's Program monitor becomes a 480×270
+  preview at up to 20 fps, so it never competes with the screen. Keyboard focus
+  stays in the editor; work on the Visual page and watch the result on the other
+  monitor. The menu remembers the monitor (default: one that isn't the primary).
+  It is hidden on other systems and explains itself when Studio has no X display
+  or `glfw` (`pip install glfw`). `hydrapy studio … --native-output DP-5` starts
+  with it showing; `--no-native-output` renders without a window, as before.
 - Four patterns each contain 64 sixteenth-note rows. Select audio cells and use
   the Note / Velocity editor directly below the grid; Enter toggles browser synth
   hits and retains keyboard focus. Piano keys adds QWERTY note entry, octave and
@@ -296,6 +310,14 @@ display-scheduling durations. Program includes optional GPU timing when enabled
 in Studio's preview details. Frame-age estimates exclude first-byte transit;
 display scheduling measures the handoff to the canvas animation loop, not physical
 scanout or audio latency. The buses have independent sequence cursors.
+
+`GET /api/latency` (with the session token) reports every on-screen command —
+score edits, transport and blackout cues, control changes — with when Studio
+received it, applied it, rendered the frame containing it and, with the fullscreen
+output, when that frame flipped. With the fullscreen output it also returns the
+last frames' pacing: how late each started, its work from the planned start to the
+GPU finishing, the wait for the flip, and skipped refreshes. Neither measurement
+includes the monitor's own processing, which needs a light sensor on the screen.
 
 ## Reproducible checks
 

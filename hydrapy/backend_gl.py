@@ -282,6 +282,9 @@ class GLRenderer:
         for fb in getattr(self, "tmps", {}).values():
             fb["fbo"].release(); fb["tex"].release()
         self._present["fbo"].release(); self._present["tex"].release()
+        if getattr(self, "_small", None) is not None:
+            self._small["fbo"].release(); self._small["tex"].release()
+            self._small = None
         for fb in self._reduce_targets.values():
             fb["fbo"].release(); fb["tex"].release()
         self._reduce_targets.clear()
@@ -656,6 +659,26 @@ void main() {
         self._present_frame()
         data = self._present["fbo"].read(components=3, dtype="f1")
         return np.frombuffer(data, dtype=np.uint8).reshape(self.size[1], self.size[0], 3)[::-1].copy()
+
+    def read_scaled(self, size) -> np.ndarray:
+        """``read()`` at another size, scaled on the GPU first: a small preview costs a small readback."""
+        size = tuple(size)
+        if size == tuple(self.size):
+            return self.read()
+        small = getattr(self, "_small", None)
+        if small is None or small["tex"].size != size:
+            if small is not None:
+                small["fbo"].release(); small["tex"].release()
+            self._small = small = self._fbo(size, dtype="f1")
+        small["fbo"].use()
+        self.ctx.viewport = (0, 0, *size)
+        self.displayed_texture().use(location=0)
+        self._set(self._copy, "tex", 0)
+        self._set(self._copy, "resolution", tuple(map(float, size)))
+        self._set(self._copy, "compositeAlpha", float(self.patch.composite_alpha))
+        self._copy_vao.render(self.gl.TRIANGLES)
+        data = small["fbo"].read(components=3, dtype="f1")
+        return np.frombuffer(data, dtype=np.uint8).reshape(size[1], size[0], 3)[::-1].copy()
 
     def read_rgba(self) -> np.ndarray:
         """Uncomposited straight RGBA, for analysis and transparent-layer tests."""

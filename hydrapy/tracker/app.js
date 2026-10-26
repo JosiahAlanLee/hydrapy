@@ -324,7 +324,8 @@ async function pollRemote(){
     $('connectionStatus').textContent=result.playing?'Transport running':'Transport paused';
     const native=result.native?.active?` · ${result.native.where==='window'?'native window':'fullscreen '+result.native.where} ${Math.round(result.native.refresh)} Hz`:'';
     $('backendStatus').textContent=result.error||(result.path?`${result.backend} · ${result.fps.toFixed(1)} render fps${native} · ${result.path}`:'Load a patch to begin');
-    $('resolution').textContent=result.size.join(' × ');
+    // While Program shows fullscreen, this monitor is a small confidence preview of it.
+    $('resolution').textContent=result.native?.active?`${result.size.join(' × ')} · ${result.native.where==='window'?'in a window':'on '+result.native.where} · preview`:result.size.join(' × ');
     $('cvStatus').textContent=!result.cv?'CV off · configure at launch':result.cv.error?`CV error: ${result.cv.error}`:`CV active · ${result.cv.underflows||0} underflows`;
     $('cvStatus').title=result.cv?JSON.stringify(result.cv,null,2):'';
     $('cvPorts').textContent=(result.cv?.ports||[]).join('\n');
@@ -868,6 +869,7 @@ if(outputType){
       }
     }
     if(e.code==='Space'){e.preventDefault();togglePlay();return;}
+    if(e.shiftKey&&e.key.toLowerCase()==='f'&&nativeState?.available){e.preventDefault();setNative(!nativeState.active);return;}
     if(e.key.toLowerCase()==='f'){e.preventDefault();fullscreen();return;}
     if(e.key.toLowerCase()==='b'){e.preventDefault();toggleBlackout();return;}
     if(!inGrid)return;

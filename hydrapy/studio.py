@@ -170,7 +170,7 @@ class Session:
                 self.notice = f'Output settings were not restored: {exc}'
         self.preview_profile, self.gpu_query = False, None
         self.render_metrics, self.preview_error = {}, ''
-        self.preview_dirty = True
+        self.preview_dirty, self.preview_taken = True, 0.
         self.recorder, self.record_path, self.last_frame = None, None, None
         self.jobs, self.job_processes = {}, {}
         self.recent = []
@@ -590,30 +590,52 @@ class Session:
         self.job_processes[job_id] = proc
         return self.jobs[job_id]
 
-    def _read_frame(self):
+    def _read_frame(self, size=None):
+        """The displayed output as RGB; ``size`` scales it on the GPU first (GL renderer)."""
         from .backend_np import to_uint8
         r = self.renderer
+        if size is not None and hasattr(r, 'read_scaled'):
+            return r.read_scaled(size)
         return r.read() if hasattr(r, 'read') else to_uint8(r.displayed(), r.patch.composite_alpha)
+
+    # While Program shows fullscreen, the editor's monitor is a confidence preview: small and at
+    # most this rate, so its readback and JPEG never compete with the frames going to the screen.
+    CONFIDENCE_SIZE, CONFIDENCE_FPS = (480, 270), 20.
+
+    def _confidence_size(self):
+        native = getattr(self, 'native', None)  # previews are also driven from bare sessions in tests
+        if native is None or not native.active:
+            return None
+        w, h = self.size
+        scale = min(self.CONFIDENCE_SIZE[0] / w, self.CONFIDENCE_SIZE[1] / h, 1.)
+        return max(16, round(w * scale)), max(16, round(h * scale))
 
     def _pictures(self, *, force=False, recorded=None, query=None):
         r, now = self.renderer, time.monotonic()
-        main, thumbnail = self.preview.plan(now, changed=not self.paused or self.preview_dirty)
+        confidence = self._confidence_size()
+        changed = not self.paused or self.preview_dirty
+        if confidence and not force and now - getattr(self, 'preview_taken', 0.) < 1 / self.CONFIDENCE_FPS:
+            changed = False  # the editor's request stays pending until the next capture
+        main, thumbnail = self.preview.plan(now, changed=changed)
         chosen = r.patch.display
         frame = recorded[0] if recorded is not None else None
         main_frame = frame
         metrics = dict(self.render_metrics)
         if main or force:
             started = time.monotonic()
+            small = confidence is not None and frame is None
             if frame is None:
-                frame = self._read_frame()
+                frame = self._read_frame(confidence) if confidence else self._read_frame()
             metrics.update(readback_ms=recorded[1] if recorded is not None else (time.monotonic() - started) * 1000,
                            captured=time.monotonic())
             # read() has already completed the preceding GPU commands. Do not
             # query results before readback or add a finish() to the render loop.
             if query is not None:
                 metrics['gpu_ms'] = query.elapsed / 1_000_000
-            self.last_frame = frame
-            main_frame = frame
+            if not small:  # snapshots and Auxiliary reuse full frames only
+                self.last_frame = frame
+                main_frame = frame
+            self.preview_taken = now
             cache = None
             if self.path and self.clock_time > 1:
                 cache = self.root / '.hydrapy' / 'previews' / (digest(str(self.path.relative_to(self.root)))[:16] + '.jpg')

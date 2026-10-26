@@ -76,6 +76,12 @@ def test_display_menu_shows_and_hides_the_program_window(tmp_path):
         # Matching the window's size reloads the patch at 1280x720 and gives the old size back after.
         s.call('native_output', enabled=True, monitor='window')
         assert s.size == (1280, 720) and s.renderer.size == (1280, 720)
+        # The editor's Program monitor is now a small confidence preview of it.
+        from PIL import Image
+        import io
+        frame = s.preview.frame(s.preview.output, -1, timeout=3, thumbnails=False)
+        frame = s.preview.frame(s.preview.output, frame['sequence'], timeout=3, thumbnails=False)
+        assert Image.open(io.BytesIO(frame['data'])).size == (480, 270)
         s.call('native_output', enabled=False)
         assert s.size == (64, 36) and s.renderer.size == (64, 36)
         assert (tmp_path / '.hydrapy' / 'outputs.json').read_text().count('"window"') == 1
