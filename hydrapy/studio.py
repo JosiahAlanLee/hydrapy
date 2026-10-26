@@ -122,6 +122,28 @@ class Recorder:
             raise RuntimeError(self.error)
 
 
+class _Finishing:
+    """A stopped recording, handed back from the render thread so the caller waits for its encoder.
+
+    Closing flushes every queued frame through FFmpeg (a third of a second or more), and the
+    render thread runs the command queue: waiting there froze the native output.
+    """
+    NOTICE = 'Finishing the video recording.'
+
+    def __init__(self, session, recorder):
+        self.session, self.recorder = session, recorder
+
+    def wait(self):
+        try:
+            self.recorder.close()
+        except Exception as exc:
+            self.session.error = ''.join(traceback.format_exception_only(type(exc), exc)).strip()
+            raise ValueError(self.session.error) from None
+        if self.session.notice == self.NOTICE:  # not replaced by, say, a failed size restore
+            self.session.notice = 'Video recording saved.'
+        return dict(file=str(self.recorder.path.relative_to(self.session.root)))
+
+
 class Session:
     def __init__(self, root, patch=None, backend='auto', size=(640, 360), fps=30., cv=None, native=None,
                  edit_delay_ms=None):
@@ -246,6 +268,8 @@ class Session:
         response = result.get(timeout=90)
         if isinstance(response, Exception):
             raise response
+        if isinstance(response, _Finishing):
+            return response.wait()
         return response
 
     def close(self):
@@ -555,12 +579,9 @@ class Session:
         elif action == 'record':
             if self.recorder:
                 recorder, self.recorder = self.recorder, None
-                try:
-                    recorder.close()
-                    self.notice = 'Video recording saved.'
-                finally:
-                    self._restore_native_size()
-                return dict(file=str(recorder.path.relative_to(self.root)))
+                self.notice = _Finishing.NOTICE
+                self._restore_native_size()  # no more frames go to it
+                return _Finishing(self, recorder)
             self.record_path = self._new_output('mp4')
             self.recorder = Recorder(self.record_path, self.fps)
             self.notice = 'Recording video at wall-clock speed.'
