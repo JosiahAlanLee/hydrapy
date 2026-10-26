@@ -17,7 +17,7 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 export class PreviewStream {
   constructor(bus) {
     Object.assign(this, {bus, output:'', generation:-1, revision:0, image:null, stopped:false, painted:new WeakMap(),
-      stats:{frames:0, samples:[], error:'', output:''}});
+      stats:{frames:0, samples:[], error:'', output:'', bus}});
     this.loop();
     document.addEventListener('visibilitychange', () => { this.revision++; this.controller?.abort(); });
     window.addEventListener('pagehide', () => {
@@ -25,20 +25,20 @@ export class PreviewStream {
       if (this.url) URL.revokeObjectURL(this.url);
     });
   }
-  select(output, generation) {
-    if (this.output === output && this.generation === generation) return;
-    this.output = output; this.generation = generation; this.revision++;
+  select(output, generation, bus = this.bus) {
+    if (this.output === output && this.generation === generation && this.bus === bus) return;
+    this.output = output; this.generation = generation; this.bus = bus; this.revision++;
     this.after = -1; this.image = null; this.controller?.abort();
   }
   async loop() {
     while (!this.stopped) {
       if (!this.output || document.hidden) { await delay(100); continue; }
-      const revision = this.revision, output = this.output;
+      const revision = this.revision, output = this.output, bus = this.bus;
       const controller = this.controller = new AbortController();
       let url;
       try {
         const started = performance.now();
-        const response = await fetch(`/api/frame?bus=${this.bus}&output=${output}&after=${this.after ?? -1}&thumbnails=0`,
+        const response = await fetch(`/api/frame?bus=${bus}&output=${output}&after=${this.after ?? -1}&thumbnails=0`,
           {headers, signal:controller.signal});
         if (response.status === 204) { await delay(40); continue; }
         if (!response.ok) throw new Error(`Preview HTTP ${response.status}`);
@@ -59,8 +59,8 @@ export class PreviewStream {
           const match = item.trim().match(/^([\w]+);dur=([\d.]+)$/);
           if (match) timings[match[1]] = Number(match[2]);
         }
-        this.stats.frames++; this.stats.output = output; this.stats.error = '';
-        this.stats.samples.push({...timings, output, sequence:this.after,
+        this.stats.frames++; this.stats.output = output; this.stats.bus = bus; this.stats.error = '';
+        this.stats.samples.push({...timings, output, bus, sequence:this.after,
           request_ms:received-started, transfer_ms:transferred-received,
           decode_ms:decoded-transferred, display_schedule_ms:performance.now()-decoded,
           frame_age_estimate_ms:Number(response.headers.get('X-Preview-Age-Ms'))+performance.now()-received});

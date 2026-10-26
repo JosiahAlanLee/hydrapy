@@ -163,6 +163,8 @@ class Session:
         self.preview = Preview()
         self.aux_preview = Preview()
         self.aux_preview.reset('o1')
+        self.monitor_previews, self.monitor_captures = {}, {}
+        self.monitor_next, self.monitor_cursor = 0., 0
         self.tracker = Tracker()
         self.tracker_state = {}
         self.bridge_state = {}
@@ -350,6 +352,10 @@ class Session:
         self.gpu_query = None
         self.preview.reset(patch.display.name)
         self.aux_preview.reset(self.tracker.document['modes']['aux'])
+        for output, preview in self._monitor_items():
+            preview.reset(output)
+        self.monitor_captures.clear()
+        self.monitor_next = 0.
         self.preview_dirty = True
         self.last_frame = None
         if not same:
@@ -632,9 +638,60 @@ class Session:
         native = getattr(self, 'native', None)  # previews are also driven from bare sessions in tests
         if native is None or not native.active:
             return None
+        return self._small_preview_size()
+
+    def _small_preview_size(self):
         w, h = self.size
         scale = min(self.CONFIDENCE_SIZE[0] / w, self.CONFIDENCE_SIZE[1] / h, 1.)
         return max(16, round(w * scale)), max(16, round(h * scale))
+
+    def _monitor_items(self):
+        if not getattr(self, 'monitor_previews', None):
+            return ()
+        with self.lock:
+            return tuple(self.monitor_previews.items())
+
+    def monitor_preview(self, output):
+        """An on-demand, bounded preview of one output, independent of Program and Auxiliary."""
+        with self.lock:
+            if not self.running:
+                raise RuntimeError('Studio has stopped')
+            if output not in self.monitor_previews:
+                preview = Preview(size=self.CONFIDENCE_SIZE)
+                preview.reset(output)
+                self.monitor_previews[output] = preview
+            return self.monitor_previews[output]
+
+    def _monitor_pictures(self, now):
+        previews = dict(self._monitor_items())
+        if not previews or now < self.monitor_next:
+            return
+        r = self.renderer
+        marker = (id(r), r.frame)
+        # At most one small capture per interval, shared fairly across requested outputs.
+        # A hidden or closed controller stops requesting, so no further readbacks are needed.
+        for i in range(4):
+            index = (self.monitor_cursor + i) % 4
+            output = f'o{index}'
+            preview = previews.get(output)
+            if preview is None:
+                continue
+            changed = not self.paused or self.monitor_captures.get(output) != marker or preview.latest is None
+            capture, _ = preview.plan(now, changed=changed)
+            if not capture:
+                continue
+            self.monitor_next, self.monitor_cursor = now + 1 / self.CONFIDENCE_FPS, (index + 1) % 4
+            chosen = r.patch.display
+            try:
+                r.patch.display = r.patch.outputs[index]
+                started = time.monotonic()
+                frame = self._read_frame(self._small_preview_size())
+                preview.submit(output, frame, dict(self.render_metrics,
+                    readback_ms=(time.monotonic() - started) * 1000, captured=time.monotonic()))
+                self.monitor_captures[output] = marker
+            finally:
+                r.patch.display = chosen
+            break
 
     def _pictures(self, *, force=False, recorded=None, query=None):
         r, now = self.renderer, time.monotonic()
@@ -691,6 +748,7 @@ class Session:
                     readback_ms=(time.monotonic() - started) * 1000, captured=time.monotonic()))
             finally:
                 r.patch.display = chosen
+        self._monitor_pictures(now)
 
     def _publish(self):
         from .live import resource_status
@@ -1069,6 +1127,8 @@ class Session:
         self.gpu_query = None  # dispose timer on the GL context's thread
         self.preview.close()
         self.aux_preview.close()
+        for _, preview in self._monitor_items():
+            preview.close()
         if self.recorder:
             try:
                 self.recorder.close()
@@ -1173,12 +1233,13 @@ def make_server(session, port=8765):
                     after = int(args.get('after', ['-1'])[0])
                     started = time.monotonic()
                     bus = args.get('bus', ['program'])[0]
-                    if bus not in ('program', 'aux'):
-                        raise ValueError('bus must be program or aux')
-                    preview = session.aux_preview if bus == 'aux' else session.preview
+                    if bus not in ('program', 'aux', 'monitor'):
+                        raise ValueError('bus must be program, aux or monitor')
+                    preview = session.monitor_preview(output) if bus == 'monitor' else \
+                        session.aux_preview if bus == 'aux' else session.preview
                     # Only Studio's output picker displays the four thumbnails.
                     # Gorgon and its output windows need the selected frame only.
-                    thumbnails = args.get('thumbnails', ['1'])[0] != '0'
+                    thumbnails = bus != 'monitor' and args.get('thumbnails', ['1'])[0] != '0'
                     frame = preview.frame(output, after, thumbnails=thumbnails)
                     if frame is None:
                         return self._send(204, b'', 'image/jpeg')
