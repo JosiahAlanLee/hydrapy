@@ -102,6 +102,22 @@ def test_a_late_landing_gate_falls_before_the_next_hit_and_ends_on_pause_or_seek
     assert not heard(cv, tracker, 0., 64).any()
 
 
+def test_a_seek_that_interrupts_an_open_gate_retriggers_it():
+    d = empty_score(bpm=120)
+    d['patterns'][0]['audio'][0][0] = d['patterns'][0]['audio'][0][8] = {'note': 'C-2', 'vel': 127}
+    d['patterns'][0]['audio'][1][0] = {'note': 'D-2', 'vel': 127}
+    ms = SR // 1000
+    tracker = playing(d)
+    cv = TrackerCV({0: 'gate1', 1: 'gate2'}, samplerate=SR, open_stream=False)
+    assert heard(cv, tracker, 0., 64)[-1].all()          # both gates open in row 0
+    tracker.seek(2., 0.)                                    # row 8: a hit on lane 1 only
+    volts = heard(cv, tracker, 0., SR // 16)
+    gate1 = volts[:, 0]
+    assert not gate1[:ms].any() and gate1[ms:SR // 16].all() and np.array_equal(rising(gate1), [ms])
+    assert not volts[:, 1].any()
+    assert heard(cv, tracker, 0., 64)[:, 0].all()          # a repeated snapshot is not a seek
+
+
 def test_a_late_start_keeps_its_downbeat_but_a_resume_late_in_a_row_adds_nothing():
     d = empty_score(bpm=120)
     d['patterns'][0]['audio'][0][4] = {'note': 'C-2', 'vel': 127}

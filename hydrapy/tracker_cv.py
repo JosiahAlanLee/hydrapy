@@ -15,7 +15,8 @@ Signals a channel can carry:
 ``reset``           a trigger on start/resume/seek and at the score/pattern loop boundary
 ``run``             high while the tracker is playing
 ``gate1``-``gate4`` the four audio lanes: high for ``gate`` of a row when a hit is there,
-                    kept whole when a seek or start is heard late (``_landing_gate``)
+                    kept whole when a seek or start is heard late (``_landing_gate``),
+                    and retriggered (1 ms low) when a seek interrupts an open gate
 ``pitch1``-``pitch4`` held 1 V/oct pitch, C4 = 0 V by default, with key transposition
 ``vel1``-``vel4``   the last hit's velocity on that lane, 0..``high`` volts, held
 ``z`` ``roll`` ``feedback``  the automation lanes, scaled to their volt ranges
@@ -121,6 +122,8 @@ class TrackerCV:
         self._landing_remaining = 0
         self._landing_row = None
         self._stood = None
+        self._gate_was = np.zeros(4, bool)
+        self._retrigger = np.zeros(4, int)
         self._silencing = False
         self._silenced = False
         self._silence_frames = 1
@@ -226,11 +229,14 @@ class TrackerCV:
             self._velocity.fill(0)
             self._pitch.fill(0)
             self._landing_remaining = 0
+            # A gate the change interrupts closes for 1 ms, so a hit it lands on rises again.
+            self._retrigger = np.where(self._gate_was & moving, round(.001 * self.samplerate), 0)
             if moving:
                 landing = snapshot['anchor_beat'] if changed or self._stood is None else self._stood
                 self._landing_gate(landing, float(beat[0]), d['bpm'])
         if not moving:
             self._reset_remaining = self._landing_remaining = 0
+            self._retrigger[:] = 0
             self._stood = float(beat[-1])
         self._transport, self._moving = transport, moving
         reset = np.arange(frames) < self._reset_remaining
@@ -245,7 +251,8 @@ class TrackerCV:
         # Evaluate held signals once per lane, not once per physical route.
         for lane in range(4):
             on = present[pattern_index, lane, row] & moving & (not d['mutes'][lane])
-            hits[lane] = on & ((row_phase < self.gate) | landing)
+            hits[lane] = on & ((row_phase < self.gate) | landing) & (np.arange(frames) >= self._retrigger[lane])
+            self._gate_was[lane] = hits[lane][-1]
             for source, memory, target in ((velocity, self._velocity, held_velocity),
                                            (pitch, self._pitch, held_pitch)):
                 values = source[pattern_index, lane, row]
@@ -254,6 +261,7 @@ class TrackerCV:
                 held = np.where(index >= 0, values[np.maximum(index, 0)], memory[lane])
                 memory[lane] = held[-1]
                 target[lane] = held
+        self._retrigger = np.maximum(0, self._retrigger - frames)
         for column, (channel, name) in enumerate(self.mapping.items()):
             if name == 'clock':
                 value = (np.mod(beat * self.ppqn, 1.) < .5) & moving
