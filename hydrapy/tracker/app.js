@@ -889,8 +889,11 @@ if(outputType){
   $('curveVisibilityBtn').onclick=()=>{
     const collapsed=document.body.classList.toggle('curve-collapsed');$('curveVisibilityBtn').setAttribute('aria-pressed',!collapsed);
   };
+  // Menus (a popover inside a details) close on any click outside them and on Escape. Panels that are
+  // also details, the sound editor and JACK settings, stay open while hits are selected.
+  const openMenus=()=>[...document.querySelectorAll('details[open]')].filter(d=>d.querySelector(':scope>.file-popover'));
   document.addEventListener('click',e=>{
-    document.querySelectorAll('details[open]').forEach(d=>{if(!d.contains(e.target))d.open=false;});
+    openMenus().forEach(d=>{if(!d.contains(e.target))d.open=false;});
   });
   window.addEventListener('beforeunload',e=>{if(pendingScore||scoreRequest||scoreFailed||conflicted){e.preventDefault();e.returnValue='';}});
   window.addEventListener('keydown',e=>{
@@ -916,7 +919,7 @@ if(outputType){
       selectPreview(`o${mod(current+(e.key===']'?1:-1),4)}`);return;
     }
     if(e.key==='Escape'){
-      selectionAnchor=null;updateSelection();document.querySelectorAll('details[open]').forEach(d=>{d.open=false;});return;
+      selectionAnchor=null;updateSelection();openMenus().forEach(d=>{d.open=false;});return;
     }
     if(inGrid&&pianoEntry&&selected.col<4&&!e.altKey){
       const note=pianoNote(e.code,Number($('octaveInput').value));

@@ -677,6 +677,29 @@ def test_monitor_switches_discard_delayed_frames_and_controllers_inspect_indepen
     other.close()
 
 
+def test_selecting_hits_keeps_panels_open_while_menus_close_outside(workspace):
+    session, page, context, root = workspace
+    is_open = lambda selector: page.locator(selector).evaluate('d => d.open')
+    page.locator('#audioPageTab').click()
+    page.locator('.cell[data-row="0"][data-col="0"]').click()
+    page.locator('#soundEditor summary').click()
+    for row in (2, 4):
+        page.locator(f'.cell[data-row="{row}"][data-col="0"]').click()
+        assert is_open('#soundEditor')
+    page.keyboard.press('Escape')
+    assert is_open('#soundEditor') and is_open('.jack-settings')
+    page.locator('#fileMenu summary').click()
+    assert is_open('#fileMenu')
+    page.locator('.cell[data-row="6"][data-col="0"]').click()
+    assert not is_open('#fileMenu') and is_open('#soundEditor')
+    page.locator('#patternMenu summary').click()
+    page.keyboard.press('Escape')
+    assert not is_open('#patternMenu') and is_open('#soundEditor')
+    page.locator('#lock-p1').fill('9'); page.locator('#lock-p1').press('Tab')
+    page.wait_for_timeout(450)
+    assert session.tracker.document['patterns'][0]['audio'][0][6]['locks'] == {'p1': 9}
+
+
 def test_external_sound_locks_edit_preserve_notes_undo_and_reload(workspace):
     session, page, context, root = workspace
     page.locator('#audioPageTab').click()
