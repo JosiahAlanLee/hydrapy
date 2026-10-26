@@ -44,7 +44,8 @@ Studio's existing execution and hardware staging rules.
   the next refresh (on the workstation's 60 Hz screen, about 15 ms typical and
   22 ms at most from the moment Studio receives it). While it shows, Studio renders
   at the monitor's size (the patch reloads in place; feedback restarts; the old
-  size returns when it closes) and the editor's Program monitor becomes a 480×270
+  size returns when it closes, or after recording stops if a take is in progress)
+  and the editor's Program monitor becomes a 480×270
   preview at up to 20 fps, so it never competes with the screen. Keyboard focus
   stays in the editor; work on the Visual page and watch the result on the other
   monitor. The menu remembers the monitor (default: one that isn't the primary).

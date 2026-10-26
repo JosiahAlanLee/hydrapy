@@ -1,9 +1,165 @@
 import os
+import threading
 import time
 
 import pytest
 
 from hydrapy.studio_native import Pacer
+
+
+@pytest.fixture
+def recording_output(tmp_path, monkeypatch):
+    """Exercise Studio's real render loop without an X display or a video encoder."""
+    from hydrapy.studio import Session
+
+    class Window:
+        active, where = False, None
+        size, refresh, period = (96, 54), 60., 1 / 60
+
+        def __init__(self):
+            self.closed = threading.Event()
+
+        def target_size(self, where):
+            return self.size if where == 'window' else (128, 72)
+
+        def show(self, where):
+            self.active, self.where = True, where
+
+        def hide(self):
+            self.active, self.where = False, None
+
+        def poll(self):
+            closed = self.closed.is_set()
+            self.closed.clear()
+            return closed
+
+        def present(self, *args, **kwargs):
+            now = time.monotonic()
+            return now, now, False
+
+        def describe(self):
+            return dict(available=True, active=self.active, where=self.where)
+
+        def close(self):
+            pass
+
+    recordings = []
+
+    class Recorder:
+        def __init__(self, path, fps):
+            self.path, self.frames, self.closed = path, [], False
+            self.fail = threading.Event()
+            self.close_error = False
+            recordings.append(self)
+
+        def push(self, frame):
+            if self.fail.is_set():
+                raise RuntimeError('test encoder failed')
+            self.frames.append(frame.copy())
+
+        def close(self):
+            self.closed = True
+            if self.close_error:
+                raise RuntimeError('test encoder close failed')
+
+    monkeypatch.setattr('hydrapy.studio_native.unavailable', lambda: None)
+    monkeypatch.setattr('hydrapy.studio_native.NativeOutput', Window)
+    monkeypatch.setattr('hydrapy.studio.Recorder', Recorder)
+    (tmp_path / 'p.py').write_text('from hydrapy import *\nosc(4).out()\n')
+    s = Session(tmp_path, 'p.py', backend='cpu', size=(64, 36), native='available')
+    try:
+        yield s, s.native, recordings
+    finally:
+        s.close()
+
+
+def wait_for(session, condition):
+    deadline = time.monotonic() + 3
+    while not condition():
+        assert session.thread.is_alive(), 'Studio render thread stopped'
+        assert time.monotonic() < deadline, 'Studio did not reach the expected state'
+        time.sleep(.01)
+
+
+@pytest.mark.parametrize('close_from', ['menu', 'window'])
+def test_closing_output_while_recording_keeps_frames_and_restores_size_on_stop(recording_output, close_from):
+    s, window, recordings = recording_output
+    s.call('native_output', enabled=True, monitor='window')
+    s.call('tracker_transport', enabled=True, playing=True, beat=0)
+    s.call('record')
+    recording = recordings[-1]
+    wait_for(s, lambda: len(recording.frames) >= 2)
+    if close_from == 'menu':
+        assert not s.call('native_output', enabled=False)['active']
+    else:
+        window.closed.set()  # the desktop's close event, handled outside the command exception guard
+        wait_for(s, lambda: not window.active)
+    count, clock = len(recording.frames), s.clock_time
+    wait_for(s, lambda: len(recording.frames) >= count + 2)
+    assert s.thread.is_alive() and not recording.closed and s.recorder is recording
+    assert s.clock_time > clock and s.tracker.enabled
+    assert s.size == s.renderer.size == (96, 54) and s.native_restore_size == (64, 36)
+    result = s.call('record')
+    assert result['file'].endswith('.mp4') and recording.closed
+    assert s.size == s.renderer.size == (64, 36) and s.native_restore_size is None
+    assert {frame.shape for frame in recording.frames} == {(54, 96, 3)}
+
+
+def test_reopening_output_preserves_the_size_pending_from_before_recording(recording_output):
+    s, window, recordings = recording_output
+    s.call('native_output', enabled=True, monitor='window')
+    s.call('record')
+    s.call('native_output', enabled=False)
+    s.call('native_output', enabled=True, monitor='window')
+    s.call('record')  # stopping while the output shows must keep the output's size
+    assert window.active and s.size == (96, 54) and s.native_restore_size == (64, 36)
+    s.call('native_output', enabled=True, monitor='other')
+    assert s.size == (128, 72) and s.native_restore_size == (64, 36)
+    s.call('native_output', enabled=False)
+    assert s.size == (64, 36) and s.native_restore_size is None
+
+
+@pytest.mark.parametrize('failure', ['write', 'close'])
+def test_failed_recording_also_restores_size_after_output_closes(recording_output, failure):
+    s, window, recordings = recording_output
+    s.call('native_output', enabled=True, monitor='window')
+    s.call('record')
+    recording = recordings[-1]
+    s.call('native_output', enabled=False)
+    if failure == 'write':
+        recording.fail.set()
+        wait_for(s, lambda: s.size == (64, 36) and s.native_restore_size is None)
+        s.call('source', path='p.py')  # finish the render loop's automatic recording cleanup
+    else:
+        recording.close_error = True
+        with pytest.raises(ValueError, match='test encoder close failed'):
+            s.call('record')
+    assert s.thread.is_alive() and s.recorder is None and recording.closed
+    assert s.size == s.renderer.size == (64, 36) and s.native_restore_size is None
+    assert 'test encoder' in s.error
+
+
+def test_rejected_resize_during_recording_does_not_schedule_a_restore(recording_output):
+    s, window, recordings = recording_output
+    s.call('record')
+    with pytest.raises(ValueError, match='Stop recording'):
+        s.call('native_output', enabled=True, monitor='window')
+    assert not window.active and s.size == (64, 36) and s.native_restore_size is None
+    renderer = s.renderer
+    s.call('record')
+    assert s.renderer is renderer  # stopping this recording must not reload the patch
+
+
+def test_failed_restore_keeps_rendering_and_retains_the_original_size(recording_output):
+    s, window, recordings = recording_output
+    s.call('native_output', enabled=True, monitor='window')
+    s.call('record')
+    s.call('native_output', enabled=False)
+    (s.root / 'p.py').write_text('syntax !')
+    s.call('record')
+    assert s.thread.is_alive() and s.size == s.renderer.size == (96, 54)
+    assert s.native_restore_size == (64, 36)
+    assert 'size was not restored' in s.notice
 
 
 def test_pacer_budget_is_a_percentile_not_one_stall():
