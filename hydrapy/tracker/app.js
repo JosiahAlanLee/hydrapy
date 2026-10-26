@@ -133,7 +133,9 @@ function saveLocal(){
   pendingScore = structuredClone(state);
   if(conflicted||scoreFailed)return;
   $('savedState').textContent = 'Applying edit…';
-  clearTimeout(scoreTimer); scoreTimer = setTimeout(flushScore, 120);
+  // Studio says how long to gather edits: 120 ms normally, 0 with a native output, where an
+  // edit goes at once and later ones ride with the next request while one is in flight.
+  clearTimeout(scoreTimer); scoreTimer = setTimeout(flushScore, remote.edit_delay_ms ?? 120);
 }
 async function flushScore(){
   clearTimeout(scoreTimer);
@@ -295,7 +297,8 @@ async function pollRemote(){
       $('sceneMeta').textContent=result.output.toUpperCase();
     }
     $('connectionStatus').textContent=result.playing?'Transport running':'Transport paused';
-    $('backendStatus').textContent=result.error||(result.path?`${result.backend} · ${result.fps.toFixed(1)} render fps · ${result.path}`:'Load a patch to begin');
+    const native=result.native?` · native ${result.native.where} ${Math.round(result.native.refresh)} Hz · budget ${result.native.budget_ms.toFixed(1)} ms · ${result.native.missed} missed`:'';
+    $('backendStatus').textContent=result.error||(result.path?`${result.backend} · ${result.fps.toFixed(1)} render fps${native} · ${result.path}`:'Load a patch to begin');
     $('resolution').textContent=result.size.join(' × ');
     $('cvStatus').textContent=!result.cv?'CV off · configure at launch':result.cv.error?`CV error: ${result.cv.error}`:`CV active · ${result.cv.underflows||0} underflows`;
     $('cvStatus').title=result.cv?JSON.stringify(result.cv,null,2):'';

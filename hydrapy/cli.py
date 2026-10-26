@@ -181,8 +181,13 @@ def main(argv=None):
     studio.add_argument("patch", nargs="?")
     studio.add_argument("--root", default=".")
     studio.add_argument("--backend", choices=["auto", "cpu", "gl"], default="auto")
-    studio.add_argument("--size", type=parse_size, default=(640, 360))
-    studio.add_argument("--fps", type=float, default=30.)
+    studio.add_argument("--size", type=parse_size, default=None, help="render size (default 640x360, or the native window's size)")
+    studio.add_argument("--fps", type=float, default=30., help="render rate (a native output follows its display's refresh)")
+    studio.add_argument("--native-output", metavar="MONITOR", default=None,
+                        help="show Program fullscreen on this monitor (name such as DP-5, or index), or 'window'; "
+                             "drawn straight from the GPU and paced by the display's refresh")
+    studio.add_argument("--edit-delay-ms", type=float, default=None,
+                        help="how long the tracker editor gathers edits before sending (default 120; 0 with --native-output)")
     studio.add_argument("--port", type=int, default=8765)
     studio.add_argument("--no-browser", action="store_true")
     studio.add_argument("--tracker", action="store_true", help="open the Gorgon tracker workspace")
@@ -259,7 +264,9 @@ def main(argv=None):
         if cv is not None:
             import json
             print('Tracker CV: ' + json.dumps(cv.describe()), flush=True)
-        serve(a.root, a.patch, a.backend, a.size, a.fps, a.port, not a.no_browser, tracker=a.tracker, cv=cv)
+        size = a.size or (None if a.native_output else (640, 360))
+        serve(a.root, a.patch, a.backend, size, a.fps, a.port, not a.no_browser, tracker=a.tracker, cv=cv,
+              native=a.native_output, edit_delay_ms=a.edit_delay_ms)
         return
 
     if a.cmd == "check":
