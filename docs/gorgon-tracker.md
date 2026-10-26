@@ -235,6 +235,9 @@ playhead, so clock, gates and held key steps land on the exact sample rather tha
 on a video frame. Pausing or disabling automation stops clock, reset and gates;
 lanes hold their value. The CV and the picture share one playhead, so the modular
 follows Gorgon's tempo, seeks and loops. Gorgon does not follow an incoming clock.
+A seek or start reaches the audio callback up to a frame and a block late; if that
+is after its row's gate would have closed, the hit it landed on still plays, late,
+for up to its usual length (Gorgon's `spec/cv-semantics.md`, landing gate).
 
 `--cv-offset-ms` sends the voltages earlier (positive) or later (negative) than
 the picture. Set it after the click-and-flash comparison below, using a gate into

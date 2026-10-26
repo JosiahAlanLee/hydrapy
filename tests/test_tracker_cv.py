@@ -62,6 +62,58 @@ def test_gates_follow_hits_mutes_and_gate_length():
     assert not volts[:, 1].any()
 
 
+
+def heard(cv, tracker, delay, frames, playing=True):
+    """``frames`` of voltages from ``delay`` seconds after the playhead was published."""
+    cv.publish(tracker, 0., 100., playing)
+    return cv.render(frames, 100. + delay)
+
+
+def test_a_seek_heard_late_still_plays_the_hit_it_landed_on():
+    d = empty_score(bpm=120)                       # a row is 125 ms, its gate 62.5 ms
+    d['patterns'][0]['audio'][0][4] = {'note': 'C-2', 'vel': 127}
+    d['patterns'][0]['audio'][1][4] = {'note': 'D-2', 'vel': 127}
+    d['mutes'][1] = True
+    row, ms = SR // 8, SR // 1000
+    # Heard at once: the row's own gate. 40 ms late: its whole length, from now. 70 ms late
+    # (the window had closed): until 1 ms before the row ends. In the next row: nothing.
+    for delay, length in ((0., row // 2), (.04, row // 2 - ms), (.07, row - round(.07 * SR) - ms), (.13, 0)):
+        cv = TrackerCV({0: 'gate1', 1: 'gate2'}, samplerate=SR, open_stream=False)
+        volts = heard(cv, playing(d, beat=1.), delay, row)
+        on = np.flatnonzero(volts[:, 0])
+        assert len(on) == length and (not length or on[0] == 0 and on[-1] == length - 1), delay
+        assert not volts[:, 1].any()
+
+
+def test_a_late_landing_gate_falls_before_the_next_hit_and_ends_on_pause_or_seek():
+    d = empty_score(bpm=120)
+    d['patterns'][0]['audio'][0][4] = d['patterns'][0]['audio'][0][5] = {'note': 'C-2', 'vel': 127}
+    row = SR // 8
+    tracker = playing(d, beat=1.)
+    cv = TrackerCV({0: 'gate1'}, samplerate=SR, open_stream=False)
+    volts = heard(cv, tracker, .07, row)[:, 0]
+    assert volts[0] and np.array_equal(rising(volts), [row - round(.07 * SR)])
+    cv = TrackerCV({0: 'gate1'}, samplerate=SR, open_stream=False)
+    assert heard(cv, tracker, .07, 64)[:, 0].all()
+    assert not heard(cv, tracker, .07, 64, playing=False).any()
+    cv = TrackerCV({0: 'gate1'}, samplerate=SR, open_stream=False)
+    assert heard(cv, tracker, .07, 64)[:, 0].all()
+    tracker.seek(1.5, 0.)                           # an empty row
+    assert not heard(cv, tracker, 0., 64).any()
+
+
+def test_a_late_start_keeps_its_downbeat_but_a_resume_late_in_a_row_adds_nothing():
+    d = empty_score(bpm=120)
+    d['patterns'][0]['audio'][0][4] = {'note': 'C-2', 'vel': 127}
+    row, ms = SR // 8, SR // 1000
+    for beat, length in ((1., row - round(.07 * SR) - ms), (1.15, 0)):   # row phase 0 and 0.6
+        tracker = playing(d, beat=beat)
+        cv = TrackerCV({0: 'gate1'}, samplerate=SR, open_stream=False)
+        assert not heard(cv, tracker, 0., 64, playing=False).any()
+        before = tracker.transport_revision
+        volts = heard(cv, tracker, .07, row)          # resumed, heard 70 ms later
+        assert tracker.transport_revision == before and np.count_nonzero(volts) == length, beat
+
 def test_paused_or_disabled_tracker_sends_no_clock_or_gates():
     d = empty_score()
     d['patterns'][0]['audio'][0][0] = {'note': 'C-2', 'vel': 100}
