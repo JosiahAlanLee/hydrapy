@@ -37,6 +37,12 @@ Studio's existing execution and hardware staging rules.
 - Open **Program** and **Auxiliary**, move each window to its monitor, then press
   **F**. Routing selects `o0`–`o3` independently. Program also selects Studio's
   displayed/recorded output; Auxiliary never changes that selection.
+- The **Hydra monitor** has **o0–o3** buttons for inspecting each output locally;
+  **[** and **]** cycle them when you are not typing in a field. **Program** returns
+  to following the live feed. The dot marks the output currently on Program.
+  This choice stays in the browser tab across reloads and Audio/Visual page changes.
+  Use the existing Program and Auxiliary routing controls to change those feeds.
+  Inspection uses small, requested previews and leaves playback, recording and the score alone.
 - On Linux, **Display › Show Program fullscreen** (**Shift+F**) shows Program on a
   chosen monitor in Studio's own window, drawn from the texture it was rendered
   into at the display's refresh: no readback, JPEG or browser in between. Edits
@@ -304,6 +310,12 @@ render thread; JPEG and socket writes do not. Buses share readback when both ask
 for the selected output in the same iteration. Each viewer requests its next
 frame only after decoding/display scheduling. Inactive thumbnails retain their
 staggered lower refresh rate. Closed viewers stop demanding captures.
+
+Local inspection uses `GET /api/frame?bus=monitor&output=o0` (through `o3`), with
+the same session-token and origin checks. Each requested output has an independent,
+bounded encoder, created only when first inspected. Captures share a 20 fps budget
+and fit within 480×270; GL scales before readback. Multiple controllers can inspect
+different outputs. Changing the inspected output never sends a score or transport edit.
 
 `window.gorgonPreview` exposes up to 300 timing samples per browser: server render,
 readback and JPEG durations, plus browser request, body transfer, decode and

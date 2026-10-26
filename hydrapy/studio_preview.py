@@ -23,7 +23,8 @@ class Preview:
     Locks protect references only. Encoding, disk writes, HTTP waits and socket writes
     never hold up the render thread. A request asks for a fresh capture, not a queue.
     """
-    def __init__(self):
+    def __init__(self, *, size=None):
+        self.size = size
         self.condition = threading.Condition()
         self.running = True
         self.generation = self.sequence = 0
@@ -122,7 +123,7 @@ class Preview:
             try:
                 started = time.monotonic()
                 metrics['encode_wait_ms'] = (started - metrics['captured']) * 1000
-                data = jpeg(frame, (160, 90) if thumbnail else None)
+                data = jpeg(frame, (160, 90) if thumbnail else self.size)
                 metrics['jpeg_ms'] = (time.monotonic() - started) * 1000
                 with self.condition:
                     if not self.running or generation != self.generation:

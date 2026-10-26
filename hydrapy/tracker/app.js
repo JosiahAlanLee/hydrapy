@@ -125,9 +125,33 @@ let scoreFailed = false, failedDocument = null, acceptedDocument = null;
 let transportQueue = Promise.resolve(), conflicted = false;
 let transportPending = 0, transportEpoch = 0;
 let transportRevision = null;
+let previewOutput='program';
+try{const saved=sessionStorage.getItem('gorgon-preview-output');if(['program','o0','o1','o2','o3'].includes(saved))previewOutput=saved;}catch{}
 const preview = new PreviewStream(outputType === 'aux' ? 'aux' : 'program');
 window.gorgonPreview = preview.stats;
 const escapeHTML = value => String(value).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function syncPreview(result=remote){
+  if(!result)return;
+  const inspect=!outputType&&previewOutput!=='program';
+  const output=outputType==='aux'?result.document.modes.aux:inspect?previewOutput:result.output;
+  preview.select(output,outputType==='aux'?result.aux_generation:result.generation,
+    outputType==='aux'?'aux':inspect?'monitor':'program');
+  if(outputType)return;
+  $('monitorLabel').textContent=inspect?`PREVIEW ${output.toUpperCase()}`:'PROGRAM';
+  $('sceneMeta').textContent=`${inspect?'PREVIEW':'PROGRAM'} · ${output.toUpperCase()}`;
+  $('previewCanvas').setAttribute('aria-label',`Hydra ${output} ${inspect?'preview':'live Program preview'}`);
+  document.querySelectorAll('button[data-preview-output]').forEach(button=>{
+    const value=button.dataset.previewOutput;
+    button.setAttribute('aria-pressed',String(value===previewOutput));
+    button.classList.toggle('on-air',value===result.output);
+    button.title=value==='program'?'Follow live Program':`Preview ${value}${value===result.output?' · live Program':''} · [ / ] cycle`;
+  });
+}
+function selectPreview(output){
+  previewOutput=output;
+  try{sessionStorage.setItem('gorgon-preview-output',output);}catch{}
+  syncPreview();
+}
 function saveLocal(){
   if (!remote) return;
   pendingScore = structuredClone(state);
@@ -311,15 +335,13 @@ async function pollRemote(){
       remote=result;
       adoptTransport(result, Math.max(0,result.server_now-result.sampled)+(performance.now()-started)/2000);
     }else if(!remote)remote=result;
-    preview.select(outputType==='aux'?result.document.modes.aux:result.output,
-      outputType==='aux'?result.aux_generation:result.generation);
+    syncPreview(result);
     if(!outputType){
       renderBindings(result.controls);
       if(JSON.stringify(result.scenes??[])!==JSON.stringify(patchScenes)){
         patchScenes=result.scenes??[];renderRows();updateInspector();
       }
       $('sceneName').textContent=result.path?.split('/').pop()||'Choose a patch';
-      $('sceneMeta').textContent=result.output.toUpperCase();
     }
     $('connectionStatus').textContent=result.playing?'Transport running':'Transport paused';
     const native=result.native?.active?` · ${result.native.where==='window'?'native window':'fullscreen '+result.native.where} ${Math.round(result.native.refresh)} Hz`:'';
@@ -564,7 +586,7 @@ function updateControls(){
   if(master)master.gain.setTargetAtTime(state.sound?.23:0,audioContext.currentTime,.02);
   $('tempo').value=state.bpm;$('key').value=state.key;$('audioBtn').setAttribute('aria-pressed',state.sound);$('audioLabel').textContent=state.sound?'Sound on':'Sound off';$('loopBtn').setAttribute('aria-pressed',state.loop);$('loopBtn').classList.toggle('active',state.loop);
   $('loopBtn').title=state.loop?`Looping pattern ${state.pattern+1}; click to disable`:`Loop selected pattern ${editPattern+1}`;
-  $('programMode').value=state.modes.program;$('auxMode').value=state.modes.aux;$('sceneName').textContent=remote?.path?.split('/').pop()||'Choose a patch';$('sceneMeta').textContent=remote?.output?.toUpperCase()||'HYDRAPY';
+  $('programMode').value=state.modes.program;$('auxMode').value=state.modes.aux;$('sceneName').textContent=remote?.path?.split('/').pop()||'Choose a patch';syncPreview();
   const sec=64*60/state.bpm;$('duration').textContent=`${pad(Math.floor(sec/60))}:${(sec%60).toFixed(1).padStart(4,'0')}`;
 }
 
@@ -592,6 +614,9 @@ if(outputType){
   requestAnimationFrame(outputFrame);
 }else{
   const outputPresence={program:0,aux:0};
+  document.querySelectorAll('button[data-preview-output]').forEach(button=>{
+    button.onclick=()=>selectPreview(button.dataset.previewOutput);
+  });
   function toggleBlackout(){return transport(()=>({blackout:!blackout}),{score:false});}
   // Switching on can reload the patch at the monitor's size (shaders compile), so allow it time.
   async function setNative(enabled){
@@ -855,6 +880,11 @@ if(outputType){
       else if(inGrid&&key==='a'){e.preventDefault();selectBlock(true);}
       // Native copy/cut/paste events carry a validated block across controllers.
       return;
+    }
+    if(!e.altKey&&(e.key==='['||e.key===']')){
+      e.preventDefault();
+      const current=Number((previewOutput==='program'?remote?.output||'o0':previewOutput)[1]);
+      selectPreview(`o${mod(current+(e.key===']'?1:-1),4)}`);return;
     }
     if(e.key==='Escape'){
       selectionAnchor=null;updateSelection();document.querySelectorAll('details[open]').forEach(d=>{d.open=false;});return;

@@ -99,6 +99,13 @@ details[open] > summary { color: var(--mint); border-color: #6f8d77; background:
 .curve-collapsed .automation { display: none; }
 .inspector { min-width: 0; }
 .inspector .panel-heading { min-height: 36px; }
+.inspector .monitor-meta { align-self: stretch; gap: 8px; }
+.preview-picker { display: flex; gap: 4px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+.preview-picker button { flex: 1; min-width: 0; padding: 5px 3px; font: 10px var(--mono); color: #9bb09f; border: 1px solid #35483b; border-radius: 3px; }
+.preview-picker button:first-child { flex: 1.8; }
+.preview-picker button[aria-pressed=true] { color: #d3f5dc; background: #2a4d34; border-color: #8ab392; }
+.preview-picker button.on-air::after { content: '•'; color: #a6dfbf; padding-left: 3px; }
+.preview-picker button:focus-visible { outline: 2px solid #e2ac77; outline-offset: 2px; }
 .inspector-section { padding: 13px 13px 8px; }
 .inspector-description, .output-settings p { color: #9bb09f; font-size: 10px; }
 .bindings label { font-size: 10px; }

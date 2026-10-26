@@ -16,7 +16,7 @@ pytestmark = pytest.mark.skipif(os.environ.get('HYDRAPY_BROWSER_TESTS') != '1',
 @pytest.fixture
 def workspace(tmp_path):
     from playwright.sync_api import sync_playwright
-    (tmp_path/'p.py').write_text("from hydrapy import *\nz=Param('Dolly Z', .35)\nr=Param('Roll',0,min=-45,max=45)\nf=Param('Feedback',.25)\nsolid(z,0,0).out(o0)\nsolid(0,.8,0).out(o1)\n")
+    (tmp_path/'p.py').write_text("from hydrapy import *\nz=Param('Dolly Z', .35)\nr=Param('Roll',0,min=-45,max=45)\nf=Param('Feedback',.25)\nsolid(z,0,0).out(o0)\nsolid(0,.8,0).out(o1)\nsolid(0,0,.8).out(o2)\nsolid(.8,.8,0).out(o3)\n")
     session = Session(tmp_path, 'p.py', backend='cpu', size=(64,36), fps=30)
     server, token = make_server(session, 0)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -589,3 +589,89 @@ def test_display_menu_hidden_without_native_output_and_explains_without_a_displa
         tab.close()
     finally:
         server.shutdown(); server.server_close(); native.close()
+
+
+def test_monitor_output_picker_and_shortcuts_keep_program_auxiliary_and_score(workspace):
+    import copy
+    session, page, context, root = workspace
+    with page.expect_popup() as opened:
+        page.locator('#programBtn').click()
+    program = opened.value
+    program.locator('#outputDismiss').click()
+    with page.expect_popup() as opened:
+        page.locator('#auxBtn').click()
+    aux = opened.value
+    aux.locator('#outputDismiss').click()
+    aux.wait_for_function('gorgonPreview.output==="o1" && gorgonPreview.frames>=1')
+    session.call('pause', paused=True)
+    document, revision = copy.deepcopy(session.tracker.document), session.tracker.revision
+    clock, transport = session.clock_time, session.tracker.transport_revision
+    for output in ('o0', 'o1', 'o2', 'o3'):
+        page.locator(f'[data-preview-output="{output}"]').click()
+        page.wait_for_function('(o)=>gorgonPreview.output===o && gorgonPreview.bus==="monitor"', arg=output)
+        assert page.locator(f'[data-preview-output="{output}"]').get_attribute('aria-pressed') == 'true'
+        assert page.locator('#monitorLabel').text_content() == f'PREVIEW {output.upper()}'
+    page.wait_for_function("document.getElementById('previewCanvas').getContext('2d').getImageData(100,70,1,1).data[1]>190")
+    assert session.tracker.document == document and session.tracker.revision == revision
+    assert session.clock_time == clock and session.tracker.transport_revision == transport
+    assert session.renderer.patch.display.name == 'o0'
+    assert program.evaluate('gorgonPreview.output') == 'o0' and aux.evaluate('gorgonPreview.output') == 'o1'
+    assert program.evaluate("document.getElementById('outputCanvas').getContext('2d').getImageData(600,400,1,1).data[1]") < 3
+    # A changed live route does not override a pinned local preview.
+    page.locator('[data-preview-output="o2"]').click()
+    page.wait_for_function('gorgonPreview.output==="o2"')
+    session.call('output', index=3)
+    page.wait_for_function("document.querySelector('[data-preview-output=o3]').classList.contains('on-air')")
+    assert page.evaluate('gorgonPreview.output') == 'o2'
+    page.get_by_role('button', name='Follow live Program', exact=True).click()
+    page.wait_for_function('gorgonPreview.output==="o3" && gorgonPreview.bus==="program"')
+    page.locator('[data-row="4"][data-col="0"]').click()
+    page.keyboard.press(']')
+    page.wait_for_function('gorgonPreview.output==="o0" && gorgonPreview.bus==="monitor"')
+    page.keyboard.press('[')
+    page.wait_for_function('gorgonPreview.output==="o3"')
+    assert page.locator('.cell.selected').get_attribute('data-row') == '4'
+    page.locator('#tempo').focus()
+    page.keyboard.press(']')
+    assert page.locator('[data-preview-output="o3"]').get_attribute('aria-pressed') == 'true'
+    page.get_by_role('tab', name='Visual').click()
+    page.reload()
+    page.wait_for_function('gorgonPreview.output==="o3" && gorgonPreview.bus==="monitor"')
+    assert page.get_by_role('tab', name='Visual').get_attribute('aria-selected') == 'true'
+    page.screenshot(path='/tmp/gorgon-monitor-desktop.png')
+    page.set_viewport_size({'width':390, 'height':844})
+    page.locator('#previewPicker').scroll_into_view_if_needed()
+    assert page.locator('#previewPicker').evaluate('(e)=>e.scrollWidth<=e.clientWidth')
+    page.screenshot(path='/tmp/gorgon-monitor-phone.png')
+
+
+def test_monitor_switches_discard_delayed_frames_and_controllers_inspect_independently(workspace):
+    session, page, context, root = workspace
+    page.add_init_script('''const original=HTMLImageElement.prototype.decode;
+      HTMLImageElement.prototype.decode=async function(){
+        await original.call(this); await new Promise(resolve=>setTimeout(resolve,150));
+      };''')
+    page.reload()
+    page.wait_for_function('gorgonPreview.frames>=2')
+    active, peak = set(), []
+    def request(r):
+        if '/api/frame?' in r.url:
+            active.add(r); peak.append(len(active))
+    page.on('request', request)
+    page.on('requestfinished', lambda r: active.discard(r))
+    page.on('requestfailed', lambda r: active.discard(r))
+    page.locator('[data-preview-output="o2"]').click()
+    page.locator('[data-preview-output="o3"]').click()
+    page.wait_for_function('gorgonPreview.output==="o3" && gorgonPreview.bus==="monitor"')
+    count = page.evaluate('gorgonPreview.frames')
+    other = context.new_page()
+    other.goto(page.url)
+    other.wait_for_function('gorgonPreview.frames>=1')
+    other.locator('[data-preview-output="o1"]').click()
+    other.wait_for_function('gorgonPreview.output==="o1" && gorgonPreview.bus==="monitor"')
+    page.wait_for_function('(n)=>gorgonPreview.frames>n+2', arg=count)
+    assert all(sample['output']=='o3' for sample in page.evaluate('gorgonPreview.samples')[count:])
+    assert other.evaluate('gorgonPreview.output') == 'o1' and session.renderer.patch.display.name == 'o0'
+    assert max(peak) == 1
+    assert all(p.snapshot()['pending'] <= 1 for p in session.monitor_previews.values())
+    other.close()
