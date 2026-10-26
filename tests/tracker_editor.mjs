@@ -115,3 +115,26 @@ test('the Breaks kit hears equivalent note spellings alike', () => {
   assert.equal(breaksVoice('D-2'),'snare');assert.equal(breaksVoice('D2'),'snare');
   assert.equal(breaksVoice('F#2'),'hat');assert.equal(breaksVoice('C-3'),'hat');assert.equal(breaksVoice('AIR'),'hat');
 });
+
+test('sound locks survive clipboard, pitch/velocity edits, history and legacy upgrade undo', async () => {
+  const {ensureSounds,resolveSound}=await import('../hydrapy/tracker/sounds.js');
+  const d=score(),h=new ScoreHistory();
+  h.change(d,'sound',()=>{
+    ensureSounds(d);d.sounds[0]={machine:16,params:{p2:50}};
+    putCell(d.patterns[0],0,0,{note:'C-4',vel:90,locks:{machine:48,p1:0,p2:127}});
+    putCell(d.patterns[0],1,0,{note:'C-4',vel:90});
+  },{});
+  assert.deepEqual(resolveSound(d,0,0,0),{machine:48,params:{p1:0,p2:127}});
+  assert.deepEqual(resolveSound(d,0,0,1),{machine:16,params:{p2:50}});
+  const block=readBlock(JSON.stringify(copyBlock(d.patterns[0],{r0:0,r1:1,c0:0,c1:0})));
+  pasteBlock(d.patterns[1],{row:3,col:0},block);
+  transposeBlock(d.patterns[1],{r0:3,r1:3,c0:0,c1:0},1);
+  setBlockVelocity(d.patterns[1],{r0:3,r1:3,c0:0,c1:0},12);
+  assert.deepEqual(d.patterns[1].audio[0][3],{note:'C#4',vel:12,locks:{machine:48,p1:0,p2:127}});
+  h.undo(d);assert.equal(d.format,'hydrapy-tracker-1');assert.equal(Object.hasOwn(d,'sounds'),false);
+  h.redo(d);assert.equal(d.format,'hydrapy-tracker-2');assert.equal(d.sounds[0].machine,16);
+  for(const locks of [null,[],{p1:true},{p1:128},{p1:1.5},{machine:192},{wat:1}]){
+    const bad=structuredClone(block);bad.rows[0][0].locks=locks;
+    assert.throws(()=>readBlock(JSON.stringify(bad)));
+  }
+});
