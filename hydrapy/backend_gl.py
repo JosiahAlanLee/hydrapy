@@ -288,6 +288,13 @@ class GLRenderer:
         if getattr(self, "_scale", None) is not None:
             self._scale_vao.release(); self._scale.release()
             self._scale = None
+        if getattr(self, "_mip_prog", None) is not None:
+            for fb in self._mip_targets.values():
+                fb["fbo"].release(); fb["tex"].release()
+            if self._mip_buffer is not None:
+                self._mip_buffer.release()
+            self._mip_vao.release(); self._mip_prog.release()
+            self._mip_prog = None
         for fb in self._reduce_targets.values():
             fb["fbo"].release(); fb["tex"].release()
         self._reduce_targets.clear()
@@ -568,7 +575,7 @@ class GLRenderer:
                 else:
                     vao.render(self.gl.TRIANGLES)
                 if isinstance(target, _MipTarget):
-                    dest["tex"].build_mipmaps()
+                    self._build_levels(dest["tex"])
                     dest["tex"].filter = (self.gl.LINEAR_MIPMAP_LINEAR, self.gl.LINEAR)
                     dest["mip"] = True
                 elif dest.get("mip"):                # the same tmp in another variant: plain sampling again
@@ -578,6 +585,61 @@ class GLRenderer:
         self._update_probes(wall_time)
         from .live import run_hooks
         run_hooks(ctx, self)
+
+    def _build_levels(self, tex):
+        """Build ``tex``'s mip chain the way the CPU's ``_mip_pyramid`` does.
+
+        Each level floor-halves (never below 1) and each texel is the clamped bilinear sample of
+        the level above at its centre. Where a level halves both sides exactly that is a 2x2
+        average, which glGenerateMipmap also gives; GL leaves the filter to the driver once a size
+        is odd, and NVIDIA's differs, so a chain reaching an odd size (1920x1080 does at 135) blurred
+        differently on the GPU than on the CPU. The driver builds (and allocates) every level; the
+        levels from the first odd source down are then replaced, drawn on the GPU and copied in
+        through a pixel buffer, so nothing crosses to the CPU.
+        """
+        tex.build_mipmaps()
+        sizes = [tuple(tex.size)]
+        while sizes[-1] != (1, 1):
+            w, h = sizes[-1]
+            sizes.append((max(w // 2, 1), max(h // 2, 1)))
+        first = next((i for i in range(1, len(sizes))
+                      if (sizes[i][0] * 2, sizes[i][1] * 2) != sizes[i - 1]), None)
+        if first is None:
+            return
+        if getattr(self, "_mip_prog", None) is None:
+            self._mip_prog = self.ctx.program(vertex_shader=VERTEX_DESKTOP, fragment_shader="""#version 330 core
+uniform sampler2D src; uniform int level; uniform ivec2 srcSize; uniform ivec2 dstSize; out vec4 f;
+void main() {
+  vec2 c = (floor(gl_FragCoord.xy) + 0.5) / vec2(dstSize) * vec2(srcSize) - 0.5;
+  vec2 i0 = floor(c), t = c - i0;
+  ivec2 a = clamp(ivec2(i0), ivec2(0), srcSize - 1), b = clamp(ivec2(i0) + 1, ivec2(0), srcSize - 1);
+  f = mix(mix(texelFetch(src, a, level), texelFetch(src, ivec2(b.x, a.y), level), t.x),
+          mix(texelFetch(src, ivec2(a.x, b.y), level), texelFetch(src, b, level), t.x), t.y);
+}""")
+            self._mip_vao = self.ctx.vertex_array(self._mip_prog, [(self.vbo, "2f", "position")])
+            self._mip_targets, self._mip_buffer = {}, None
+        dtype = tex.dtype
+        for level in range(first, len(sizes)):
+            size = sizes[level]
+            key = (size, dtype)
+            if key not in self._mip_targets:
+                self._mip_targets[key] = self._fbo(size, dtype=dtype)
+            target = self._mip_targets[key]
+            target["fbo"].use()
+            self.ctx.viewport = (0, 0, *size)
+            tex.use(location=0)
+            self._set(self._mip_prog, "src", 0)
+            self._set(self._mip_prog, "level", level - 1)
+            self._set(self._mip_prog, "srcSize", sizes[level - 1])
+            self._set(self._mip_prog, "dstSize", size)
+            self._mip_vao.render(self.gl.TRIANGLES)
+            nbytes = size[0] * size[1] * 4 * {"f1": 1, "f2": 2, "f4": 4}[dtype]
+            if self._mip_buffer is None or self._mip_buffer.size < nbytes:
+                if self._mip_buffer is not None:
+                    self._mip_buffer.release()
+                self._mip_buffer = self.ctx.buffer(reserve=nbytes)
+            target["fbo"].read_into(self._mip_buffer, components=4, dtype=dtype)
+            tex.write(self._mip_buffer, level=level)
 
     def _probe_mean(self, texture, region):
         """Exact tiled sum in float32; only one RGBA pixel crosses to the CPU."""
