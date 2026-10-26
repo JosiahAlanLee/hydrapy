@@ -203,7 +203,7 @@ def test_blocked_jpeg_does_not_block_render_record_snapshot_or_pause(tmp_path, m
     class Recorder:
         def __init__(self, path, fps):
             self.path, self.frames = path, []
-        def push(self, frame):
+        def push(self, frame, at=None):
             self.frames.append(frame.copy())
         def close(self):
             pass

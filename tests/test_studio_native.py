@@ -52,7 +52,7 @@ def recording_output(tmp_path, monkeypatch):
             self.close_error = False
             recordings.append(self)
 
-        def push(self, frame):
+        def push(self, frame, at=None):
             if self.fail.is_set():
                 raise RuntimeError('test encoder failed')
             self.frames.append(frame.copy())
@@ -263,5 +263,81 @@ def test_studio_times_on_screen_commands(tmp_path):
         assert cue[0]['queue_ms'] >= 0 and cue[0]['total_ms'] >= cue[0]['queue_ms']
         assert all(r['action'] != 'source' for r in report['samples'])
         assert s.tracker_state['edit_delay_ms'] == 120
+    finally:
+        s.close()
+
+
+def test_recording_keeps_one_frame_per_tick_when_frames_arrive_near_slot_edges(monkeypatch):
+    """Frames at exactly the recording rate (the native output's flips), with a millisecond of jitter,
+    each fill one slot. Counted from when Record was pressed, frames that happened to sit near slot
+    edges dropped one frame and repeated the next (a simulation of that case did so for 128 of 600)."""
+    import random
+    import hydrapy.export
+    from hydrapy.studio import Recorder
+    written = []
+
+    def save_mp4(frames, path, fps, encoder):
+        written.extend(frames)
+    monkeypatch.setattr(hydrapy.export, 'save_mp4', save_mp4)
+    recorder = Recorder(None, 60.)
+    random.seed(4)
+    first = recorder.start + .98 / 60  # the first frame lands just before a slot edge
+    for k in range(170):  # fewer than the encoder queue holds: this loop never yields to its thread
+        recorder.push(k, first + k / 60 + random.uniform(-.001, .001))
+    recorder.close()
+    assert written == list(range(170))
+
+
+def test_editor_preview_stays_small_while_recording_with_the_output_showing(recording_output):
+    s, window, recordings = recording_output
+    sizes, read = [], s._read_frame
+
+    def spy(size=None):
+        sizes.append(size)
+        return read(size)
+    s._read_frame = spy
+    s.call('native_output', enabled=True, monitor='window')
+    s.call('tracker_transport', enabled=True, playing=True, beat=0)
+    s.call('record')
+    wait_for(s, lambda: len(recordings[-1].frames) >= 2)
+    sizes.clear()
+    frame = s.preview.frame(s.preview.output, -1, timeout=3, thumbnails=False)
+    s.preview.frame(s.preview.output, frame['sequence'] if frame else -1, timeout=3, thumbnails=False)
+    assert s._confidence_size() in sizes  # a scaled read for the editor, not the recording's full frame
+    assert None in sizes                  # the recording still reads full frames
+    s.call('record')
+
+
+@pytest.mark.parametrize('backend', ['cpu', 'gl'])
+def test_feedback_carries_on_when_the_output_changes_the_render_size(tmp_path, backend):
+    """Opening the fullscreen output reloads the patch at the monitor's size; its feedback history
+    is scaled across instead of starting again from black."""
+    import numpy as np
+    from hydrapy.studio import Session
+    (tmp_path / 'p.py').write_text('from hydrapy import *\nsrc(o0).blend(solid(1, .5, 0), .2).out()\n')
+    try:
+        s = Session(tmp_path, 'p.py', backend=backend, size=(64, 36))
+    except Exception as exc:
+        pytest.skip(f'no {backend} renderer here: {exc}')
+    try:
+        if backend == 'gl' and not hasattr(s.renderer, 'ctx'):
+            pytest.skip('no GL context here')
+        s.call('tracker_transport', enabled=True, playing=True, beat=0)
+        time.sleep(.5)                                  # the feedback converges towards the solid colour
+        s.call('pause', paused=True)
+        handle = s._handle
+
+        def resize(action, data):
+            if action == 'resize_for_test':
+                s._resize((96, 54))
+                return {}
+            return handle(action, data)
+        s._handle = resize
+        s.call('resize_for_test')
+        frame = s.call('snapshot') and s.last_frame     # the first frame at the new size, still paused
+        assert frame.shape == (54, 96, 3)
+        assert frame[..., 0].mean() > 100               # not black: the history came across, scaled
+        if backend == 'cpu':
+            assert {b.shape[:2] for b in s.renderer.env.buffers.values()} == {(54, 96)}
     finally:
         s.close()
