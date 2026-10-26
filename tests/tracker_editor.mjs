@@ -3,6 +3,7 @@ import {readFileSync} from 'node:fs';
 import {test} from 'node:test';
 import {ScoreHistory, bounds, copyBlock, readBlock, pasteBlock, clearBlock, putCell,
   transposeBlock, setBlockVelocity, pianoNote, activity} from '../hydrapy/tracker/editor.js';
+import {breaksVoice} from '../hydrapy/tracker/notes.js';
 const score = () => JSON.parse(readFileSync(new URL('../hydrapy/tracker/demo.json', import.meta.url)));
 const box = {r0:0,r1:3,c0:0,c1:6};
 
@@ -107,4 +108,10 @@ test('a block from a mixed editor cannot paste into hidden page columns', () => 
   assert.deepEqual(result,{written:1,skipped:1});
   assert.deepEqual(destination.audio[3][8],{note:'C-4',vel:100});
   assert.deepEqual(destination.keys,before);
+});
+
+test('the Breaks kit hears equivalent note spellings alike', () => {
+  assert.equal(breaksVoice('C-2'),'kick');assert.equal(breaksVoice('C2'),'kick');
+  assert.equal(breaksVoice('D-2'),'snare');assert.equal(breaksVoice('D2'),'snare');
+  assert.equal(breaksVoice('F#2'),'hat');assert.equal(breaksVoice('C-3'),'hat');assert.equal(breaksVoice('AIR'),'hat');
 });

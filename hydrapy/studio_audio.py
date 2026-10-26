@@ -15,6 +15,7 @@ import time
 import numpy as np
 
 from .live import AudioQueue, Soundtrack
+from .studio_tracker import note_midi
 from .tracker_cv import TrackerCV
 
 PORTS = ('optical_L', 'optical_R', 'breaks_L', 'breaks_R')
@@ -36,11 +37,18 @@ def settings(values):
     return result
 
 
+def drum(note):
+    """The Breaks kit voice for a note, by pitch: C-2 (MIDI 36) kick, D-2 (38) snare, else hat."""
+    midi = note_midi(note)
+    return 'kick' if midi == 36 else 'snare' if midi == 38 else 'hat'
+
+
 class BreaksSynth:
     """The tracker Breaks lane as a deterministic kick/snare/hat synth.
 
     This is the existing synthesized kit, not a sample slicer. Notes select kick
-    (C-2), snare (D-2), or hat (other notes); velocity and mute follow the score.
+    (C-2), snare (D-2), or hat (other notes, and AIR) by pitch, so C2 is the kick too;
+    velocity and mute follow the score.
     Voice envelopes and phase use seconds on the audio clock, not video frames.
     """
     def __init__(self):
@@ -80,17 +88,17 @@ class BreaksSynth:
             if hit and hit['vel'] > 0 and not d['mutes'][0]:
                 # Reconstruct the onset when attaching in the middle of a row.
                 elapsed = max(0., beat[index] * 4 - absolute_rows[index]) * 15 / d['bpm']
-                self.voices.append((times[index] - elapsed, hit['note'], hit['vel'] / 127, self.serial))
+                self.voices.append((times[index] - elapsed, drum(hit['note']), hit['vel'] / 127, self.serial))
                 self.serial += 1
         self.row = int(rows[-1])
         active = []
-        for onset, note, velocity, seed in self.voices:
+        for onset, kind, velocity, seed in self.voices:
             age = np.rint((times - onset) * samplerate) / samplerate
-            length = .3 if note == 'C-2' else .17 if note == 'D-2' else .06
+            length = .3 if kind == 'kick' else .17 if kind == 'snare' else .06
             selected = (age >= 0) & (age < length)
             if selected.any():
                 t = age[selected]
-                if note == 'C-2':
+                if kind == 'kick':
                     k = math.log(44 / 145) / .13
                     early = np.minimum(t, .13)
                     phase = 145 * np.expm1(k * early) / k + 44 * np.maximum(t - .13, 0)
@@ -103,12 +111,12 @@ class BreaksSynth:
                         x = ((x >> np.uint64(16)) ^ x) * np.uint64(277803737)
                         return ((x >> np.uint64(16)) & np.uint64(65535)).astype(float) / 32767.5 - 1
                     high = (noise(n + np.uint64(1)) - noise(n)) * .5
-                    snare = note == 'D-2'
+                    snare = kind == 'snare'
                     level, decay = (.44, .15) if snare else (.18, .04)
                     signal = high * level * np.exp(math.log(.001 / level) * t / decay)
                 out[selected] += (signal * velocity).astype(np.float32)
             if times[-1] - onset < length:
-                active.append((onset, note, velocity, seed))
+                active.append((onset, kind, velocity, seed))
         self.voices = active[-32:]
         return np.clip(out, -1, 1)
 

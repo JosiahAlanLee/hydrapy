@@ -147,3 +147,16 @@ def test_server_disconnect_can_retry_and_start_failure_preserves_disabled_config
     with pytest.raises(ValueError, match='no running server'):
         audio.configure(dict(enabled=True))
     assert not audio.config['enabled'] and not audio.client
+
+
+def test_breaks_kit_hears_equivalent_note_spellings_alike():
+    """C2 is C-2 (the kick) and D2 is D-2 (the snare): scores written outside the editor, imported or
+    sent over the API keep their spelling, and must not turn the kick and snare into hats."""
+    canonical = snapshot()
+    other = copy.deepcopy(canonical)
+    for row in other['document']['patterns'][0]['audio'][0]:
+        if row:
+            row['note'] = row['note'].replace('-', '')       # C-2 -> C2, D-2 -> D2; F#2 stays
+    a = BreaksSynth().render(canonical, 100., 48000, 48000)
+    b = BreaksSynth().render(other, 100., 48000, 48000)
+    np.testing.assert_array_equal(a, b)
