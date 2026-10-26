@@ -18,6 +18,7 @@ def recording_output(tmp_path, monkeypatch):
 
         def __init__(self):
             self.closed = threading.Event()
+            self.presented = 0
 
         def target_size(self, where):
             return self.size if where == 'window' else (128, 72)
@@ -35,6 +36,7 @@ def recording_output(tmp_path, monkeypatch):
 
         def present(self, *args, **kwargs):
             now = time.monotonic()
+            self.presented += 1
             return now, now, False
 
         def describe(self):
@@ -50,6 +52,7 @@ def recording_output(tmp_path, monkeypatch):
             self.path, self.frames, self.closed = path, [], False
             self.fail = threading.Event()
             self.close_error = False
+            self.finishing, self.finished = threading.Event(), None   # set `finished` to hold close()
             recordings.append(self)
 
         def push(self, frame, at=None):
@@ -58,6 +61,9 @@ def recording_output(tmp_path, monkeypatch):
             self.frames.append(frame.copy())
 
         def close(self):
+            self.finishing.set()
+            if self.finished is not None:
+                self.finished.wait(5)
             self.closed = True
             if self.close_error:
                 raise RuntimeError('test encoder close failed')
@@ -103,6 +109,26 @@ def test_closing_output_while_recording_keeps_frames_and_restores_size_on_stop(r
     assert result['file'].endswith('.mp4') and recording.closed
     assert s.size == s.renderer.size == (64, 36) and s.native_restore_size is None
     assert {frame.shape for frame in recording.frames} == {(54, 96, 3)}
+
+
+def test_the_output_keeps_drawing_while_a_stopped_recording_finishes_encoding(recording_output):
+    s, window, recordings = recording_output
+    s.call('native_output', enabled=True, monitor='window')
+    s.call('tracker_transport', enabled=True, playing=True, beat=0)
+    s.call('record')
+    recording = recordings[-1]
+    wait_for(s, lambda: len(recording.frames) >= 2)
+    recording.finished = threading.Event()
+    stopped = []
+    caller = threading.Thread(target=lambda: stopped.append(s.call('record')))
+    caller.start()
+    assert recording.finishing.wait(3)
+    shown = window.presented
+    wait_for(s, lambda: window.presented >= shown + 3)   # still flipping while FFmpeg drains
+    assert s.call('tracker_transport', playing=True)['playing'] and s.recorder is None and not stopped
+    recording.finished.set()
+    caller.join(3)
+    assert stopped[0]['file'].endswith('.mp4') and recording.closed and s.notice == 'Video recording saved.'
 
 
 def test_reopening_output_preserves_the_size_pending_from_before_recording(recording_output):
