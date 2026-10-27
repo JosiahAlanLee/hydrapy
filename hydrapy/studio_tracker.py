@@ -257,7 +257,7 @@ class LaneState:
 
     def evaluated(self, segment):
         """The first tick of version-3 ``segment`` not yet evaluated, or None."""
-        return self._follower.frontier if segment == self.segment else None
+        return self._follower.evaluated(segment)
 
     @staticmethod
     def _hit(document, row, lane):
@@ -317,7 +317,7 @@ class LaneState:
             if live or self.transport is None:
                 self.__init__()
             self.transport, self.segment, self.started = snapshot['transport_revision'], segment, [None] * 6
-            self._follower.begin(-tracker_v3.TICKS if live else math.floor(u))
+            self._follower.begin(-tracker_v3.TICKS if live else math.floor(u), segment)
         self.moving = moving
         beat, _, row = tracker_v3.position(d, snapshot['start']['tick'], [u])
         gate = [0.] * 6
@@ -397,17 +397,37 @@ class Tracker:
         self.transport_revision = 0
         self.anchor_time = self.anchor_beat = 0.
         self.start, self.elapsed = {'tick': 0, 'entry': None}, 0
-        self.fill = [{'at': 0, 'on': False}]
-        self.bus = {'fill': [{'at': 0, 'on': False}], 'mutes': [[{'at': 0, 'on': False}] for _ in range(6)]}
+        # FILL and the bus layer, shared live with Studio's outputs (tracker_v3.Layers).
+        self.layers = tracker_v3.Layers()
         self.lease = None           # [sender, monotonic time of its last request]
         self.trace = None           # a text file that takes JSONL trace lines, or None
         self._lanes = LaneState()
         if self.v3:
-            self._segment(0, 0., None)
+            self._segment(0, 0.)
 
     @property
     def v3(self):
         return self.document['format'] == tracker_v3.FORMAT
+
+    @property
+    def fill(self):
+        return self.layers.fill
+
+    @fill.setter
+    def fill(self, transitions):
+        self.layers.fill = transitions
+
+    @property
+    def bus(self):
+        return self.layers.bus
+
+    @bus.setter
+    def bus(self, layer):
+        self.layers.bus = layer
+
+    @property
+    def segment(self):
+        return self.transport_revision, self.start['tick']
 
     def normalize(self, beat):
         if self.v3:
@@ -434,10 +454,10 @@ class Tracker:
                 self._reanchor(clock_time, self.document['bpm'])
                 return
             # A seek lands on the nearest tick (evaluator.md#ticks).
-            now = self.ticks(clock_time)
-            self._segment(math.floor(beat * tracker_v3.TICKS + .5) % tracker_v3.timeline(self.document).cycle,
-                          clock_time, now)
-            self.transport_revision += 1
+            with self.layers.lock:
+                self.transport_revision += 1
+                self._segment(math.floor(beat * tracker_v3.TICKS + .5) % tracker_v3.timeline(self.document).cycle,
+                              clock_time)
             return
         self.anchor_beat, self.anchor_time = self.normalize(beat), clock_time
         if discontinuity:
@@ -447,20 +467,30 @@ class Tracker:
         """Studio started playing: version 3 starts a segment at the tick nearest the playhead.
 
         Play doesn't change ``transport_revision``; ``start`` tells the segments apart.
+        So a Play that lands on the anchor's own tick (a pause right after a seek, or
+        after whole cycles) continues the segment instead: a new one would share its key.
         """
+        self._lanes.moving = False          # the patch's lane signals hear the resume too
         if self.v3 and self.enabled:
-            now = self.ticks(clock_time)
-            self._segment(round(self.start['tick'] + now) % tracker_v3.timeline(self.document).cycle, clock_time, now)
+            tick = round(self.start['tick'] + self.ticks(clock_time)) % tracker_v3.timeline(self.document).cycle
+            if tick != self.start['tick']:
+                with self.layers.lock:
+                    self._segment(tick, clock_time)
 
-    def _segment(self, tick, clock_time, now):
-        """Start a segment at cycle ``tick``. FILL and the bus layer carry their state at elapsed
-        tick ``now`` of the segment it ends (all off when there was none)."""
+    def _segment(self, tick, clock_time):
+        """Start a segment at cycle ``tick``, with FILL and the bus layer in the state last set.
+
+        That includes a change stamped at a tick the old segment never reached, such as FILL
+        pressed while paused: it was in force for everything Studio hadn't yet evaluated.
+        """
         def carried(transitions):
-            return [{'at': 0, 'on': now is not None and tracker_v3.state_at(transitions, now)}]
-        self.fill = carried(self.fill)
-        self.bus = {'fill': carried(self.bus['fill']), 'mutes': [carried(m) for m in self.bus['mutes']]}
-        self.start, self.elapsed = tracker_v3.anchor(self.document, tick), 0
-        self.anchor_time, self.anchor_beat = clock_time, tick / tracker_v3.TICKS
+            return [{'at': 0, 'on': transitions[-1]['on']}]
+        with self.layers.lock:
+            self.fill = carried(self.fill)
+            self.bus = {'fill': carried(self.bus['fill']), 'mutes': [carried(m) for m in self.bus['mutes']]}
+            self.start, self.elapsed = tracker_v3.anchor(self.document, tick), 0
+            self.anchor_time, self.anchor_beat = clock_time, tick / tracker_v3.TICKS
+            self.layers.segment = self.segment
 
     def _reanchor(self, clock_time, bpm):
         """Keep the segment for a tempo change: ``elapsed`` becomes the whole tick most recently
@@ -509,10 +539,9 @@ class Tracker:
         # Where the playhead is, as an entry and the ticks into it, on the old score's timeline.
         before, after = _timeline(old), _timeline(prepared)
         if self.v3:
-            now = self.ticks(clock_time)
-            tick = (self.start['tick'] + now) % before[2][-1]
+            tick = (self.start['tick'] + self.ticks(clock_time)) % before[2][-1]
         else:
-            now, tick = None, (self.beat(clock_time) - (16 * old['pattern'] if old['loop'] else 0)) * tracker_v3.TICKS
+            tick = (self.beat(clock_time) - (16 * old['pattern'] if old['loop'] else 0)) * tracker_v3.TICKS
         entry = bisect.bisect_right(before[2], tick) - 1
         moved = before != after                     # score-v3.md's transport changes
         # A looped pattern's beats count from the song's start in versions 1 and 2 and from the
@@ -522,31 +551,34 @@ class Tracker:
         tick = _carry(before, after, entry, tick - before[2][entry]) if moved else tick
         tick = round(tick) % after[2][-1]
         bpm = old['bpm']
-        self.document = prepared
-        self.revision += 1
-        if not self.v3:                             # back to version 1 or 2: a beat anchor
-            self.anchor_beat = self.normalize(tick / tracker_v3.TICKS + (16 * prepared['pattern'] if prepared['loop'] else 0))
-            self.anchor_time = clock_time
-        elif transport or changes_format:
-            self._segment(tick, clock_time, now)
-        else:
-            self._reanchor(clock_time, bpm)         # an ordinary edit: tempo changes keep the place
-        if transport:
-            self.transport_revision += 1
+        with self.layers.lock:
+            self.document = prepared
+            self.revision += 1
+            if transport:
+                self.transport_revision += 1
+            if not self.v3:                         # back to version 1 or 2: a beat anchor
+                beat = tick / tracker_v3.TICKS + (16 * prepared['pattern'] if prepared['loop'] else 0)
+                self.anchor_beat, self.anchor_time = self.normalize(beat), clock_time
+            elif transport or changes_format:
+                self._segment(tick, clock_time)
+            else:
+                self._reanchor(clock_time, bpm)     # an ordinary edit: tempo changes keep the place
 
     # -- FILL and the bus layer (version 3) -----------------------------------
     def set_fill(self, on, stamp):
-        """Studio's FILL key: on or off from ``stamp``, the first tick Studio's outputs haven't evaluated."""
-        if tracker_v3.state_at(self.fill, stamp) == on:
-            return                                  # reapplying the state in force is not a change
+        """Studio's FILL key: on or off from ``stamp``, the first tick Studio's outputs haven't
+        evaluated. Call it holding ``layers.lock``, from finding the stamp on."""
+        if self.fill[-1]['on'] == on:
+            return                                  # reapplying the state last set is not a change
         self.fill = [t for t in self.fill if t['at'] <= stamp] + [{'at': stamp, 'on': on}]
         self._trace({'fill': {'at': stamp, 'on': on}, 'received': stamp})
 
     def apply_window(self, segment, sender, window, wall, received):
         """Apply a Rack module's window of the bus layer (bus-io.md#bus-in).
 
-        ``received`` is the first tick Studio's outputs haven't evaluated. Returns
-        False for a window of a segment that is no longer current, which is dropped.
+        ``received`` is the first tick Studio's outputs haven't evaluated; call it holding
+        ``layers.lock`` from finding that on. Returns False for a window of a segment that
+        is no longer current, which is dropped.
         """
         if not isinstance(sender, str) or not re.fullmatch(r'[0-9a-f]{16}', sender):
             raise ValueError('sender is 16 hexadecimal digits')
@@ -611,7 +643,7 @@ class Tracker:
 
     def evaluated(self):
         """The first tick of the current segment the patch's lane signals haven't evaluated, or None."""
-        return self._lanes.evaluated((self.transport_revision, self.start['tick']))
+        return self._lanes.evaluated(self.segment)
 
     def _trace(self, record):
         if self.trace is not None:
@@ -637,7 +669,7 @@ class Tracker:
     def _apply_v3(self, patch, clock_time):
         u = self.ticks(clock_time)
         playhead = dict(document=self.document, transport_revision=self.transport_revision, start=self.start,
-                        fill=self.fill, bus=self.bus)
+                        fill=self.fill, bus=self.bus, layers=self.layers)
         patch.tracker_frame = self._lanes.update_v3(playhead, u, self.enabled)
         for c in self._lanes.new:
             self._trace(c)

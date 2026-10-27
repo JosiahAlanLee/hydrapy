@@ -317,7 +317,8 @@ Direct CV, the Breaks synth and patch lane signals play it as the spec says.
 
 - The playhead adds `start`, `elapsed`, `entry`, `fill` and `bus` in integer ticks,
   1920 per quarter note. A seek lands on the nearest tick; Play starts a new
-  segment at the playhead without changing `transport_revision`.
+  segment at the playhead without changing `transport_revision`, or continues the
+  segment when it lands on the anchor's own tick (a new one would share its key).
 - Changing `loop`, the looped pattern, the chain, or any rate, bar or bars that
   moves the chain is a transport change; Studio keeps the playing entry and the
   beats into it where score-v3.md says so.

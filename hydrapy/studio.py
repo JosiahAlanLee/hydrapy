@@ -465,12 +465,14 @@ class Session:
                     raise ValueError('A bus window sends segment, sender and bus together, without beat, enabled or playing')
                 if not self.tracker.v3:
                     raise ValueError('The bus layer needs a hydrapy-tracker-3 score')
-                self.tracker.apply_window(data['segment'], data['sender'], data['bus'], time.monotonic(),
-                                          self._first_unevaluated())
+                with self.tracker.layers.lock:
+                    self.tracker.apply_window(data['segment'], data['sender'], data['bus'], time.monotonic(),
+                                              self._first_unevaluated())
                 return dict(self.tracker.snapshot(self.clock_time, not self.paused), blackout=self.tracker_blackout)
             enabled = data.get('enabled', self.tracker.enabled)
             playing = data.get('playing', not self.paused)
-            cycle = cycle_beats(self.tracker.document)
+            # Version 3's beat ranges over the cycle; versions 1 and 2 keep 0–64, song-relative.
+            cycle = cycle_beats(self.tracker.document) if self.tracker.v3 else 64
             beat = number(data.get('beat', self.tracker.beat(self.clock_time)), 0, cycle, 'Beat')
             if self.tracker.v3 and beat >= cycle:
                 raise ValueError(f'Beat must be below the cycle\'s {cycle:g}')
@@ -489,7 +491,8 @@ class Session:
             self.tracker_blackout = blackout
             self._set_paused(not playing, segment=not seek)
             if 'fill' in data:
-                self.tracker.set_fill(fill, self._first_unevaluated())
+                with self.tracker.layers.lock:
+                    self.tracker.set_fill(fill, self._first_unevaluated())
             return dict(self.tracker.snapshot(self.clock_time, not self.paused), blackout=self.tracker_blackout)
         elif action == 'jack_audio':
             old = dict(self.audio.config)
@@ -860,12 +863,18 @@ class Session:
 
     def _command(self, item):
         action, data, result, received, mark = item
+        # A Rack module's bus window arrives at least once a second: it neither clears Studio's
+        # error nor shows its own refusal there, and its reply is bus-io.md's plain text.
+        window = action == 'tracker_transport' and 'bus' in data
         try:
             value = self._handle(action, data)
-            if action not in ('source', 'check', 'presets', 'devices', 'mouse'):
+            if action not in ('source', 'check', 'presets', 'devices', 'mouse') and not window:
                 self.error = ''
             result.put(value)
         except Exception as exc:
+            if window:
+                result.put(ValueError(str(exc)))
+                return
             self.error = ''.join(traceback.format_exception_only(type(exc), exc)).strip()
             if action in ('load', 'save', 'restart', 'connections'):
                 self.notice = 'Edit rejected. Previous patch retained.'
@@ -885,9 +894,10 @@ class Session:
         """The first tick of the current segment that none of Studio's outputs has evaluated.
 
         Studio stamps its own changes there (Gorgon evaluator.md#ticks), so the picture,
-        the CV and the listening audio all agree with the record. Never below 0.
+        the CV and the listening audio all agree with the record. Never below 0. Hold
+        ``tracker.layers.lock`` from this to the change, so no output claims ticks between.
         """
-        segment = (self.tracker.transport_revision, self.tracker.start['tick'])
+        segment = self.tracker.segment
         ticks = [self.tracker.evaluated(), self.audio.evaluated(segment),
                  getattr(self.cv, 'evaluated', lambda _: None)(segment)]
         return max([0] + [t for t in ticks if t is not None])
@@ -956,7 +966,8 @@ class Session:
     def _housekeeping(self, now):
         """Status, measured fps, window events and the patch file watch, once per loop."""
         self.last_wall = now
-        self.tracker.housekeep(now, self._first_unevaluated())
+        with self.tracker.layers.lock:
+            self.tracker.housekeep(now, self._first_unevaluated())
         if self.native is not None and self.native.poll() and self.native.active:
             self._native_output(dict(enabled=False))  # its window was closed on the desktop
         self._publish_playhead(now)
