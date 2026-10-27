@@ -1,15 +1,19 @@
-// Score operations have no DOM, audio clock, or transport side effects.
+// Score operations have no DOM, audio clock, or transport side effects. Patterns are version 3's
+// (score3.js): the editor keeps every score that way.
 import {noteMidi, canonicalNote} from './notes.js';
 import {validateLocks} from './sounds.js';
+import {condCode, geometry, parseCond} from './score3.js';
 
 export const LANES = ['z', 'roll', 'feedback'];
 const LIMITS = [[0, 1], [-45, 45], [0, .9]];
-export const COLUMNS = 8;                     // four audio lanes, three automation lanes, SCENE
-export const SCENE = 7;
+export const AUDIO = 6;                       // six audio lanes, three automation lanes, SCENE
+export const COLUMNS = 10;
+export const SCENE = 9;
 export const SCENE_NAME = /^[A-Za-z0-9_-]{1,24}$/;
 // What a column holds, so blocks only paste into columns of the same kind.
-export const kindOf = col => col < 4 ? 'audio' : col < SCENE ? LANES[col - 4] : 'scene';
-const EDITABLE = ['format', 'sounds', 'patterns', 'bpm', 'key', 'mutes', 'bindings'];
+export const kindOf = col => col < AUDIO ? 'audio' : col < SCENE ? LANES[col - AUDIO] : 'scene';
+export const rowsOf = pattern => geometry(pattern).rows;
+const EDITABLE = ['format', 'legacy', 'sounds', 'patterns', 'chain', 'seed', 'lanes', 'bpm', 'key', 'mutes', 'bindings'];
 const clone = value => structuredClone(value);
 const snapshot = score => Object.fromEntries(EDITABLE.map(key => [key, clone(score[key])]));
 const apply = (score, data) => EDITABLE.forEach(key => { if (data[key] === undefined) delete score[key]; else score[key] = clone(data[key]); });
@@ -54,9 +58,11 @@ export function bounds(cell, anchor = cell) {
           c0: Math.min(cell.col, anchor.col), c1: Math.max(cell.col, anchor.col)};
 }
 
+// An audio lane repeats every `len` rows, so its row r is cell r mod len (score-v3.md#lanes).
 export function getCell(pattern, row, col) {
   if (col === SCENE) return (pattern.scenes ?? []).find(key => key.r === row) ?? null;
-  return col < 4 ? pattern.audio[col][row] : pattern.keys[LANES[col - 4]].find(key => key.r === row) ?? null;
+  if (col < AUDIO) { const lane = pattern.lanes[col]; return lane.cells[row % lane.len]; }
+  return pattern.keys[LANES[col - AUDIO]].find(key => key.r === row) ?? null;
 }
 
 export function putCell(pattern, row, col, value) {
@@ -64,10 +70,13 @@ export function putCell(pattern, row, col, value) {
     pattern.scenes = (pattern.scenes ?? []).filter(key => key.r !== row);
     if (value) pattern.scenes.push({r: row, name: value.name, fade: value.fade ?? 0});
     pattern.scenes.sort((a, b) => a.r - b.r);
-  } else if (col < 4) {
-    pattern.audio[col][row] = value ? {note: value.note, vel: value.vel, ...('locks' in value ? {locks:clone(validateLocks(value.locks))} : {})} : null;
+  } else if (col < AUDIO) {
+    const lane = pattern.lanes[col];
+    lane.cells[row % lane.len] = value ? {note: value.note, vel: value.vel,
+      ...('locks' in value ? {locks: clone(validateLocks(value.locks))} : {}),
+      ...(value.cond ? {cond: parseCond(condCode(value.cond))} : {})} : null;
   } else {
-    const lane = LANES[col - 4];
+    const lane = LANES[col - AUDIO];
     pattern.keys[lane] = pattern.keys[lane].filter(key => key.r !== row);
     if (value) pattern.keys[lane].push({r: row, v: value.v});
     pattern.keys[lane].sort((a, b) => a.r - b.r);
@@ -87,7 +96,7 @@ export function readBlock(text) {
   const block = JSON.parse(text);
   if (block?.format !== 'gorgon-block-1' || !Array.isArray(block.columns) || !block.columns.length ||
       block.columns.length > COLUMNS || block.columns.some(c => c !== 'audio' && c !== 'scene' && !LANES.includes(c)) ||
-      !Array.isArray(block.rows) || !block.rows.length || block.rows.length > 64) throw new Error('Copy a Gorgon cell block first.');
+      !Array.isArray(block.rows) || !block.rows.length || block.rows.length > 128) throw new Error('Copy a Gorgon cell block first.');
   for (const row of block.rows) {
     if (!Array.isArray(row) || row.length !== block.columns.length) throw new Error('Invalid clipboard row.');
     row.forEach((value, c) => {
@@ -96,11 +105,12 @@ export function readBlock(text) {
       if (block.columns[c] === 'audio') {
         value.note = canonicalNote(value.note);
         if ('locks' in value) validateLocks(value.locks);
+        if ('cond' in value) try { value.cond = parseCond(condCode(value.cond)); } catch { throw new Error('Invalid clipboard condition.'); }
         if (!Number.isInteger(value.vel) || value.vel < 0 || value.vel > 127) throw new Error('Invalid clipboard velocity.');
       } else if (block.columns[c] === 'scene') {
         if (typeof value.name !== 'string' || !SCENE_NAME.test(value.name)) throw new Error('Invalid clipboard scene name.');
         value.fade ??= 0;
-        if (!Number.isInteger(value.fade) || value.fade < 0 || value.fade > 64) throw new Error('Invalid clipboard scene fade.');
+        if (!Number.isInteger(value.fade) || value.fade < 0 || value.fade > 128) throw new Error('Invalid clipboard scene fade.');
       } else {
         const [low, high] = LIMITS[LANES.indexOf(block.columns[c])];
         if (!Number.isFinite(value.v) || value.v < low || value.v > high) throw new Error('Invalid clipboard automation value.');
@@ -114,7 +124,7 @@ export function pasteBlock(pattern, start, block, {lastColumn = COLUMNS - 1} = {
   let written = 0, skipped = 0;
   block.rows.forEach((row, r) => row.forEach((value, c) => {
     const dest = start.col + c, y = start.row + r;
-    if (dest >= COLUMNS || dest > lastColumn || y > 63) { skipped++; return; }
+    if (dest >= COLUMNS || dest > lastColumn || y >= rowsOf(pattern)) { skipped++; return; }
     const kind = kindOf(dest);
     if (kind !== block.columns[c]) { skipped++; return; }
     putCell(pattern, y, dest, value);
@@ -132,12 +142,21 @@ export function midiNote(midi) {
   return ['C-', 'C#', 'D-', 'D#', 'E-', 'F-', 'F#', 'G-', 'G#', 'A-', 'A#', 'B-'][midi % 12] + (Math.floor(midi / 12) - 1);
 }
 
+// The hits under a selection, each once: a short lane's rows repeat its cells.
+function hitsIn(pattern, box) {
+  const hits = new Set();
+  for (let r = box.r0; r <= box.r1; r++) for (let c = box.c0; c <= Math.min(AUDIO - 1, box.c1); c++) {
+    const hit = getCell(pattern, r, c);
+    if (hit) hits.add(hit);
+  }
+  return [...hits];
+}
+
 export function transposeBlock(pattern, box, semitones) {
   // Preflight the entire selection: never partially transpose a chord at a range limit.
   const changes = [];
-  for (let r = box.r0; r <= box.r1; r++) for (let c = box.c0; c <= Math.min(3, box.c1); c++) {
-    const hit = pattern.audio[c][r];
-    if (!hit || hit.note === 'AIR') continue;
+  for (const hit of hitsIn(pattern, box)) {
+    if (hit.note === 'AIR') continue;
     const note = midiNote(noteMidi(hit.note) + semitones);
     if (!note) throw new Error('Transpose would put a note outside C0–G9.');
     changes.push([hit, note]);
@@ -146,9 +165,7 @@ export function transposeBlock(pattern, box, semitones) {
 }
 
 export function setBlockVelocity(pattern, box, velocity) {
-  for (let r = box.r0; r <= box.r1; r++) for (let c = box.c0; c <= Math.min(3, box.c1); c++) {
-    if (pattern.audio[c][r]) pattern.audio[c][r].vel = velocity;
-  }
+  for (const hit of hitsIn(pattern, box)) hit.vel = velocity;
 }
 
 // Z–M is the selected octave, Q–U the next. Only active in the focused note grid.
@@ -157,8 +174,8 @@ const PIANO = {KeyZ:0, KeyS:1, KeyX:2, KeyD:3, KeyC:4, KeyV:5, KeyG:6, KeyB:7, K
 export function pianoNote(code, octave) { return code in PIANO ? midiNote(12 * (octave + 1) + PIANO[code]) : null; }
 
 export function activity(pattern) {
-  return Array.from({length:64}, (_, r) => ({
-    audio: pattern.audio.reduce((n, lane) => n + (lane[r]?.vel > 0 ? 1 : 0), 0),
+  return Array.from({length: rowsOf(pattern)}, (_, r) => ({
+    audio: pattern.lanes.reduce((n, lane) => n + (lane.cells[r % lane.len]?.vel > 0 ? 1 : 0), 0),
     keys: LANES.reduce((n, lane) => n + (pattern.keys[lane].some(k => k.r === r) ? 1 : 0), 0) +
           ((pattern.scenes ?? []).some(k => k.r === r) ? 1 : 0),
   }));

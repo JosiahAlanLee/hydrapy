@@ -95,7 +95,8 @@ def snapshot(tracker, clock_time, wall, playing):
                   anchor_time=tracker.anchor_time, clock_time=clock_time, wall=wall, playing=bool(playing),
                   transport_revision=tracker.transport_revision)
     if tracker.document['format'] == tracker_v3.FORMAT:
-        result.update(start=tracker.start, elapsed=tracker.elapsed, fill=tracker.fill, bus=tracker.bus)
+        result.update(start=tracker.start, elapsed=tracker.elapsed, fill=tracker.fill, bus=tracker.bus,
+                      layers=getattr(tracker, 'layers', None))
     return result
 
 
@@ -188,13 +189,14 @@ class TrackerCV:
     # -- render thread --------------------------------------------------------
     def publish(self, tracker, clock_time, wall, playing):
         """Called at render boundaries: the playhead at monotonic ``wall``."""
-        self.snapshot = snapshot(tracker, clock_time, wall, playing)
-        if self.snapshot['document']['format'] != tracker_v3.FORMAT:
-            self.snapshot['cells'] = self._cells(tracker.document)
+        published = snapshot(tracker, clock_time, wall, playing)
+        if published['document']['format'] != tracker_v3.FORMAT:
+            published['cells'] = self._cells(tracker.document)
+        self.snapshot = published                   # whole, for the audio callback
 
     def evaluated(self, segment):
         """The first tick of version-3 ``segment`` this output has not evaluated, or None."""
-        return self._follower.frontier if segment == self._segment else None
+        return self._follower.evaluated(segment)
 
     # -- evaluation -----------------------------------------------------------
     def _cells(self, document):
@@ -349,7 +351,7 @@ class TrackerCV:
         if new_segment:
             # Heard as it starts, from the anchor's row; only the first playhead this
             # output ever sees is joined late, from its own tick (evaluator.md#evaluate).
-            self._follower.begin(-tracker_v3.TICKS if self._transport is not None else math.floor(u[0]))
+            self._follower.begin(-tracker_v3.TICKS if self._transport is not None else math.floor(u[0]), segment)
             self._segment = segment
         if changed or (moving and not self._moving):
             self._reset_remaining = round(self.reset_s * self.samplerate) if moving else 0

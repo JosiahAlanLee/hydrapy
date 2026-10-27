@@ -17,6 +17,7 @@ import bisect
 import copy
 import json
 import math
+import threading
 
 import numpy as np
 
@@ -472,6 +473,28 @@ def position(score, start, u):
     return tick / TICKS, entry, (tick - np.asarray(t.starts, dtype=np.float64)[entry]) / rows[entry]
 
 
+def off():
+    return [{'at': 0, 'on': False}]
+
+
+class Layers:
+    """Studio's FILL and bus layer, shared live with Studio's own outputs.
+
+    Studio stamps a change with the first tick none of its outputs has evaluated
+    (evaluator.md#ticks), so its outputs and the record agree. An output takes
+    the current lists and claims the ticks it is about to evaluate under
+    ``lock``, and Studio finds the stamp and changes the lists under the same
+    lock, so no output judges a tick at or after a stamp under the old state.
+    ``segment`` is the (transport_revision, anchor tick) the lists belong to.
+    """
+
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.segment = None
+        self.fill = off()
+        self.bus = {'fill': off(), 'mutes': [off() for _ in range(LANE_COUNT)]}
+
+
 class Follower:
     """One follower's candidates for the current segment.
 
@@ -482,20 +505,37 @@ class Follower:
 
     def __init__(self):
         self.frontier = None        # the first tick not yet evaluated, None before a segment
+        self.segment = None
         self.candidates = []
 
-    def begin(self, tick):
-        """Start a segment, evaluating from ``tick``: at or before the anchor's row when the
+    def begin(self, tick, segment=None):
+        """Start ``segment``, evaluating from ``tick``: at or before the anchor's row when the
         follower hears of the segment as it starts, its own current tick when it joins late."""
-        self.frontier, self.candidates = tick, []
+        self.frontier, self.segment, self.candidates = tick, segment, []
+
+    def evaluated(self, segment):
+        """The first tick of ``segment`` not yet evaluated, or None for another segment."""
+        return self.frontier if segment == self.segment else None
 
     def advance(self, snapshot, u):
-        """Evaluate through real tick ``u`` and return the candidates that are new."""
+        """Evaluate through real tick ``u`` and return the candidates that are new.
+
+        With Studio's live ``layers`` in the snapshot, this reads FILL and the bus
+        layer from them and claims the ticks before evaluating, under their lock.
+        """
         top = math.floor(u) + 1
         if self.frontier is None or top <= self.frontier:
             return []
-        new = evaluate(snapshot['document'], transport(snapshot), self.frontier, top)
-        self.frontier = top
+        t = transport(snapshot)
+        layers = snapshot.get('layers')
+        if layers is not None:
+            with layers.lock:
+                if layers.segment == self.segment:
+                    t['fill'], t['bus'] = layers.fill, layers.bus
+                first, self.frontier = self.frontier, top
+        else:
+            first, self.frontier = self.frontier, top
+        new = evaluate(snapshot['document'], t, first, top)
         self.candidates += new
         return new
 

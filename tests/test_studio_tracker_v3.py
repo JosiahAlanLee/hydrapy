@@ -290,3 +290,90 @@ def test_direct_cv_plays_studios_version_3_playhead(studio):
     volts = cv.render(4800, 100.)
     assert volts[0, 0] == 5. and volts[3000, 0] == 0.                  # row 0's F, judged with FILL on
     assert studio.tracker.trace is not None
+
+
+# -- regressions from the review of #64/#65 -------------------------------------
+
+def test_older_scores_keep_their_song_relative_beats_on_the_transport(tmp_path):
+    (tmp_path / 'p.py').write_text(PATCH)
+    session = Session(tmp_path, 'p.py', backend='cpu', size=(32, 18), fps=30)
+    try:
+        document = copy.deepcopy(session.tracker.document)
+        document.update(loop=True, pattern=2)
+        session.call('tracker_score', document=document, revision=session.tracker.revision)
+        for request in ({'playing': False}, {'enabled': True}, {'blackout': True}, {'beat': 32.}):
+            session.call('tracker_transport', **request)
+        assert session.tracker.beat(session.clock_time) == 32.
+    finally:
+        session.close()
+
+
+def test_fill_set_while_paused_holds_into_the_next_segment():
+    t = playing(chain(), 3.)
+    t.set_fill(True, round(.3 * 3840) + 7)           # stamped past where the playhead paused
+    t.play(.3)
+    assert t.fill == [{'at': 0, 'on': True}]
+    t.set_fill(False, 50)
+    t.seek(5., .3)
+    assert t.fill == off()
+
+
+def test_a_chain_upgrade_undone_and_redone_keeps_fill():
+    old = copy.deepcopy(Tracker().document)
+    t = playing(old, 3.)
+    new = upgrade(old)
+    t.replace(new, 0., t.revision)
+    t.set_fill(True, 0)
+    t.replace(old, 0., t.revision)
+    t.replace(new, 0., t.revision)
+    assert t.fill == [{'at': 0, 'on': True}]
+
+
+def test_play_on_the_anchors_own_tick_continues_the_segment():
+    p = pattern()
+    t = playing(validate(blank(bpm=120, patterns=[p] + [None] * 127)))
+    start, elapsed = dict(t.start), t.elapsed
+    t.play(2.)                                        # exactly one 7680-tick cycle at 120 BPM
+    assert t.start == start and t.elapsed == elapsed and t.ticks(2.5) == 9600
+
+
+def test_studios_outputs_read_fill_live_from_the_stamp():
+    # The CV has evaluated up to its frontier; Studio stamps FILL there. The next block,
+    # rendered before any new snapshot, must already judge with FILL on.
+    p = pattern()
+    p['lanes'][0]['cells'][2] = hit({'kind': 'fill'})
+    t = playing(validate(blank(bpm=120, patterns=[p] + [None] * 127)))
+    cv = TrackerCV({0: 'gate1'}, samplerate=48000, open_stream=False)
+    cv.publish(Tracker(), 0., 100., False)            # an earlier playhead, so this one is heard live
+    cv.render(1, 100.)
+    cv.publish(t, 0., 100., True)
+    first = cv.render(6000, 100.)                     # row 0, to tick 480
+    with t.layers.lock:
+        stamp = cv.evaluated(t.segment)
+        t.set_fill(True, stamp)
+    later = cv.render(12000, 100. + 6000 / 48000)
+    assert stamp == 480 and not first.any() and later[6000, 0] == 5.  # row 2, at tick 960
+
+
+def test_patch_lane_signals_hear_play_as_a_transport_change():
+    p = pattern()
+    p['lanes'][0]['cells'][0] = hit()
+    t = playing(validate(blank(bpm=120, patterns=[p] + [None] * 127)))
+    patch = type('Patch', (), {'controls': {}, 'scenes': {}, 'tracker_frame': None, 'scene_weights': None})()
+    t.apply(patch, 0.)
+    t.apply(patch, .01)                               # inside row 0's gate
+    assert patch.tracker_frame['gate'][0] == 1.
+    t.play(.02)                                       # paused there, then Play: a new segment
+    t.apply(patch, .02)
+    assert patch.tracker_frame['gate'][0] == 1. and patch.tracker_frame['since'][0] is not None
+
+
+def test_bus_window_replies_keep_studios_own_error(studio):
+    reply = studio.call('tracker_transport', enabled=True, playing=False, beat=0.)
+    seg = {'transport_revision': reply['transport_revision'], 'start': reply['start']}
+    studio.error = 'Render paused: something'
+    studio.call('tracker_transport', segment=seg, sender=SENDER, bus=window(0))
+    assert studio.error == 'Render paused: something'
+    with pytest.raises(ValueError) as refused:
+        studio.call('tracker_transport', segment=seg, sender='0123456789abcdef', bus=window(0))
+    assert str(refused.value) == 'bus held by another module' and studio.error == 'Render paused: something'

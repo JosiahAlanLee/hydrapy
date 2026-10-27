@@ -220,3 +220,16 @@ def test_a_new_segment_without_a_transport_change_sends_no_reset():
     voices = len(synth.voices)
     synth.render(cv.snapshot, 100.26, int(.1 * SR), SR)
     assert len(synth.voices) == voices                                 # row 2's kick isn't heard again
+
+
+def test_publish_hands_the_callback_a_whole_snapshot(monkeypatch):
+    legacy = Tracker()
+    cv = TrackerCV({0: 'gate1'}, samplerate=SR, open_stream=False)
+    cv.publish(legacy, 0., 100., True)
+    before = cv.snapshot
+    seen = []
+    real = cv._cells
+    monkeypatch.setattr(cv, '_cell_cache', None)
+    monkeypatch.setattr(cv, '_cells', lambda d: seen.append(cv.snapshot is before) or real(d))
+    cv.publish(legacy, 0., 100., True)
+    assert seen == [True] and 'cells' in cv.snapshot and cv.snapshot is not before

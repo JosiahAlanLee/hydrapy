@@ -85,8 +85,8 @@ class BreaksSynth:
             # seek does; otherwise (joining, or a segment without a transport change)
             # start from the current tick, so no hit already heard sounds again.
             u = tracker_v3.elapsed(snapshot, times[:1])[0]
-            self.follower.begin(-tracker_v3.TICKS if live else math.floor(u))
             self.segment = (snapshot['transport_revision'], snapshot['start']['tick'])
+            self.follower.begin(-tracker_v3.TICKS if live else math.floor(u), self.segment)
         self.transport, self.moving = transport, moving
         if not moving:
             return out
@@ -143,7 +143,7 @@ class BreaksSynth:
 
     def evaluated(self, segment):
         """The first tick of version-3 ``segment`` the synth hasn't evaluated, or None."""
-        return self.follower.frontier if segment == self.segment else None
+        return self.follower.evaluated(segment)
 
     def _candidates(self, snapshot, times):
         """Start a voice for each version-3 candidate of lane 1 that fires, at its own tick."""

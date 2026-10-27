@@ -1,8 +1,10 @@
-import {SOUND_KEYS, ensureSounds} from './sounds.js';
+import {SOUND_KEYS} from './sounds.js';
 import {api, PreviewStream} from './backend.js';
 import {noteMidi, noteFrequency, canonicalNote, breaksVoice} from './notes.js';
 import {ScoreHistory, bounds, getCell, putCell, copyBlock, readBlock, pasteBlock, clearBlock,
-  transposeBlock, setBlockVelocity, pianoNote, activity, SCENE, SCENE_NAME, kindOf} from './editor.js';
+  transposeBlock, setBlockVelocity, pianoNote, activity, SCENE, SCENE_NAME, kindOf, AUDIO, COLUMNS, LANES, rowsOf} from './editor.js';
+import {TICKS, RATES, code, emptyPattern, geometry, incoming, outgoing, settleFormat, timeline, evaluate, stateAt,
+  condCode, parseCond, transformsText, parseTransforms} from './score3.js';
 const $ = id => document.getElementById(id);
 const clamp = (n,a,b) => Math.max(a,Math.min(b,n));
 const mod = (n,m) => ((n%m)+m)%m;
@@ -13,6 +15,8 @@ const tracks = [
   {id:'fm',name:'FM hits',sub:'NOTE / VELOCITY',label:'Glass cluster',tag:'FM',note:'D-4',color:'#e2ac77'},
   {id:'sub',name:'Sub',sub:'NOTE / VELOCITY',label:'Sine foundation',tag:'SUB',note:'D-2',color:'#79b8b5'},
   {id:'air',name:'Texture',sub:'GATE / LEVEL',label:'Noise wash',tag:'ATM',note:'AIR',color:'#b69ab6'},
+  {id:'pluck',name:'Pluck',sub:'NOTE / VELOCITY',label:'Plucked string',tag:'PLK',note:'A-4',color:'#c7c27a'},
+  {id:'bell',name:'Bell',sub:'NOTE / VELOCITY',label:'Glass bell',tag:'BEL',note:'C-5',color:'#8fb3d9'},
   {id:'z',name:'Dolly Z',sub:'CAMERA / DEPTH',visual:true,min:0,max:1},
   {id:'roll',name:'Roll',sub:'CAMERA / DEG',visual:true,min:-45,max:45},
   {id:'feedback',name:'Feedback',sub:'IMAGE / AMOUNT',visual:true,min:0,max:.9},
@@ -36,18 +40,20 @@ const defaults = () => ({version:1,format:'hydrapy-tracker-1',bindings:{z:'Dolly
   }};
 })});
 
-let state=defaults();
-let playing=false,anchorBeat=state.pattern*16,anchorTime=performance.now(),blackout=false,follow=true;
-const PAGE_COLUMNS={audio:[0,1,2,3],visual:[4,5,6,7]};
+// The editor keeps the score as version 3; score3.js maps older scores in and back out.
+let state=incoming(defaults());
+// The playhead: the segment's anchor (a cycle tick) and the ticks played since it at anchorTime.
+let playing=false,segTick=0,uAnchor=0,anchorTime=performance.now(),blackout=false,follow=true;
+const PAGE_COLUMNS={audio:[0,1,2,3,4,5],visual:[6,7,8,9]};
 let editorPage='audio';
 try{if(sessionStorage.getItem('gorgon-editor-page')==='visual')editorPage='visual';}catch{}
-const pageColumns={audio:0,visual:4};
+const pageColumns={audio:0,visual:6};
 let selected={row:0,col:pageColumns[editorPage]},curve='z',lastStep=-1,lastPattern=-1;
 let switchingPage=false;
 let editPattern=0, selectionAnchor=null, clipboard=null, pianoEntry=false, entryVelocity=90;
 let curveDirty=true, curvePaint=null;
 const history = new ScoreHistory();
-let audioContext=null,master=null,noiseBuffer=null,nextTick=null,analyser=null,levelData=null;
+let audioContext=null,master=null,noiseBuffer=null,audioFrontier=null,analyser=null,levelData=null;
 let voices=new Set(),toastTimer=null;
 const outputType=new URL(location.href).searchParams.get('output');
 let sessionId=new URL(location.href).searchParams.get('session');
@@ -66,9 +72,25 @@ function listen(callback){
   if(channel)channel.onmessage=e=>callback(e.data);
   else window.addEventListener('storage',e=>{if(e.key===channelName&&e.newValue)try{callback(JSON.parse(e.newValue));}catch{}});
 }
-function normalizeBeat(beat,s=state){return s.loop?s.pattern*16+mod(beat-s.pattern*16,16):mod(beat,64);}
-function rawBeat(){return anchorBeat+(playing?(performance.now()-anchorTime)*state.bpm/60000:0);}
-function nowBeat(){return normalizeBeat(rawBeat());}
+function line(){return timeline(state);}
+// The pattern being edited, as it plays; editable() writes the empty pattern in on its first edit.
+function pat(){return state.patterns[editPattern]??emptyPattern(editPattern);}
+function editable(){return state.patterns[editPattern]??=emptyPattern(editPattern);}
+function cycleBeats(){return line().cycle/TICKS;}
+function normalizeBeat(beat){return mod(beat,cycleBeats());}
+function nowTicks(){return uAnchor+(playing?(performance.now()-anchorTime)*state.bpm/60000*TICKS:0);}
+function nowBeat(){return mod(segTick+nowTicks(),line().cycle)/TICKS;}
+// Studio counts a looped version-1/2 pattern's beats from the song's start.
+function studioBeat(beat){return state.legacy&&state.loop?beat+16*state.pattern:beat;}
+function editorBeat(beat){return state.legacy&&state.loop?beat-16*state.pattern:beat;}
+// Where a pattern starts in the cycle: the looped pattern at 0, else its first chain entry.
+function entryStart(p){const i=state.chain.indexOf(p);return state.loop||i<0?0:line().starts[i]/TICKS;}
+// The entry, pattern and fractional row a cycle beat falls on.
+function placeAt(beat){
+  const L=line(),tick=beat*TICKS,entry=L.entryAt(tick),pattern=L.entries[entry],g=geometry(state.patterns[pattern]);
+  const rowPos=(tick-L.starts[entry])/g.w;
+  return {entry,pattern,rowPos,row:Math.min(Math.floor(rowPos),g.rows-1),g};
+}
 function valueAt(p,id,row){
   const keys=p.keys[id];if(!keys.length)return id==='z'?.35:id==='feedback'?.25:0;
   if(row<=keys[0].r)return keys[0].v;
@@ -85,7 +107,7 @@ function waveform(seed=0,bars=64){
 }
 function patternActivity(pattern){
   const bars=activity(pattern);
-  return `<svg class="activity-map" viewBox="0 0 256 24" preserveAspectRatio="none" aria-hidden="true">${bars.map((v,r)=>
+  return `<svg class="activity-map" viewBox="0 0 ${bars.length*4} 24" preserveAspectRatio="none" aria-hidden="true">${bars.map((v,r)=>
     `<path d="M${r*4+1} 21v-${v.audio*4}" stroke="currentColor" stroke-width="2"/>`+
     (v.keys?`<path d="M${r*4+1} 2v${v.keys*2}" stroke="#e2ac77" stroke-width="2"/>`:'')).join('')}</svg>`;
 }
@@ -108,8 +130,11 @@ function redrawScore(){renderPatterns();renderHeaders();renderRows();renderInstr
 function changeScore(label,mutate,merge=''){
   if(!remote){toast('Wait for Studio to connect before editing.');return false;}
   try{
-    const changed=history.change(state,label,mutate,{pattern:editPattern,selected},merge);
+    // An edit an older score can't hold upgrades it to version 3, inside the same undo step.
+    let upgraded=false;
+    const changed=history.change(state,label,()=>{mutate();upgraded=settleFormat(state);},{pattern:editPattern,selected},merge);
     if(changed){redrawScore();saveLocal();}
+    if(upgraded)toast('The score is now format 3 (six lanes, 128 patterns, conditions). Undo restores its old format.');
     return changed;
   }catch(error){toast(error.message);return false;}
 }
@@ -155,7 +180,8 @@ function selectPreview(output){
 }
 function saveLocal(){
   if (!remote) return;
-  pendingScore = structuredClone(state);
+  if(settleFormat(state))toast('The score is now format 3.');
+  pendingScore = outgoing(state);
   if(conflicted||scoreFailed)return;
   $('savedState').textContent = 'Applying edit…';
   // Studio says how long to gather edits: 120 ms normally, 0 with a native output, where an
@@ -179,7 +205,7 @@ async function flushScore(){
     if (program !== document.modes.program) updateControls();
     $('savedState').textContent = 'Score applied · not saved';
   }).catch(error => {
-    pendingScore=pendingScore||structuredClone(state);failedDocument=document;
+    pendingScore=pendingScore||outgoing(state);failedDocument=document;
     conflicted=!!error.status&&error.status<500;scoreFailed=true;
     $('savedState').textContent=conflicted?'Edit rejected · recovery available':'Edit pending · retry';
     $('editConnection').hidden=false;
@@ -208,25 +234,33 @@ async function retryScore(){
     const program=failedDocument?.modes.program;
     if(state.modes.program===program)state.modes.program=result.document.modes.program;
     revision=result.revision;acceptedDocument=structuredClone(result.document);
-    scoreFailed=conflicted=false;pendingScore=structuredClone(state);
+    scoreFailed=conflicted=false;pendingScore=outgoing(state);
     $('editConnection').hidden=true;
     await flushScore();
   }catch(error){$('editConnectionText').textContent=error.message;toast(error.message);}
 }
-function downloadScore(score=state,name='gorgon-recovery.json'){
+function downloadScore(score=outgoing(state),name='gorgon-recovery.json'){
   const u=URL.createObjectURL(new Blob([JSON.stringify(score,null,2)],{type:'application/json'}));
   const a=document.createElement('a');a.href=u;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(u),1000);
 }
 function adoptTransport(result, elapsed=0){
-  const old = rawBeat(), length = state.loop ? 16 : 64;
-  const next = normalizeBeat(result.beat + (result.playing ? elapsed * state.bpm / 60 : 0));
-  // Keep the audio scheduler on an unwrapped beat across ordinary loop wraps.
-  // Explicit seeks still cancel its lookahead, even for a short seek.
-  const error = mod(next-normalizeBeat(old)+length/2,length)-length/2;
-  const discontinuity = playing !== result.playing || Math.abs(error) > .6 ||
-    (result.transport_revision !== undefined && result.transport_revision !== transportRevision);
+  // Studio's playhead as a segment anchor and elapsed ticks. A version-3 score's comes from Studio;
+  // an older one's is the editor's own, from the beat, kept unwrapped across ordinary loop wraps.
+  // Explicit seeks still cancel the audio lookahead, even for a short seek.
+  const k = state.bpm / 60 * TICKS, old = nowTicks(), cycle = line().cycle, ahead = result.playing ? elapsed * k : 0;
+  const revision = result.transport_revision !== undefined && result.transport_revision !== transportRevision;
+  let discontinuity = playing !== result.playing || revision;
+  if (result.start) {
+    discontinuity = discontinuity || result.start.tick !== segTick || Math.abs(result.ticks + ahead - old) > .6 * TICKS;
+    segTick = result.start.tick; uAnchor = result.ticks + ahead;
+  } else {
+    const target = mod(editorBeat(result.beat) * TICKS + ahead, cycle);
+    const error = mod(target - (segTick + old) + cycle / 2, cycle) - cycle / 2;
+    discontinuity = discontinuity || Math.abs(error) > .6 * TICKS || segTick >= cycle;
+    if (discontinuity) { segTick = Math.round(target) % cycle; uAnchor = target - Math.round(target); }
+    else uAnchor = old + error;
+  }
   if (discontinuity) stopVoices();
-  anchorBeat=discontinuity ? next : old+error;
   anchorTime=performance.now(); playing=result.playing;
   transportRevision=result.transport_revision ?? transportRevision;
   if (result.blackout !== undefined) blackout=result.blackout;
@@ -238,6 +272,7 @@ function adoptTransport(result, elapsed=0){
   $('transportDot').classList.toggle('mint',playing);
   $('automationBtn').setAttribute('aria-pressed',result.enabled);
   $('automationBtn').textContent=result.enabled?'Automation on':'Automation off';
+  if(result.fill)queueMicrotask(updateFill);         // after the reply is adopted as remote
 }
 function transport(changes,{score=true}={}){
   transportPending++;transportEpoch++;
@@ -324,13 +359,11 @@ async function pollRemote(){
   try{
     const result=await api('tracker');
     if(!result.document)throw new Error('Studio is starting.');
-    // Studio plays version-3 scores; this editor shows them in a later release.
-    if(result.document.format==='hydrapy-tracker-3')throw new Error('Studio is playing a version-3 score, which this editor can\'t show yet.');
     if(result.server_now-result.sampled>3)throw new Error('Studio renderer is not responding.');
     if(!remote||(!conflicted&&!scoreFailed&&!pendingScore&&!scoreRequest&&result.revision>revision)){
       if(!remote){editPattern=result.document.pattern;$('savedState').textContent='Live score · save to keep';}
       else if(!sameScore(result.document,acceptedDocument)){history.clear();updateHistory();}
-      state=result.document;revision=result.revision;
+      state=incoming(result.document);revision=result.revision;
       acceptedDocument=structuredClone(result.document);
       if(!outputType){renderPatterns();renderHeaders();renderRows();renderInstruments();updateControls();updateInspector();}
     }
@@ -380,11 +413,11 @@ function ensureAudio(){
   }
   return audioContext.resume().catch(()=>toast('Click Sound on to enable browser audio.'));
 }
-function stopVoices(){for(const n of voices){try{n.stop();}catch{}}voices.clear();nextTick=null;}
+function stopVoices(){for(const n of voices){try{n.stop();}catch{}}voices.clear();audioFrontier=null;}
 function connectVoice(source,gain,t,duration){source.connect(gain);gain.connect(master);voices.add(source);source.onended=()=>{voices.delete(source);source.disconnect();gain.disconnect();};source.start(t);source.stop(t+duration);}
 function noteFreq(note){return noteFrequency(note, state.key);}
 function soundHit(track,hit,t){
-  if(!audioContext||!master||!hit)return;const vel=hit.vel/127;if(vel<=0)return;if((track===1||track===2)&&noteMidi(hit.note)===null)return;
+  if(!audioContext||!master||!hit)return;const vel=hit.vel/127;if(vel<=0)return;if([1,2,4,5].includes(track)&&noteMidi(hit.note)===null)return;
   const drum=track===0?breaksVoice(hit.note):null;
   if(drum==='kick'){
     const o=audioContext.createOscillator(),g=audioContext.createGain();o.frequency.setValueAtTime(145,t);o.frequency.exponentialRampToValueAtTime(44,t+.13);g.gain.setValueAtTime(.95*vel,t);g.gain.exponentialRampToValueAtTime(.001,t+.29);connectVoice(o,g,t,.3);
@@ -394,33 +427,52 @@ function soundHit(track,hit,t){
     const o=audioContext.createOscillator(),m=audioContext.createOscillator(),mg=audioContext.createGain(),g=audioContext.createGain();const freq=noteFreq(hit.note);o.frequency.value=freq;m.frequency.value=freq*2;mg.gain.setValueAtTime(freq*2,t);mg.gain.exponentialRampToValueAtTime(1,t+.3);m.connect(mg);mg.connect(o.frequency);g.gain.setValueAtTime(.17*vel,t);g.gain.exponentialRampToValueAtTime(.001,t+.5);connectVoice(o,g,t,.52);voices.add(m);m.onended=()=>{voices.delete(m);m.disconnect();mg.disconnect();};m.start(t);m.stop(t+.52);
   }else if(track===2){
     const o=audioContext.createOscillator(),g=audioContext.createGain();o.frequency.value=noteFreq(hit.note);g.gain.setValueAtTime(.001,t);g.gain.linearRampToValueAtTime(.38*vel,t+.01);g.gain.exponentialRampToValueAtTime(.001,t+.65);connectVoice(o,g,t,.7);
+  }else if(track===4){
+    const o=audioContext.createOscillator(),f=audioContext.createBiquadFilter(),g=audioContext.createGain();o.type='triangle';o.frequency.value=noteFreq(hit.note);f.type='lowpass';f.frequency.setValueAtTime(4200,t);f.frequency.exponentialRampToValueAtTime(600,t+.3);o.connect(f);g.gain.setValueAtTime(.001,t);g.gain.linearRampToValueAtTime(.24*vel,t+.004);g.gain.exponentialRampToValueAtTime(.001,t+.36);connectVoice(f,g,t,.38);voices.add(o);o.onended=()=>{voices.delete(o);o.disconnect();};o.start(t);o.stop(t+.38);
+  }else if(track===5){
+    const freq=noteFreq(hit.note);
+    for(const [ratio,level,decay] of [[1,.12,1.2],[2.76,.05,.5]]){const o=audioContext.createOscillator(),g=audioContext.createGain();o.frequency.value=freq*ratio;g.gain.setValueAtTime(level*vel,t);g.gain.exponentialRampToValueAtTime(.001,t+decay);connectVoice(o,g,t,decay+.02);}
   }else{
     const n=audioContext.createBufferSource(),f=audioContext.createBiquadFilter(),g=audioContext.createGain();n.buffer=noiseBuffer;f.type='bandpass';f.frequency.value=1400;f.Q.value=2;n.connect(f);f.connect(g);g.connect(master);g.gain.setValueAtTime(.001,t);g.gain.linearRampToValueAtTime(.13*vel,t+.12);g.gain.exponentialRampToValueAtTime(.001,t+.9);voices.add(n);n.onended=()=>{voices.delete(n);n.disconnect();f.disconnect();g.disconnect();};n.start(t);n.stop(t+.95);
   }
 }
+// The audition synth plays evaluate()'s candidates that fire (score3.js), each tick once,
+// a little ahead on the audio clock: conditions, transforms and mutes as every follower plays them.
 function scheduler(){
   if(!playing||!state.sound||audioContext?.state!=='running')return;
-  const raw=rawBeat();if(nextTick===null)nextTick=Math.ceil(raw*4-.08);
+  const k=state.bpm/60*TICKS,u=nowTicks();
   // Skip missed ticks after a sleeping tab; never replay a backlog of sounds.
-  if(nextTick/4<raw-.1)nextTick=Math.ceil(raw*4);
-  while(nextTick/4<raw+.11*state.bpm/60){
-    const b=normalizeBeat(nextTick/4),p=state.patterns[Math.floor(b/16)],r=Math.round(mod(b,16)*4)%64;
-    const t=audioContext.currentTime+Math.max(.005,(nextTick/4-raw)*60/state.bpm);
-    p.audio.forEach((a,i)=>{if(a[r]&&!state.mutes[i])soundHit(i,a[r],t);});nextTick++;
-  }
+  if(audioFrontier===null||audioFrontier<u-.1*k)audioFrontier=Math.ceil(u-.02*k);
+  const top=Math.floor(u+.11*k)+1;
+  if(top<=audioFrontier||segTick>=line().cycle)return;
+  const live=!state.legacy&&remote?.start;
+  for(const c of evaluate(state,{tick:segTick,fill:live?remote.fill:null,bus:live?remote.bus:null},audioFrontier,top))
+    if(c.fires)soundHit(c.lane,c,audioContext.currentTime+Math.max(.005,(c.at-u)/k));
+  audioFrontier=top;
 }
-function seek(beat){stopVoices();return transport({beat:normalizeBeat(beat)});}
+function seek(beat){stopVoices();return transport({beat:studioBeat(normalizeBeat(beat))});}
 async function togglePlay(){
   if(!playing&&state.sound)await ensureAudio();
   return transport(()=>({playing:!playing,enabled:true}));
 }
+// Eight banks of sixteen patterns, the bank being edited shown; then the chain, the song order.
 function renderPatterns(){
-  $('patterns').innerHTML=state.patterns.map((p,i)=>`<div class="pattern-slot"><button class="pattern-card ${i===editPattern?'selected':''}" data-pattern="${i}" aria-label="Select pattern ${i+1}: ${escapeHTML(p.name)}" aria-pressed="${i===editPattern}"><div class="pattern-top"><b>${pad(i+1)}</b><span>${escapeHTML(p.name)}</span><span class="bars">${pad(i*4+1)}—${pad(i*4+4)}</span></div>${patternActivity(p)}<i class="pattern-playhead"></i></button><button class="pattern-launch" data-launch="${i}" aria-label="Play from pattern ${i+1}" title="Launch pattern ${i+1}">▶</button></div>`).join('');
+  const bank=Math.floor(editPattern/16);
+  $('banks').innerHTML=[...'ABCDEFGH'].map((b,i)=>`<button data-bank="${i}" aria-pressed="${i===bank}" class="${state.patterns.slice(i*16,i*16+16).some(Boolean)?'used':''}" title="Bank ${b}">${b}</button>`).join('');
+  $('banks').querySelectorAll('[data-bank]').forEach(b=>b.onclick=()=>selectPattern(Number(b.dataset.bank)*16+editPattern%16));
+  $('patterns').innerHTML=Array.from({length:16},(_,k)=>{
+    const i=bank*16+k,p=state.patterns[i],name=p?escapeHTML(p.name):'empty',g=geometry(p);
+    return `<div class="pattern-slot"><button class="pattern-card ${i===editPattern?'selected':''} ${p?'':'blank'}" data-pattern="${i}" aria-label="Select pattern ${code(i)}: ${name}" aria-pressed="${i===editPattern}"><div class="pattern-top"><b>${code(i)}</b><span>${name}</span><span class="bars">${p?`${g.rows}${p.rate===1?'':' · ×'+p.rate}`:''}</span></div>${p?patternActivity(p):''}<i class="pattern-playhead"></i></button><button class="pattern-launch" data-launch="${i}" aria-label="Play pattern ${code(i)}" title="Launch ${code(i)}">▶</button></div>`;
+  }).join('');
   $('patterns').querySelectorAll('[data-pattern]').forEach(b=>b.onclick=()=>selectPattern(Number(b.dataset.pattern)));
   $('patterns').querySelectorAll('[data-launch]').forEach(b=>b.onclick=()=>launchPattern(Number(b.dataset.launch)));
+  $('chain').innerHTML=state.chain.map((p,i)=>`<button class="chain-entry ${p===editPattern?'editing':''}" data-entry="${i}" title="Entry ${i+1}: ${code(p)}${state.patterns[p]?' · '+escapeHTML(state.patterns[p].name):''}">${code(p)}</button>`).join('');
+  $('chain').querySelectorAll('[data-entry]').forEach(b=>b.onclick=()=>selectPattern(state.chain[Number(b.dataset.entry)]));
+  $('chain').classList.toggle('looping',state.loop);
+  if(document.activeElement!==$('chainInput'))$('chainInput').value=state.chain.map(code).join(' ');
 }
 function syncEditorPage(){
-  const next=selected.col<4?'audio':'visual';
+  const next=selected.col<AUDIO?'audio':'visual';
   if(next!==editorPage){editorPage=next;selectionAnchor=null;}
   pageColumns[editorPage]=selected.col;
   document.body.dataset.editorPage=editorPage;
@@ -431,7 +483,8 @@ function syncEditorPage(){
   });
   $('laneEditor').setAttribute('aria-labelledby',editorPage+'PageTab');
   $('trackerRows').setAttribute('aria-label',editorPage==='audio'?'Audio pattern editor':'Visual pattern editor');
-  $('trackerRows').setAttribute('aria-colcount','5');
+  $('trackerRows').setAttribute('aria-colcount',String(PAGE_COLUMNS[editorPage].length+1));
+  $('laneEditor').style.setProperty('--lanes',PAGE_COLUMNS[editorPage].length);
   $('trackerRows').setAttribute('aria-description','Tab switches Audio and Visual pages. Shift+Tab leaves the grid.');
   $('libraryBtn').textContent=editorPage==='audio'?'Instruments':'Visual source';
   $('libraryBtn').title=editorPage==='audio'?'Show or hide instruments':'Show or hide the visual source';
@@ -446,9 +499,15 @@ function selectEditorPage(next,{focus=false}={}){
     if(focus)focusCell(true);
   }finally{switchingPage=false;}
 }
+// An audio lane's name is the score's, not an instrument's; its sub-line is its length and transforms.
+function laneName(i){return state.lanes[i].name||`Lane ${i+1}`;}
+function laneSub(i){
+  const lane=pat().lanes[i],rows=rowsOf(pat()),t=transformsText(lane.transforms);
+  return lane.len!==rows||t?`${lane.len} ROWS${t?' · '+escapeHTML(t.toUpperCase()):''}`:'NOTE / VELOCITY';
+}
 function renderHeaders(){
   syncEditorPage();
-  $('trackHeaders').innerHTML='<div class="track-header row-index">ROW</div>'+PAGE_COLUMNS[editorPage].map(i=>{const t=tracks[i];return `<div class="track-header ${t.visual?'visual':''} ${t.scene?'scene':''}"><div><strong>${t.name}</strong>${i<4?`<button class="mute" data-mute="${i}" aria-label="Mute ${t.name}" aria-pressed="${state.mutes[i]}">M</button>`:''}</div><span>${t.sub}</span></div>`;}).join('');
+  $('trackHeaders').innerHTML='<div class="track-header row-index">ROW</div>'+PAGE_COLUMNS[editorPage].map(i=>{const t=tracks[i],audio=i<AUDIO,name=audio?escapeHTML(laneName(i)):t.name;return `<div class="track-header ${t.visual?'visual':''} ${t.scene?'scene':''}"><div><strong title="${name}">${name}</strong>${audio?`<button class="mute" data-mute="${i}" aria-label="Mute ${name}" aria-pressed="${state.mutes[i]}">M</button>`:''}</div><span>${audio?laneSub(i):t.sub}</span></div>`;}).join('');
   $('trackHeaders').querySelectorAll('[data-mute]').forEach(b=>b.onclick=()=>{
     changeScore('mute lane',()=>{state.mutes[Number(b.dataset.mute)]=!state.mutes[Number(b.dataset.mute)];});stopVoices();
   });
@@ -462,17 +521,21 @@ function nextSceneName(p,row){
   return names[(names.indexOf(above?.name)+1)%names.length];
 }
 function renderRows(){
-  if((selected.col<4?'audio':'visual')!==editorPage)renderHeaders();
-  const grid=$('trackerRows'),hadFocus=grid.contains(document.activeElement),p=state.patterns[editPattern],box=selectionBox();let html='';
-  for(let r=0;r<64;r++){
-    html+=`<div class="tracker-row ${r%4===0?'beat':''} ${r%16===0?'bar':''}" role="row" data-row="${r}"><button class="row-number" role="rowheader" tabindex="-1" data-seek-row="${r}" title="Double-click to seek to row ${hex(r)}">${hex(r)}</button>`;
+  if((selected.col<AUDIO?'audio':'visual')!==editorPage)renderHeaders();
+  const grid=$('trackerRows'),hadFocus=grid.contains(document.activeElement),p=pat(),g=geometry(p),perBeat=4*p.rate,box=selectionBox();let html='';
+  if(selected.row>=g.rows)selected.row=g.rows-1;
+  for(let r=0;r<g.rows;r++){
+    html+=`<div class="tracker-row ${r%perBeat===0?'beat':''} ${r%g.bar===0?'bar':''}" role="row" data-row="${r}"><button class="row-number" role="rowheader" tabindex="-1" data-seek-row="${r}" title="Double-click to seek to row ${hex(r)}">${hex(r)}</button>`;
     PAGE_COLUMNS[editorPage].forEach((c,index)=>{
-      const t=tracks[c];
+      const t=tracks[c],audio=c<AUDIO,name=audio?escapeHTML(laneName(c)):t.name;
       const key=getCell(p,r,c),isSelected=selected.row===r&&selected.col===c;
+      // A lane shorter than the pattern repeats: rows past its length show (and edit) the cell they play.
+      const repeat=audio&&r>=p.lanes[c].len;
       const inBlock=r>=box.r0&&r<=box.r1&&c>=box.c0&&c<=box.c1;
-      const content=key?(t.scene?sceneLabel(key):t.visual?formatValue(t.id,key.v):`${escapeHTML(key.note)}${Object.keys(key.locks??{}).length?'<i class=lock-mark title="Sound locks">●</i>':''}<span class="velocity">${hex(key.vel)}</span>`):'···';
+      const cond=audio&&key?.cond?condCode(key.cond):'';
+      const content=key?(t.scene?sceneLabel(key):t.visual?formatValue(t.id,key.v):`${escapeHTML(key.note)}${Object.keys(key.locks??{}).length?'<i class=lock-mark title="Sound locks">●</i>':''}<span class="velocity">${hex(key.vel)}</span>${cond?`<span class="cond">${escapeHTML(cond)}</span>`:''}`):'···';
       const missing=t.scene&&key&&remote&&!patchScenes.some(x=>x.name===key.name);
-      html+=`<button role="gridcell" aria-colindex="${index+2}" tabindex="${isSelected?'0':'-1'}" class="cell ${t.visual?'visual':''} ${t.scene?'scene':''} ${missing?'missing':''} ${!key?'empty':''} ${isSelected?'selected':''} ${inBlock?'in-selection':''} ${c<4&&state.mutes[c]?'muted':''}" data-row="${r}" data-col="${c}" aria-label="${t.name}, row ${hex(r)}, ${key?(t.scene?escapeHTML(key.name)+(missing?' (not in this patch)':''):t.visual?formatValue(t.id,key.v):escapeHTML(key.note)+(Object.keys(key.locks??{}).length?', sound locks':'')):'empty'}" aria-selected="${inBlock}">${content}</button>`;
+      html+=`<button role="gridcell" aria-colindex="${index+2}" tabindex="${isSelected?'0':'-1'}" class="cell ${t.visual?'visual':''} ${t.scene?'scene':''} ${missing?'missing':''} ${!key?'empty':''} ${repeat?'repeat':''} ${isSelected?'selected':''} ${inBlock?'in-selection':''} ${audio&&state.mutes[c]?'muted':''}" data-row="${r}" data-col="${c}" aria-label="${name}, row ${hex(r)}${repeat?`, repeats row ${hex(r%p.lanes[c].len)}`:''}, ${key?(t.scene?escapeHTML(key.name)+(missing?' (not in this patch)':''):t.visual?formatValue(t.id,key.v):escapeHTML(key.note)+(Object.keys(key.locks??{}).length?', sound locks':'')+(cond?', condition '+escapeHTML(cond):'')):'empty'}" aria-selected="${inBlock}">${content}</button>`;
     });html+='</div>';
   }
   grid.innerHTML=html;lastStep=-1;
@@ -489,10 +552,10 @@ function updateSelection(){
   });
   const count=(box.r1-box.r0+1)*(box.c1-box.c0+1);
   $('selectionInfo').textContent=count===1?'1 cell':`${box.r1-box.r0+1} × ${box.c1-box.c0+1} cells`;
-  document.querySelectorAll('[data-transpose]').forEach(el=>{el.disabled=box.c0>=4;});
+  document.querySelectorAll('[data-transpose]').forEach(el=>{el.disabled=box.c0>=AUDIO;});
 }
 function renderInstruments(){
-  $('instruments').innerHTML=tracks.slice(0,4).map((t,i)=>`<button class="instrument ${selected.col===i?'active':''}" data-instrument="${i}" title="Audition ${t.label}"><span class="instrument-name"><strong>${t.label}</strong><small>${t.tag}</small></span>${waveform(i*7,38)}</button>`).join('');
+  $('instruments').innerHTML=tracks.slice(0,AUDIO).map((t,i)=>`<button class="instrument ${selected.col===i?'active':''}" data-instrument="${i}" title="Audition ${t.label}"><span class="instrument-name"><strong>${t.label}</strong><small>${t.tag}</small></span>${waveform(i*7,38)}</button>`).join('');
   $('instruments').querySelectorAll('button').forEach(b=>b.onclick=async()=>{
     selectCell(selected.row,Number(b.dataset.instrument));await ensureAudio();
     if(master&&state.sound)soundHit(selected.col,{note:tracks[selected.col].note,vel:90},audioContext.currentTime+.005);
@@ -503,15 +566,17 @@ function selectPattern(index){
   editPattern=index;selectionAnchor=null;setFollow(false);
   renderPatterns();renderRows();updateInspector();renderInstruments();
 }
+// Launching plays a pattern from its start: looped if it is looping or not in the chain.
 function launchPattern(index){
   selectPattern(index);
-  if(state.loop){state.pattern=index;saveLocal();}
+  if(state.loop||!state.chain.includes(index)){state.loop=true;state.pattern=index;saveLocal();updateControls();}
   if(state.sound)ensureAudio();
-  return transport({beat:index*16,playing:true,enabled:true});
+  return transport({beat:studioBeat(entryStart(index)),playing:true,enabled:true});
 }
 function seekSelected(){
   if(state.loop&&state.pattern!==editPattern){state.pattern=editPattern;saveLocal();updateControls();}
-  return seek(editPattern*16+selected.row/4);
+  if(!state.loop&&!state.chain.includes(editPattern)){toast(`${code(editPattern)} isn’t in the chain: launch it to loop it, or add it to the chain.`);return;}
+  return seek(entryStart(editPattern)+selected.row/(4*pat().rate));
 }
 function selectCell(row,col,extend=false){
   if(extend){if(!selectionAnchor)selectionAnchor={...selected};}else selectionAnchor=null;
@@ -522,36 +587,50 @@ function selectCell(row,col,extend=false){
 }
 function toggleCell(){
   changeScore('toggle cell',()=>{
-    const p=state.patterns[editPattern],t=tracks[selected.col];
+    const p=editable(),t=tracks[selected.col];
     const value=getCell(p,selected.row,selected.col)?null:t.scene?{name:nextSceneName(p,selected.row),fade:0}:t.visual?{v:valueAt(p,t.id,selected.row)}:{note:t.note,vel:entryVelocity};
     putCell(p,selected.row,selected.col,value);
   });
 }
-function clearCell(){changeScore('clear cells',()=>clearBlock(state.patterns[editPattern],selectionBox()));}
+function clearCell(){changeScore('clear cells',()=>clearBlock(editable(),selectionBox()));}
 function setKey(id,value){
   const t=tracks.find(t=>t.id===id),v=clamp(value,t.min,t.max);
   if(!Number.isFinite(v)){toast('Enter a finite key value.');return;}
   curve=id;selected.col=tracks.findIndex(t=>t.id===id);selectionAnchor=null;
-  if(!changeScore('automation value',()=>putCell(state.patterns[editPattern],selected.row,selected.col,{v}),`key:${editPattern}:${id}:${selected.row}`)){
+  if(!changeScore('automation value',()=>putCell(editable(),selected.row,selected.col,{v}),`key:${editPattern}:${id}:${selected.row}`)){
     renderRows();updateInspector();
   }
 }
 function updateInspector(){
-  if((selected.col<4?'audio':'visual')!==editorPage){renderHeaders();renderRows();renderInstruments();}
+  if((selected.col<AUDIO?'audio':'visual')!==editorPage){renderHeaders();renderRows();renderInstruments();}
   pageColumns[editorPage]=selected.col;
   curveDirty=true;
-  const p=state.patterns[editPattern];$('patternTitle').textContent=`${pad(editPattern+1)} / ${p.name}`;
+  const p=pat(),g=geometry(p);$('patternTitle').textContent=`${code(editPattern)} / ${p.name}`;
   $('patternName').value=p.name;
-  const options=state.patterns.map((pattern,i)=>new Option(`${pad(i+1)} / ${pattern.name}`,String(i)));
+  if(document.activeElement!==$('patternRate'))$('patternRate').value=String(p.rate);
+  if(document.activeElement!==$('patternBar'))$('patternBar').value=p.bar;
+  if(document.activeElement!==$('patternBars'))$('patternBars').value=p.bars;
+  $('patternRows').textContent=`${g.rows} ROWS · ${pad(4*p.rate)}/BEAT`;
+  if(document.activeElement!==$('seedInput'))$('seedInput').value=state.seed;
+  const options=state.patterns.map((pattern,i)=>new Option(`${code(i)} / ${pattern?pattern.name:'empty'}`,String(i)));
   const previous=$('duplicateTarget').value;
   $('duplicateTarget').replaceChildren(...options);
-  $('duplicateTarget').value=previous!==''&&Number(previous)!==editPattern?previous:String((editPattern+1)%4);
+  $('duplicateTarget').value=previous!==''&&Number(previous)!==editPattern?previous:String((editPattern+1)%128);
   $('keyLocation').textContent=`KEY / ${hex(selected.row)}`;
   ['z','roll','feedback'].forEach(id=>{const v=valueAt(p,id,selected.row);$(id+'Slider').value=v;$(id+'Value').textContent=formatValue(id,v);});
-  $('selectedTrack').textContent=tracks[selected.col].name;$('selectedRow').textContent=`P${editPattern+1} / ROW ${hex(selected.row)}`;
-  const hit=selected.col<4?p.audio[selected.col][selected.row]:null;
+  $('selectedTrack').textContent=selected.col<AUDIO?laneName(selected.col):tracks[selected.col].name;$('selectedRow').textContent=`${code(editPattern)} / ROW ${hex(selected.row)}`;
+  const hit=selected.col<AUDIO?getCell(p,selected.row,selected.col):null;
   const kind=kindOf(selected.col);
   $('noteEditor').hidden=kind!=='audio';$('visualCellEditor').hidden=!tracks[selected.col].visual;$('sceneEditor').hidden=kind!=='scene';
+  $('laneFields').hidden=kind!=='audio';
+  if(kind==='audio'){
+    const lane=p.lanes[selected.col];
+    if(document.activeElement!==$('condInput'))$('condInput').value=condCode(hit?.cond);
+    $('condInput').disabled=!hit;
+    if(document.activeElement!==$('laneName'))$('laneName').value=state.lanes[selected.col].name;
+    if(document.activeElement!==$('laneLen')){$('laneLen').value=lane.len;$('laneLen').max=g.rows;}
+    if(document.activeElement!==$('laneTransforms'))$('laneTransforms').value=transformsText(lane.transforms);
+  }
   $('soundEditor').hidden=kind!=='audio';
   if(kind==='audio')for(const key of SOUND_KEYS){
     $('track-'+key).value=(key==='machine'?state.sounds?.[selected.col]?.machine:state.sounds?.[selected.col]?.params[key])??'';
@@ -567,7 +646,7 @@ function updateInspector(){
     const key=getCell(p,selected.row,SCENE),choice=$('sceneChoice');
     const names=[...new Set([...patchScenes.map(x=>x.name),...(key?[key.name]:[])])];
     choice.replaceChildren(...names.map(n=>new Option(patchScenes.some(x=>x.name===n)?`${n} · ${patchScenes.find(x=>x.name===n).output}`:`${n} (not in patch)`,n)));
-    choice.value=key?.name??nextSceneName(p,selected.row);$('sceneFade').value=key?.fade??0;
+    choice.value=key?.name??nextSceneName(p,selected.row);$('sceneFade').value=key?.fade??0;$('sceneFade').max=g.rows;
     $('writeSceneBtn').disabled=!names.length&&!key;
   }
   if(tracks[selected.col].visual){
@@ -580,24 +659,34 @@ function updateInspector(){
 }
 function drawCurve(beat){
   const c=$('curveCanvas');if(!c.getClientRects().length)return;
-  const [w,h]=sizeCanvas(c),position=Math.floor(beat/16)===editPattern?beat:null;
+  const place=placeAt(beat),[w,h]=sizeCanvas(c),position=place.pattern===editPattern?place.rowPos:null;
   if(!curveDirty&&curvePaint?.w===w&&curvePaint?.h===h&&curvePaint?.position===position)return;
   curveDirty=false;curvePaint={w,h,position};
-  const ctx=c.getContext('2d'),p=state.patterns[editPattern],t=tracks.find(t=>t.id===curve),left=32,right=w-16,top=18,bottom=h-23;
+  const ctx=c.getContext('2d'),p=pat(),g=geometry(p),last=g.rows-1,t=tracks.find(t=>t.id===curve),left=32,right=w-16,top=18,bottom=h-23;
   ctx.clearRect(0,0,w,h);ctx.fillStyle='#121b16';ctx.fillRect(0,0,w,h);ctx.font='9px ui-monospace, monospace';ctx.lineWidth=.6;
   for(let i=0;i<=4;i++){const y=top+(bottom-top)*i/4;ctx.strokeStyle='#2a3b2e';ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(right,y);ctx.stroke();if(i===0||i===4){ctx.fillStyle='#546b59';ctx.fillText((t.max-(t.max-t.min)*i/4).toFixed(t.id==='roll'?0:1),3,y+3);}}
-  for(let i=0;i<5;i++){const x=left+(right-left)*i/4;ctx.strokeStyle='#344431';ctx.beginPath();ctx.moveTo(x,top);ctx.lineTo(x,bottom);ctx.stroke();ctx.fillStyle='#637c66';ctx.fillText(`${pad(editPattern*4+i+1)}`,x-5,h-7);}
-  const point=(r,v)=>[left+r/63*(right-left),bottom-(v-t.min)/(t.max-t.min)*(bottom-top)];
-  ctx.beginPath();for(let r=0;r<=63;r+=.25){const xy=point(r,valueAt(p,curve,r));if(r===0)ctx.moveTo(...xy);else ctx.lineTo(...xy);}ctx.strokeStyle='#d6b27e';ctx.lineWidth=1.5;ctx.stroke();ctx.lineTo(right,bottom);ctx.lineTo(left,bottom);ctx.closePath();ctx.fillStyle='#d0ab6a0b';ctx.fill();
+  const point=(r,v)=>[left+r/Math.max(1,last)*(right-left),bottom-(v-t.min)/(t.max-t.min)*(bottom-top)];
+  for(let b=0;b<=g.bars;b++){const x=point(Math.min(b*g.bar,last),0)[0];ctx.strokeStyle='#344431';ctx.beginPath();ctx.moveTo(x,top);ctx.lineTo(x,bottom);ctx.stroke();if(b<g.bars){ctx.fillStyle='#637c66';ctx.fillText(pad(b+1),x+2,h-7);}}
+  ctx.beginPath();for(let r=0;r<=last;r+=.25){const xy=point(r,valueAt(p,curve,r));if(r===0)ctx.moveTo(...xy);else ctx.lineTo(...xy);}ctx.strokeStyle='#d6b27e';ctx.lineWidth=1.5;ctx.stroke();ctx.lineTo(right,bottom);ctx.lineTo(left,bottom);ctx.closePath();ctx.fillStyle='#d0ab6a0b';ctx.fill();
   p.keys[curve].forEach(k=>{const [x,y]=point(k.r,k.v);ctx.fillStyle=k.r===selected.row?'#f4d79c':'#a58959';ctx.fillRect(x-2.5,y-2.5,5,5);});
-  if(Math.floor(beat/16)===editPattern){const x=left+mod(beat,16)/16*(right-left);ctx.beginPath();ctx.moveTo(x,top-5);ctx.lineTo(x,bottom+4);ctx.strokeStyle='#a5d3a7';ctx.lineWidth=.8;ctx.stroke();}
+  if(position!==null){const x=left+Math.min(position/Math.max(1,last),1)*(right-left);ctx.beginPath();ctx.moveTo(x,top-5);ctx.lineTo(x,bottom+4);ctx.strokeStyle='#a5d3a7';ctx.lineWidth=.8;ctx.stroke();}
+}
+// Studio's FILL (the last change it holds) and the bus layer's, for a version-3 score.
+function fillOn(){return !!remote?.fill?.at(-1)?.on;}
+function updateFill(){
+  const v3=!state.legacy,bus=v3&&stateAt(remote?.bus?.fill,nowTicks());
+  $('fillBtn').disabled=!v3;$('fillBtn').setAttribute('aria-pressed',String(v3&&fillOn()));
+  $('fillBtn').classList.toggle('bus',!!bus);
+  $('fillBtn').title=!v3?'FILL plays cells marked F; write an F condition to use it':`FILL ${fillOn()?'on':'off'}${bus?' · held on by Rack’s bus':''} · cells marked F play while it is on`;
 }
 function updateControls(){
   if(master)master.gain.setTargetAtTime(state.sound?.23:0,audioContext.currentTime,.02);
   $('tempo').value=state.bpm;$('key').value=state.key;$('audioBtn').setAttribute('aria-pressed',state.sound);$('audioLabel').textContent=state.sound?'Sound on':'Sound off';$('loopBtn').setAttribute('aria-pressed',state.loop);$('loopBtn').classList.toggle('active',state.loop);
-  $('loopBtn').title=state.loop?`Looping pattern ${state.pattern+1}; click to disable`:`Loop selected pattern ${editPattern+1}`;
+  $('loopBtn').title=state.loop?`Looping ${code(state.pattern)}; click to play the chain`:`Loop ${code(editPattern)}`;
   $('programMode').value=state.modes.program;$('auxMode').value=state.modes.aux;$('sceneName').textContent=remote?.path?.split('/').pop()||'Choose a patch';syncPreview();
-  const sec=64*60/state.bpm;$('duration').textContent=`${pad(Math.floor(sec/60))}:${(sec%60).toFixed(1).padStart(4,'0')}`;
+  const sec=cycleBeats()*60/state.bpm;$('duration').textContent=`${pad(Math.floor(sec/60))}:${(sec%60).toFixed(1).padStart(4,'0')}`;
+  $('entryCount').textContent=state.loop?`LOOP ${code(state.pattern)}`:`${state.chain.length} ${state.chain.length===1?'ENTRY':'ENTRIES'}`;
+  updateFill();
 }
 
 if(outputType){
@@ -645,11 +734,74 @@ if(outputType){
     else {win.focus();toast(`Move the ${kind==='aux'?'auxiliary':'program'} window to your display and press F for fullscreen.`);}
   }
   $('playBtn').onclick=togglePlay;
-  $('stopBtn').onclick=()=>scoreFailed||conflicted?transport({playing:false},{score:false}):transport({playing:false,beat:state.loop?state.pattern*16:editPattern*16});
+  $('stopBtn').onclick=()=>scoreFailed||conflicted?transport({playing:false},{score:false}):transport({playing:false,beat:studioBeat(entryStart(state.loop?state.pattern:editPattern))});
+  // Looping is a transport change Studio applies to a version-3 score as score-v3.md says;
+  // an older score keeps its explicit seek.
   $('loopBtn').onclick=()=>{
-    const beat=nowBeat();state.loop=!state.loop;
+    const legacy=state.legacy,beat=nowBeat(),from=state.pattern;state.loop=!state.loop;
     if(state.loop)state.pattern=editPattern;
-    saveLocal();seek(state.loop?editPattern*16:beat);updateControls();
+    saveLocal();if(legacy)seek(state.loop?0:16*from+beat);updateControls();renderPatterns();
+  };
+  $('fillBtn').onclick=()=>{if(!state.legacy)transport(()=>({fill:!fillOn()}),{score:false});};
+  // The chain: append the edited pattern, or type the song order as codes.
+  $('chainAddBtn').onclick=()=>{
+    if(state.chain.length>=256){toast('The chain holds at most 256 entries.');return;}
+    changeScore('chain',()=>{state.chain=[...state.chain,editPattern];});
+  };
+  $('chainApplyBtn').onclick=$('chainInput').onchange=()=>{
+    try{
+      const codes=$('chainInput').value.trim().toUpperCase().split(/[\s,]+/).filter(Boolean);
+      const chain=codes.map(c=>{const m=/^([A-H])(\d{1,2})$/.exec(c);const n=m?Number(m[2]):0;
+        if(!m||n<1||n>16)throw new Error(`${c} isn’t a pattern code: A01–H16.`);return 'ABCDEFGH'.indexOf(m[1])*16+n-1;});
+      if(!chain.length||chain.length>256)throw new Error('The chain has 1–256 entries.');
+      changeScore('chain',()=>{state.chain=chain;});$('chainMenu').open=false;
+    }catch(error){toast(error.message);}
+  };
+  // A pattern's rate, bar and bars. Lanes as long as the pattern follow its new length; shorter ones
+  // keep theirs, cut to the new length; keys and scenes past the end go.
+  function reshape(label,change){
+    changeScore(label,()=>{
+      const p=editable(),before=rowsOf(p);change(p);
+      if(p.bar*p.bars>128)throw new Error('A pattern has at most 128 rows (bar × bars).');
+      const rows=rowsOf(p);
+      for(const lane of p.lanes)if(lane.len===before||lane.len>rows){lane.cells=Array.from({length:rows},(_,i)=>lane.cells[i]??null);lane.len=rows;}
+      for(const id of LANES)p.keys[id]=p.keys[id].filter(k=>k.r<rows);
+      p.scenes=(p.scenes??[]).filter(k=>k.r<rows).map(k=>({...k,fade:Math.min(k.fade,rows)}));
+      if(selected.row>=rows)selected.row=rows-1;
+    });
+  }
+  $('patternRate').onchange=()=>reshape('pattern rate',p=>{p.rate=Number($('patternRate').value);});
+  for(const [id,field,top] of [['patternBar','bar',32],['patternBars','bars',8]])
+    $(id).onchange=()=>{
+      const v=Number($(id).value);
+      if(!Number.isInteger(v)||v<1||v>top){toast(`${field==='bar'?'Rows per bar':'Bars'} must be 1–${top}.`);updateInspector();return;}
+      reshape(field==='bar'?'rows per bar':'bars',p=>{p[field]=v;});
+    };
+  $('laneName').onchange=()=>{
+    const name=$('laneName').value.trim();
+    if(name.length>24){toast('A lane name has at most 24 characters.');updateInspector();return;}
+    changeScore('lane name',()=>{state.lanes[selected.col].name=name;});
+  };
+  $('laneLen').onchange=()=>{
+    const rows=rowsOf(pat()),len=Number($('laneLen').value);
+    if(!Number.isInteger(len)||len<1||len>rows){toast(`A lane is 1–${rows} rows: at most the pattern’s length.`);updateInspector();return;}
+    changeScore('lane length',()=>{const lane=editable().lanes[selected.col];lane.cells=Array.from({length:len},(_,i)=>lane.cells[i]??null);lane.len=len;});
+  };
+  $('laneTransforms').onchange=()=>{
+    try{const transforms=parseTransforms($('laneTransforms').value);changeScore('lane transforms',()=>{editable().lanes[selected.col].transforms=transforms;});}
+    catch(error){toast(error.message);}
+  };
+  $('condInput').onchange=()=>{
+    try{
+      const cond=parseCond($('condInput').value),hit=getCell(pat(),selected.row,selected.col);
+      if(!hit){toast('Write a note first, then give it a condition.');updateInspector();return;}
+      changeScore('condition',()=>{const p=editable(),{cond:_,...rest}=getCell(p,selected.row,selected.col);putCell(p,selected.row,selected.col,cond?{...rest,cond}:rest);});
+    }catch(error){toast(error.message);updateInspector();}
+  };
+  $('seedInput').onchange=()=>{
+    const seed=Number($('seedInput').value);
+    if(!Number.isInteger(seed)||seed<0||seed>4294967295){toast('The seed is a whole number from 0 to 4294967295.');updateInspector();return;}
+    changeScore('seed',()=>{state.seed=seed;});
   };
   $('tempo').onchange=()=>changeScore('tempo',()=>{state.bpm=clamp(Number($('tempo').value)||138,60,200);});
   $('key').onchange=()=>{changeScore('key transposition',()=>{state.key=Number($('key').value);});stopVoices();};
@@ -697,17 +849,17 @@ if(outputType){
   document.querySelector('.editor-stack').addEventListener('focusin',e=>{if(playing&&follow&&!switchingPage&&!e.target.closest('button[data-editor-page]'))setFollow(false);});
   ['z','roll','feedback'].forEach(id=>$(id+'Slider').addEventListener('input',()=>setKey(id,Number($(id+'Slider').value))));
   $('curveTabs').querySelectorAll('button').forEach(b=>b.onclick=()=>{curve=b.dataset.curve;selected.col=tracks.findIndex(t=>t.id===curve);selectionAnchor=null;renderRows();updateInspector();});
-  $('easeButtons').querySelectorAll('button').forEach(b=>b.onclick=()=>changeScore('interpolation',()=>{state.patterns[editPattern].easing[curve]=b.dataset.ease;}));
+  $('easeButtons').querySelectorAll('button').forEach(b=>b.onclick=()=>changeScore('interpolation',()=>{editable().easing[curve]=b.dataset.ease;}));
   $('clearCellBtn').onclick=clearCell;
   $('undoBtn').onclick=()=>restoreHistory();$('redoBtn').onclick=()=>restoreHistory(true);
   function selectBlock(all=false){
     const columns=PAGE_COLUMNS[editorPage];
-    selectionAnchor={row:0,col:all?columns[0]:selected.col};selected={row:63,col:all?columns.at(-1):selected.col};
+    selectionAnchor={row:0,col:all?columns[0]:selected.col};selected={row:rowsOf(pat())-1,col:all?columns.at(-1):selected.col};
     setFollow(false);updateSelection();updateInspector();focusCell();
   }
   $('selectLaneBtn').onclick=()=>selectBlock();$('selectAllBtn').onclick=()=>selectBlock(true);
   function copySelection(cut=false){
-    clipboard=copyBlock(state.patterns[editPattern],selectionBox());
+    clipboard=copyBlock(pat(),selectionBox());
     if(cut)clearCell();
     toast(`${cut?'Cut':'Copied'} ${clipboard.rows.length} × ${clipboard.columns.length} cells.`);
     return JSON.stringify(clipboard);
@@ -717,7 +869,7 @@ if(outputType){
     try{
       block=readBlock(JSON.stringify(block));
       let result;
-      changeScore('paste cells',()=>{if(block.rows.some(row=>row.some(cell=>cell?.locks)))ensureSounds(state);result=pasteBlock(state.patterns[editPattern],selected,block,{lastColumn:PAGE_COLUMNS[editorPage].at(-1)});});
+      changeScore('paste cells',()=>{result=pasteBlock(editable(),selected,block,{lastColumn:PAGE_COLUMNS[editorPage].at(-1)});});
       if(result)toast(`Pasted ${result.written} cells.${result.skipped?' '+result.skipped+' outside this page/pattern or in incompatible lanes were skipped.':''}`);
     }catch(error){toast(error.message);}
   }
@@ -728,7 +880,7 @@ if(outputType){
     e.preventDefault();const text=e.clipboardData.getData('text/plain');
     try{pasteSelection(text?readBlock(text):clipboard);}catch(error){toast(error.message);}
   });
-  function transposeSelection(amount){changeScore('transpose notes',()=>transposeBlock(state.patterns[editPattern],selectionBox(),amount));}
+  function transposeSelection(amount){changeScore('transpose notes',()=>transposeBlock(editable(),selectionBox(),amount));}
   document.querySelectorAll('[data-transpose]').forEach(b=>b.onclick=()=>transposeSelection(Number(b.dataset.transpose)));
   function velocity(){
     const value=Number($('velocityInput').value);
@@ -736,10 +888,10 @@ if(outputType){
     return value;
   }
   function writeNote(note=$('noteInput').value){
-    if(selected.col>=4)return;
+    if(selected.col>=AUDIO)return;
     try{
       note=canonicalNote(note.toUpperCase().trim());entryVelocity=velocity();
-      changeScore('write note',()=>putCell(state.patterns[editPattern],selected.row,selected.col,{...getCell(state.patterns[editPattern],selected.row,selected.col),note,vel:entryVelocity}));
+      changeScore('write note',()=>{const p=editable();putCell(p,selected.row,selected.col,{...getCell(p,selected.row,selected.col),note,vel:entryVelocity});});
     }catch(error){toast(error.message);}
   }
   for(const scope of ['track','lock'])for(const key of SOUND_KEYS){
@@ -747,12 +899,12 @@ if(outputType){
     const input=document.createElement('input');input.id=`${scope}-${key}`;input.type='number';input.min=0;input.max=key==='machine'?191:127;input.step=1;input.placeholder=scope==='track'?'Native':'Inherit';
     input.setAttribute('aria-label',`${scope==='track'?'Track default':'Hit lock'} ${key}`);label.append(input);$(scope+'SoundFields').append(label);
     input.onchange=()=>{
-      if(selected.col>=4)return;
+      if(selected.col>=AUDIO)return;
       const empty=input.value.trim()==='',value=Number(input.value);
       if(!empty&&(!Number.isInteger(value)||value<0||value>Number(input.max))){toast(`Enter an integer from 0 to ${input.max}, or leave blank.`);updateInspector();return;}
-      const hit=getCell(state.patterns[editPattern],selected.row,selected.col);if(scope==='lock'&&!hit)return;
+      if(scope==='lock'&&!getCell(pat(),selected.row,selected.col))return;
       changeScore(scope==='track'?'track sound default':'hit sound lock',()=>{
-        ensureSounds(state);
+        const hit=scope==='lock'?getCell(editable(),selected.row,selected.col):null;
         if(scope==='track'){
           const sound=state.sounds[selected.col];
           if(key==='machine')sound.machine=empty?null:value;else if(empty)delete sound.params[key];else sound.params[key]=value;
@@ -775,14 +927,15 @@ if(outputType){
     if(selected.col!==SCENE)return;
     const name=$('sceneChoice').value,fade=Number($('sceneFade').value);
     if(!SCENE_NAME.test(name)){toast('Choose a scene declared in the patch.');return;}
-    if(!Number.isInteger(fade)||fade<0||fade>64){toast('Fade is 0–64 rows.');return;}
-    changeScore('write scene',()=>putCell(state.patterns[editPattern],selected.row,SCENE,{name,fade}));
+    const rows=rowsOf(pat());
+    if(!Number.isInteger(fade)||fade<0||fade>rows){toast(`Fade is 0–${rows} rows.`);return;}
+    changeScore('write scene',()=>putCell(editable(),selected.row,SCENE,{name,fade}));
   }
   $('writeSceneBtn').onclick=writeScene;
   // Changing the name or fade rewrites an existing change; an empty cell waits for Write scene.
-  $('sceneChoice').onchange=$('sceneFade').onchange=()=>{if(getCell(state.patterns[editPattern],selected.row,SCENE))writeScene();};
+  $('sceneChoice').onchange=$('sceneFade').onchange=()=>{if(getCell(pat(),selected.row,SCENE))writeScene();};
   $('applyVelocityBtn').onclick=()=>{
-    try{const v=velocity();entryVelocity=v;changeScore('block velocity',()=>setBlockVelocity(state.patterns[editPattern],selectionBox(),v));}catch(error){toast(error.message);}
+    try{const v=velocity();entryVelocity=v;changeScore('block velocity',()=>setBlockVelocity(editable(),selectionBox(),v));}catch(error){toast(error.message);}
   };
   $('pianoBtn').onclick=()=>{
     pianoEntry=!pianoEntry;$('pianoBtn').setAttribute('aria-pressed',pianoEntry);$('pianoBtn').textContent=pianoEntry?'Piano keys on':'Piano keys off';
@@ -791,7 +944,7 @@ if(outputType){
   };
   $('octaveInput').onchange=()=>{$('octaveInput').value=clamp(Number($('octaveInput').value)||0,0,8);};
   $('auditionBtn').onclick=async()=>{
-    const hit=state.patterns[editPattern].audio[selected.col]?.[selected.row];if(!hit)return;
+    const hit=selected.col<AUDIO?getCell(pat(),selected.row,selected.col):null;if(!hit)return;
     state.sound=true;await ensureAudio();updateControls();saveLocal();
     if(audioContext)soundHit(selected.col,hit,audioContext.currentTime+.01);
   };
@@ -799,20 +952,20 @@ if(outputType){
   $('cellValue').onchange=()=>setKey(tracks[selected.col].id,Number($('cellValue').value));
   $('curveCanvas').addEventListener('pointerdown',e=>{
     const rect=e.currentTarget.getBoundingClientRect(),d=e.currentTarget.width/rect.width,t=tracks.find(t=>t.id===curve),x=(e.clientX-rect.left)*d,y=(e.clientY-rect.top)*d;
-    const row=clamp(Math.round((x-32)/(e.currentTarget.width-48)*63),0,63),value=t.min+(1-(y-18)/(e.currentTarget.height-41))*(t.max-t.min);
+    const last=rowsOf(pat())-1,row=clamp(Math.round((x-32)/(e.currentTarget.width-48)*last),0,last),value=t.min+(1-(y-18)/(e.currentTarget.height-41))*(t.max-t.min);
     selected.row=row;setFollow(false);setKey(curve,Math.round(value*100)/100);
   });
   $('patternName').onchange=()=>{
     const name=$('patternName').value.trim();if(!name){toast('Give the pattern a name.');updateInspector();return;}
-    changeScore('pattern name',()=>{state.patterns[editPattern].name=name;});
+    changeScore('pattern name',()=>{editable().name=name;});
   };
   $('duplicatePatternBtn').onclick=()=>{
     const target=Number($('duplicateTarget').value);if(target===editPattern){toast('Choose another destination.');return;}
-    changeScore('copy pattern',()=>{state.patterns[target]=structuredClone(state.patterns[editPattern]);});
-    $('patternMenu').open=false;toast(`Copied to pattern ${target+1}. Undo restores its previous contents.`);
+    changeScore('copy pattern',()=>{state.patterns[target]=structuredClone(pat());});
+    $('patternMenu').open=false;toast(`Copied to ${code(target)}. Undo restores its previous contents.`);
   };
   $('clearPatternBtn').onclick=()=>{
-    changeScore('clear pattern',()=>clearBlock(state.patterns[editPattern],{r0:0,r1:63,c0:0,c1:tracks.length-1}));
+    changeScore('clear pattern',()=>{const p=editable();clearBlock(p,{r0:0,r1:rowsOf(p)-1,c0:0,c1:COLUMNS-1});});
     $('patternMenu').open=false;toast('Pattern cleared. Undo restores it.');
   };
   ['program','aux'].forEach(k=>$(k+'Mode').onchange=()=>{state.modes[k]=$(k+'Mode').value;saveLocal();});
@@ -831,10 +984,12 @@ if(outputType){
     if(!document)throw new Error('No saved score in this workspace.');
     if(!await flushScore())throw new Error('Resolve the pending edit before importing. Download your recovery copy from File.');
     const result=await api('tracker_score',{document,revision});
+    const next=incoming(result.document);
     history.change(state,'import score',()=>{
-      for(const field of ['patterns','bpm','key','mutes','bindings'])state[field]=structuredClone(result.document[field]);
+      for(const field of ['format','legacy','sounds','patterns','chain','seed','lanes','bpm','key','mutes','bindings'])
+        if(next[field]===undefined)delete state[field];else state[field]=structuredClone(next[field]);
     },{pattern:editPattern,selected});
-    state=result.document;
+    state=next;
     revision=result.revision;acceptedDocument=structuredClone(result.document);editPattern=state.pattern;selectionAnchor=null;
     redrawScore();stopVoices();toast('Score loaded.');
   }
@@ -846,7 +1001,7 @@ if(outputType){
   $('restoreBtn').onclick=async()=>{try{$('fileMenu').open=false;await importScore((await api('tracker_saved')).document);}catch(error){toast(error.message);}};
   $('newScoreBtn').onclick=()=>{
     if(!confirm('Start an empty score? You can undo this edit.'))return;
-    changeScore('new empty score',()=>{state.patterns.forEach(p=>clearBlock(p,{r0:0,r1:63,c0:0,c1:tracks.length-1}));});
+    changeScore('new empty score',()=>{state.patterns.forEach(p=>p&&clearBlock(p,{r0:0,r1:rowsOf(p)-1,c0:0,c1:COLUMNS-1}));});
     $('fileMenu').open=false;
   };
   $('downloadScoreBtn').onclick=()=>{downloadScore();$('fileMenu').open=false;};
@@ -856,7 +1011,7 @@ if(outputType){
     try{
       await scoreRequest;const result=await api('tracker');
       clearTimeout(scoreTimer);pendingScore=null;scoreFailed=conflicted=false;
-      state=result.document;acceptedDocument=structuredClone(state);revision=result.revision;editPattern=state.pattern;selectionAnchor=null;
+      state=incoming(result.document);acceptedDocument=structuredClone(result.document);revision=result.revision;editPattern=state.pattern;selectionAnchor=null;
       history.clear();redrawScore();$('editConnection').hidden=true;$('savedState').textContent='Server score loaded';
     }catch(error){toast(error.message);}
   };
@@ -923,13 +1078,13 @@ if(outputType){
     if(e.key==='Escape'){
       selectionAnchor=null;updateSelection();openMenus().forEach(d=>{d.open=false;});return;
     }
-    if(inGrid&&pianoEntry&&selected.col<4&&!e.altKey){
+    if(inGrid&&pianoEntry&&selected.col<AUDIO&&!e.altKey){
       const note=pianoNote(e.code,Number($('octaveInput').value));
       if(note){
         e.preventDefault();if(e.repeat)return;
         const col=selected.col;writeNote(note);
         if(state.sound&&audioContext?.state==='running')soundHit(col,{note,vel:entryVelocity},audioContext.currentTime+.005);
-        selectCell(Math.min(63,selected.row+Number($('entryStep').value)),col);focusCell(true);return;
+        selectCell(Math.min(rowsOf(pat())-1,selected.row+Number($('entryStep').value)),col);focusCell(true);return;
       }
     }
     if(e.code==='Space'){e.preventDefault();togglePlay();return;}
@@ -939,11 +1094,11 @@ if(outputType){
     if(!inGrid)return;
     if(e.altKey&&(e.key==='ArrowUp'||e.key==='ArrowDown')){e.preventDefault();transposeSelection((e.key==='ArrowUp'?1:-1)*(e.shiftKey?12:1));return;}
     if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Home','End','PageUp','PageDown'].includes(e.key)){
-      e.preventDefault();let r=selected.row,c=selected.col;
-      if(e.key==='Home')r=0;else if(e.key==='End')r=63;else if(e.key==='PageUp')r-=16;else if(e.key==='PageDown')r+=16;
+      e.preventDefault();let r=selected.row,c=selected.col;const g=geometry(pat());
+      if(e.key==='Home')r=0;else if(e.key==='End')r=g.rows-1;else if(e.key==='PageUp')r-=g.bar;else if(e.key==='PageDown')r+=g.bar;
       else {r+=e.key==='ArrowDown'?1:e.key==='ArrowUp'?-1:0;c+=e.key==='ArrowRight'?1:e.key==='ArrowLeft'?-1:0;}
       const columns=PAGE_COLUMNS[editorPage];
-      selectCell(clamp(r,0,63),clamp(c,columns[0],columns.at(-1)),e.shiftKey);focusCell(true);
+      selectCell(clamp(r,0,g.rows-1),clamp(c,columns[0],columns.at(-1)),e.shiftKey);focusCell(true);
     }
     if(e.key==='Delete'||e.key==='Backspace'){e.preventDefault();clearCell();}
     if(e.key==='Enter'){e.preventDefault();if(e.altKey)seekSelected();else toggleCell();}
@@ -952,15 +1107,17 @@ if(outputType){
   setInterval(scheduler,25);
   setInterval(()=>{for(const k of ['program','aux']){const fullscreen=k==='program'&&nativeState?.active;const connected=fullscreen||Date.now()-outputPresence[k]<2600;$(k+'Btn').classList.toggle('connected',connected);$(k+'Status').textContent=fullscreen?(nativeState.where==='window'?'In a window':`Fullscreen on ${nativeState.where}`):connected?'Window connected':'Open output';$(k==='aux'?'routeAux':'routeProgram').classList.toggle('mint',connected);}},800);
   function frame(){
-    const beat=nowBeat(),step=Math.floor(beat*4),pattern=Math.floor(beat/16),row=step%64;
+    const beat=nowBeat(),{entry,pattern,rowPos,row,g}=placeAt(beat),step=entry*256+row;
     if(playing&&follow&&editPattern!==pattern){editPattern=pattern;selectionAnchor=null;renderPatterns();renderRows();updateInspector();}
     if(step!==lastStep){
-      $('position').innerHTML=`${pad(Math.floor(beat/4)+1,3)}<span>:</span>${pad(Math.floor(beat%4)+1)}<span>:</span>${pad(step%4)}`;
+      $('position').innerHTML=`${code(pattern)}<span> </span>${pad(Math.floor(row/g.bar)+1,3)}<span>:</span>${pad(row%g.bar+1)}`;
       $('trackerRows').querySelectorAll('.playing').forEach(e=>e.classList.remove('playing'));
       if(pattern===editPattern){const el=$('trackerRows').querySelector(`.tracker-row[data-row="${row}"]`);el?.classList.add('playing');if(playing&&follow&&el){const area=$('trackerScroll');if(el.offsetTop<area.scrollTop||el.offsetTop+el.offsetHeight>area.scrollTop+area.clientHeight)area.scrollTop=Math.max(0,el.offsetTop-area.clientHeight*.3);}}
+      $('chain').querySelectorAll('.chain-entry').forEach((e,i)=>e.classList.toggle('current',!state.loop&&i===entry));
+      updateFill();
       lastStep=step;lastPattern=pattern;
     }
-    $('patterns').querySelectorAll('.pattern-card').forEach((e,i)=>{e.classList.toggle('current',i===pattern);if(i===pattern)e.querySelector('.pattern-playhead').style.left=`${mod(beat,16)/16*100}%`;});
+    $('patterns').querySelectorAll('.pattern-card').forEach(e=>{const i=Number(e.dataset.pattern);e.classList.toggle('current',i===pattern);if(i===pattern)e.querySelector('.pattern-playhead').style.left=`${rowPos/g.rows*100}%`;});
     drawVisual($('previewCanvas'),beat,state.modes.program,state,blackout);drawVisual($('sceneThumb'),beat);drawCurve(beat);
     let level=0;if(analyser&&state.sound){analyser.getByteTimeDomainData(levelData);let peak=0;for(const v of levelData)peak=Math.max(peak,Math.abs(v-128)/128);level=clamp((20*Math.log10(Math.max(.0001,peak))+54)/5.4,0,10);}document.querySelectorAll('.meter i').forEach((e,i)=>e.classList.toggle('on',i<level));
     requestAnimationFrame(frame);
