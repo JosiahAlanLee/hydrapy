@@ -8,13 +8,11 @@ export function validateLocks(value, {machine=true}={}) {
   }
   return value;
 }
-export function ensureSounds(score) {
-  score.format='hydrapy-tracker-2';
-  score.sounds ??= Array.from({length:4},()=>({machine:null,params:{}}));
-}
+// A hit's sound: its lane's defaults with the hit's locks over them (version-3 patterns).
 export function resolveSound(score, pattern, lane, row) {
   const result=structuredClone(score.sounds?.[lane]??{machine:null,params:{}});
-  for (const [key,value] of Object.entries(score.patterns[pattern].audio[lane][row]?.locks??{})) {
+  const cells=score.patterns[pattern].lanes[lane];
+  for (const [key,value] of Object.entries(cells.cells[row%cells.len]?.locks??{})) {
     if (key==='machine') result.machine=value; else result.params[key]=value;
   }
   return result;

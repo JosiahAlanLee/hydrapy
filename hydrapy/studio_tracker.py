@@ -692,9 +692,11 @@ class Tracker:
                     entry=None if t.loop else t.entry((self.start['tick'] + self.elapsed) % t.cycle))
 
     def snapshot(self, clock_time, playing):
+        # The editor also gets version 3's elapsed ticks now, to place its own playhead.
+        extra = dict(self.playhead(), ticks=self.ticks(clock_time)) if self.v3 else {}
         return dict(document=self.document, revision=self.revision, enabled=self.enabled,
                     beat=self.beat(clock_time), playing=playing and self.enabled,
-                    transport_revision=self.transport_revision, **self.playhead())
+                    transport_revision=self.transport_revision, **extra)
 
     def frames(self, patch, *, seconds, fps, size, backend, start=0., beat=0.):
         """Apply automation at the render boundary, not at a pipelined JPEG yield.

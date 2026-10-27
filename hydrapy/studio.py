@@ -1269,6 +1269,7 @@ def make_server(session, port=8765):
                       '/tracker/notes.js': ('notes.js', 'text/javascript; charset=utf-8'),
                       '/tracker/editor.js': ('editor.js', 'text/javascript; charset=utf-8'),
                       '/tracker/sounds.js': ('sounds.js', 'text/javascript; charset=utf-8'),
+                      '/tracker/score3.js': ('score3.js', 'text/javascript; charset=utf-8'),
                       '/tracker/editor.css': ('editor.css', 'text/css; charset=utf-8'),
                       '/tracker/style.css': ('style.css', 'text/css; charset=utf-8')}
             if parsed.path in assets:

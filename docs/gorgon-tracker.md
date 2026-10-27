@@ -311,9 +311,25 @@ tests and connects the Rack module from the Gorgon repository's `main` to this S
 
 Studio also plays Gorgon's score format 3 (`hydrapy-tracker-3`: six lanes, 128
 patterns and a chain, per-pattern rates, cell conditions, lane transforms and the
-bus layer). The editor opens it in a later release; until then a version-3 score
-reaches Studio through `POST /api/tracker_score` as `{"document": …, "revision": N}`.
-Direct CV, the Breaks synth and patch lane signals play it as the spec says.
+bus layer). Direct CV, the Breaks synth and patch lane signals play it as the spec
+says, and so does the editor's audition synth.
+
+In the editor, banks A–H each hold sixteen patterns; the chain under Patterns is
+the song order (**+ Add** appends the pattern you are editing, **Edit** takes codes
+such as `A01 A02 A02 B01`), and ↻ loops the edited pattern instead. Launching a
+pattern that isn't in the chain loops it. **Rate**, **Bar** and **Bars** shape a
+pattern (¼× to 8×, up to 128 rows). For the selected audio lane, **Lane** names it,
+**Length** makes it shorter than the pattern so it repeats (its repeating rows are
+dimmed and edit the cell they play), and **Transforms** reshapes it: `rot k`,
+`rev`, `ply n`, `degrade p` and `every a:b (…)`, separated by commas. A note's
+**Condition** decides when it plays: `1:4` on the first bar of four, `%50` half
+the time, `F` while **FILL** is on, `1ST` on its pattern's first bar, `!` for the
+opposite. **Score seed** (Pattern tools) drives every `%` and `degrade`.
+
+A version-1 or 2 score stays in its format while the edits fit it. The first edit
+that needs version 3 (a fifth lane, a pattern past A04, a rate, a length, a
+condition, a transform, the chain or the seed) upgrades the score, and undo
+restores its old format.
 
 - The playhead adds `start`, `elapsed`, `entry`, `fill` and `bus` in integer ticks,
   1920 per quarter note. A seek lands on the nearest tick; Play starts a new

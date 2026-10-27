@@ -43,10 +43,10 @@ def test_score_edit_seek_tempo_save_reload_and_real_patch(workspace):
     page.get_by_role('button', name='Pause', exact=True).click()
     page.get_by_role('button', name='Play', exact=True).wait_for()
     clock = session.clock_time
-    page.get_by_role('button', name='Select pattern 3: ASCENT', exact=True).click()
+    page.get_by_role('button', name='Select pattern A03: ASCENT', exact=True).click()
     assert session.tracker.beat(session.clock_time) < 1  # selecting is no longer a seek
     page.locator('#seekCellBtn').click()
-    page.wait_for_function("document.getElementById('position').textContent.startsWith('009')")
+    page.wait_for_function("document.getElementById('position').textContent.startsWith('A03')")
     assert session.clock_time == clock  # tracker seek did not seek the renderer
     page.locator('#tempo').fill('90')
     page.locator('#tempo').press('Tab')
@@ -146,7 +146,7 @@ def test_import_validation_hold_boundary_and_slow_decode_are_bounded(workspace):
     page.locator('#importFile').set_input_files(file)
     page.wait_for_function("document.getElementById('toast').textContent.startsWith('Score loaded')")
     page.get_by_role('tab', name='Visual').click()
-    page.locator('[data-row="16"][data-col="4"]').click()
+    page.locator('[data-row="16"][data-col="6"]').click()
     assert page.locator('#zValue').text_content() == '0.90'
     accepted = session.tracker.document
     d['bpm'] = 900;file.write_text(json.dumps(d))
@@ -293,15 +293,15 @@ def test_keyboard_entry_focus_and_edit_cursor_do_not_seek(workspace):
     assert not session.tracker_blackout
     assert session.tracker.document['patterns'][0]['audio'][1][9]['note'] == 'G-4'
     page.get_by_role('tab', name='Visual').click()
-    page.locator('[data-row="2"][data-col="4"]').click()
+    page.locator('[data-row="2"][data-col="6"]').click()
     page.locator('#cellValue').fill('0.82'); page.locator('#cellValue').press('Tab')
-    page.get_by_role('button', name='Select pattern 3: ASCENT', exact=True).click()
+    page.get_by_role('button', name='Select pattern A03: ASCENT', exact=True).click()
     page.wait_for_timeout(250)
     assert session.tracker.transport_revision == transport
     assert session.tracker.beat(session.clock_time) == 8
     assert session.tracker.document['patterns'][0]['keys']['z'][1] == {'r': 2, 'v': .82}
     page.locator('#seekCellBtn').click()
-    page.wait_for_function("document.getElementById('position').textContent.startsWith('009')")
+    page.wait_for_function("document.getElementById('position').textContent.startsWith('A03')")
     assert session.tracker.transport_revision > transport
 
 
@@ -346,7 +346,7 @@ def test_pattern_tools_import_undo_and_explicit_launch(workspace):
     page.locator('#duplicatePatternBtn').click()
     page.wait_for_timeout(250)
     assert session.tracker.document['patterns'][0] == session.tracker.document['patterns'][1]
-    page.get_by_role('button', name='Select pattern 2: Study <1>', exact=True).click()
+    page.get_by_role('button', name='Select pattern A02: Study <1>', exact=True).click()
     page.locator('#patternMenu summary').click(); page.locator('#clearPatternBtn').click()
     assert page.locator('[data-row="0"][data-col="0"]').inner_text() == '···'
     page.locator('#undoBtn').click()
@@ -358,7 +358,7 @@ def test_pattern_tools_import_undo_and_explicit_launch(workspace):
     page.wait_for_function("document.getElementById('tempo').value==='99'")
     page.locator('#undoBtn').click()
     page.wait_for_function("document.getElementById('tempo').value==='138'")
-    page.get_by_role('button', name='Play from pattern 2', exact=True).click()
+    page.get_by_role('button', name='Play pattern A02', exact=True).click()
     page.get_by_role('button', name='Pause', exact=True).wait_for()
     assert session.tracker.enabled and not session.paused
     assert session.tracker.beat(session.clock_time) >= 16
@@ -383,10 +383,11 @@ def test_editor_and_file_actions_remain_accessible_at_laptop_and_phone_sizes(wor
     assert page.locator('.cell').first.evaluate('(e)=>parseFloat(getComputedStyle(e).fontSize)') >= 14
     page.locator('#viewMenu summary').click()
     page.locator('[data-row="1"][data-col="1"]').click()
-    page.keyboard.press('ArrowRight');page.keyboard.press('ArrowRight');page.keyboard.press('ArrowRight');page.keyboard.press('ArrowRight')
-    assert page.evaluate('document.activeElement.dataset.col') == '3'
+    for _ in range(5):
+        page.keyboard.press('ArrowRight')
+    assert page.evaluate('document.activeElement.dataset.col') == '5'   # the sixth lane is the edge
     page.keyboard.press('Tab');page.keyboard.press('ArrowRight')
-    assert page.evaluate('document.activeElement.dataset.col') == '5'
+    assert page.evaluate('document.activeElement.dataset.col') == '7'
     page.screenshot(path='/tmp/gorgon-editor-phone.png', full_page=True)
 
 
@@ -454,9 +455,9 @@ def test_scene_column_entry_fade_copy_undo_playback_and_missing_names(workspace)
     (root/'s.py').write_text(SCENE_PATCH)
     session.call('load', path='s.py')
     page.get_by_role('tab', name='Visual').click()
-    page.wait_for_function("document.querySelector('[data-row=\"0\"][data-col=\"7\"]') && "
+    page.wait_for_function("document.querySelector('[data-row=\"0\"][data-col=\"9\"]') && "
                            "document.querySelector('.track-header.scene')")
-    cell = lambda r: page.locator(f'[data-row="{r}"][data-col="7"]')
+    cell = lambda r: page.locator(f'[data-row="{r}"][data-col="9"]')
     scenes = lambda: session.tracker.document['patterns'][0]['scenes']
     # Enter steps through the patch's scenes: drift, then fracture after it.
     cell(0).click(); page.wait_for_function("document.getElementById('sceneChoice').options.length === 3")
@@ -470,7 +471,7 @@ def test_scene_column_entry_fade_copy_undo_playback_and_missing_names(workspace)
     # A scene block copies only into the SCENE column; undo takes it back.
     cell(16).click(); page.locator('#copyBtn').click()
     cell(32).click(); page.locator('#pasteBtn').click()
-    page.locator(f'[data-row="40"][data-col="6"]').click(); page.locator('#pasteBtn').click()
+    page.locator(f'[data-row="40"][data-col="8"]').click(); page.locator('#pasteBtn').click()
     page.wait_for_timeout(350)
     assert [k['r'] for k in scenes()] == [0, 16, 32]
     page.locator('#undoBtn').click(); page.wait_for_timeout(350)
@@ -484,26 +485,26 @@ def test_scene_column_entry_fade_copy_undo_playback_and_missing_names(workspace)
     # A name the loaded patch doesn't declare is struck through, and kept.
     (root/'s.py').write_text(SCENE_PATCH.replace("'fracture'", "'shards'"))
     session.call('load', path='s.py')
-    page.wait_for_function("document.querySelector('[data-row=\"16\"][data-col=\"7\"]').classList.contains('missing')")
+    page.wait_for_function("document.querySelector('[data-row=\"16\"][data-col=\"9\"]').classList.contains('missing')")
     assert scenes()[1]['name'] == 'fracture'
     # Arrow keys reach the SCENE column and stop there.
     cell(16).click(); page.keyboard.press('ArrowRight')
-    assert page.evaluate('document.activeElement.dataset.col') == '7'
+    assert page.evaluate('document.activeElement.dataset.col') == '9'
 
 
 def test_audio_visual_pages_keep_row_pattern_transport_and_keyboard_focus(workspace):
     session, page, context, root = workspace
     assert page.get_by_role('tab', name='Audio').get_attribute('aria-selected') == 'true'
-    assert page.locator('#trackerRows [data-row="0"] [role="gridcell"]').count() == 4
-    assert page.locator('.track-header strong').all_inner_texts() == ['Breaks', 'FM hits', 'Sub', 'Texture']
+    assert page.locator('#trackerRows [data-row="0"] [role="gridcell"]').count() == 6
+    assert page.locator('.track-header strong').all_inner_texts() == [f'Lane {n}' for n in range(1, 7)]
     assert not page.locator('.automation').is_visible()
-    page.get_by_role('button', name='Select pattern 3: ASCENT', exact=True).click()
+    page.get_by_role('button', name='Select pattern A03: ASCENT', exact=True).click()
     page.locator('[data-row="12"][data-col="2"]').click()
     revision, transport = session.tracker.revision, session.tracker.transport_revision
     page.keyboard.press('Tab')
     assert page.get_by_role('tab', name='Visual').get_attribute('aria-selected') == 'true'
     assert page.get_by_role('tab', name='Audio').get_attribute('aria-selected') == 'false'
-    assert page.evaluate('[document.activeElement.dataset.row,document.activeElement.dataset.col]') == ['12','4']
+    assert page.evaluate('[document.activeElement.dataset.row,document.activeElement.dataset.col]') == ['12','6']
     assert '03 / ASCENT' in page.locator('#patternTitle').inner_text()
     assert page.locator('.track-header strong').all_inner_texts() == ['Dolly Z', 'Roll', 'Feedback', 'Scene']
     assert page.locator('.automation').is_visible()
@@ -512,7 +513,7 @@ def test_audio_visual_pages_keep_row_pattern_transport_and_keyboard_focus(worksp
     page.keyboard.press('Tab')
     assert page.evaluate('[document.activeElement.dataset.row,document.activeElement.dataset.col]') == ['12','2']
     page.keyboard.press('Tab')
-    assert page.evaluate('document.activeElement.dataset.col') == '5'  # remembered visual lane
+    assert page.evaluate('document.activeElement.dataset.col') == '7'  # remembered visual lane
     assert session.tracker.revision == revision and session.tracker.transport_revision == transport
     # Shift+Tab leaves the grid, and form Tab keeps ordinary focus navigation.
     page.keyboard.press('Shift+Tab')
@@ -544,7 +545,7 @@ def test_page_scoped_selection_and_undo_never_clear_hidden_lanes(workspace):
     original = json.loads(json.dumps(session.tracker.document['patterns'][0]))
     page.locator('[data-row="0"][data-col="0"]').click()
     page.keyboard.press('Control+a')
-    assert page.locator('#selectionInfo').inner_text() == '64 × 4 cells'
+    assert page.locator('#selectionInfo').inner_text() == '64 × 6 cells'
     page.keyboard.press('Delete');page.wait_for_timeout(250)
     pattern = session.tracker.document['patterns'][0]
     assert all(hit is None for lane in pattern['audio'] for hit in lane)
@@ -560,13 +561,13 @@ def test_page_scoped_selection_and_undo_never_clear_hidden_lanes(workspace):
     assert pattern['audio'] == original['audio']
     assert all(not keys for keys in pattern['keys'].values())
     # Arrow selection clamps at each page's edge instead of reaching hidden lanes.
-    page.locator('[data-row="0"][data-col="4"]').click()
+    page.locator('[data-row="0"][data-col="6"]').click()
     page.keyboard.press('Shift+ArrowLeft')
-    assert page.evaluate('document.activeElement.dataset.col') == '4'
+    assert page.evaluate('document.activeElement.dataset.col') == '6'
     page.keyboard.press('Tab')
-    page.locator('[data-row="0"][data-col="3"]').click()
+    page.locator('[data-row="0"][data-col="5"]').click()
     page.keyboard.press('Shift+ArrowRight')
-    assert page.evaluate('document.activeElement.dataset.col') == '3'
+    assert page.evaluate('document.activeElement.dataset.col') == '5'
 
 
 def test_display_menu_hidden_without_native_output_and_explains_without_a_display(workspace, tmp_path, monkeypatch):
@@ -724,3 +725,74 @@ def test_external_sound_locks_edit_preserve_notes_undo_and_reload(workspace):
     page.locator('#lock-p2').fill(''); page.locator('#lock-p2').press('Tab')
     page.wait_for_timeout(400)
     assert session.tracker.document['patterns'][0]['audio'][0][0]['locks'] == {'p1': 0}
+
+
+def test_version_3_edits_upgrade_once_and_undo_restores_the_old_format(workspace):
+    session, page, context, root = workspace
+    assert session.tracker.document['format'] == 'hydrapy-tracker-1'
+    assert page.locator('#fillBtn').is_disabled()                     # FILL plays F cells: version 3 only
+    # An edit version 1 can hold keeps the format.
+    page.locator('[data-row="1"][data-col="1"]').click(); page.keyboard.press('Enter')
+    page.wait_for_timeout(300)
+    assert session.tracker.document['format'] == 'hydrapy-tracker-1'
+    # A note on the fifth lane, a condition, a transform and a shorter lane: version 3.
+    page.locator('[data-row="2"][data-col="4"]').click(); page.keyboard.press('Enter')
+    page.wait_for_function("document.getElementById('toast').textContent.includes('format 3')")
+    page.locator('#condInput').fill('1:2'); page.locator('#condInput').press('Tab')
+    page.locator('#laneTransforms').fill('ply 2, every 2:2 (rev)'); page.locator('#laneTransforms').press('Tab')
+    page.locator('#laneLen').fill('7'); page.locator('#laneLen').press('Tab')
+    page.locator('#laneName').fill('Glass'); page.locator('#laneName').press('Tab')
+    page.wait_for_timeout(400)
+    d = session.tracker.document
+    lane = d['patterns'][0]['lanes'][4]
+    assert d['format'] == 'hydrapy-tracker-3' and d['lanes'][4]['name'] == 'Glass'
+    assert lane['len'] == 7 and lane['cells'][2] == {'note': 'A-4', 'vel': 90, 'cond': {'kind': 'every', 'a': 1, 'b': 2}}
+    assert lane['transforms'] == [{'kind': 'ply', 'n': 2}, {'kind': 'every', 'a': 2, 'b': 2, 'inner': {'kind': 'rev'}}]
+    # Rows past a short lane's length repeat its cells, shown dimmed, with the condition.
+    assert 'repeat' in page.locator('[data-row="9"][data-col="4"]').get_attribute('class')
+    assert '1:2' in page.locator('[data-row="9"][data-col="4"]').inner_text()
+    assert page.locator('.track-header strong').nth(4).inner_text() == 'Glass'
+    assert not page.locator('#fillBtn').is_disabled()
+    for _ in range(5):
+        page.locator('#undoBtn').click()
+    page.wait_for_timeout(400)
+    assert session.tracker.document['format'] == 'hydrapy-tracker-1'
+    page.locator('#redoBtn').click(); page.wait_for_timeout(400)
+    assert session.tracker.document['format'] == 'hydrapy-tracker-3'
+
+
+def test_banks_chain_pattern_shape_fill_and_seed(workspace):
+    session, page, context, root = workspace
+    # A pattern in another bank, reshaped: 3 bars of 12 rows at double rate.
+    page.locator('[data-bank="1"]').click()
+    page.get_by_role('button', name='Select pattern B01: empty', exact=True).click()
+    page.locator('#patternRate').select_option('2')
+    page.locator('#patternBar').fill('12'); page.locator('#patternBar').press('Tab')
+    page.locator('#patternBars').fill('3'); page.locator('#patternBars').press('Tab')
+    page.locator('[data-row="35"][data-col="0"]').click(); page.keyboard.press('Enter')
+    page.wait_for_timeout(400)
+    b01 = session.tracker.document['patterns'][16]
+    assert (b01['rate'], b01['bar'], b01['bars']) == (2, 12, 3)
+    assert all(lane['len'] == 36 for lane in b01['lanes']) and b01['lanes'][0]['cells'][35]['note'] == 'C-2'
+    assert page.locator('#trackerRows .tracker-row').count() == 36
+    # The chain: typed, then appended to.
+    page.locator('#chainMenu summary').click()
+    page.locator('#chainInput').fill('A01 B01 B01'); page.locator('#chainApplyBtn').click()
+    page.locator('#chainAddBtn').click()
+    page.wait_for_timeout(400)
+    assert session.tracker.document['chain'] == [0, 16, 16, 16]
+    assert page.locator('.chain-entry').all_inner_texts() == ['A01', 'B01', 'B01', 'B01']
+    # Launching a pattern outside the chain loops it.
+    page.locator('[data-bank="0"]').click()
+    page.get_by_role('button', name='Play pattern A05', exact=True).click()
+    page.get_by_role('button', name='Pause', exact=True).wait_for()
+    assert session.tracker.document['loop'] and session.tracker.document['pattern'] == 4
+    page.get_by_role('button', name='Pause', exact=True).click()
+    # FILL goes to Studio, which holds it from its next unevaluated tick.
+    page.locator('#fillBtn').click()
+    page.wait_for_function("document.getElementById('fillBtn').getAttribute('aria-pressed')==='true'")
+    assert session.tracker.fill[-1]['on']
+    page.locator('#patternMenu summary').click()
+    page.locator('#seedInput').fill('1234'); page.locator('#seedInput').press('Tab')
+    page.wait_for_timeout(300)
+    assert session.tracker.document['seed'] == 1234
