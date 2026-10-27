@@ -133,6 +133,7 @@ class TrackerCV:
         self._pitch = np.zeros(6)
         self.pitch_zero = pitch_zero
         self._transport = None
+        self._segment = None            # version 3: (transport_revision, anchor tick)
         self._moving = False
         self._reset_remaining = 0
         self._landing_remaining = 0
@@ -191,10 +192,9 @@ class TrackerCV:
         if self.snapshot['document']['format'] != tracker_v3.FORMAT:
             self.snapshot['cells'] = self._cells(tracker.document)
 
-    @property
-    def frontier(self):
-        """The first version-3 tick this output has not evaluated yet, or None."""
-        return self._follower.frontier
+    def evaluated(self, segment):
+        """The first tick of version-3 ``segment`` this output has not evaluated, or None."""
+        return self._follower.frontier if segment == self._segment else None
 
     # -- evaluation -----------------------------------------------------------
     def _cells(self, document):
@@ -341,7 +341,16 @@ class TrackerCV:
         times = start + self.offset_s + np.arange(frames) / self.samplerate
         u = tracker_v3.elapsed(snapshot, times)
         beat, entry, row_pos = tracker_v3.position(d, snapshot['start']['tick'], u)
-        changed = segment != self._transport
+        # A transport change is a new transport_revision or moving becoming true (cv-semantics.md).
+        # A new segment can also come without one, when a score changes format in chain mode:
+        # that restarts evaluation but sends no reset.
+        changed = snapshot['transport_revision'] != self._transport
+        new_segment = segment != self._segment
+        if new_segment:
+            # Heard as it starts, from the anchor's row; only the first playhead this
+            # output ever sees is joined late, from its own tick (evaluator.md#evaluate).
+            self._follower.begin(-tracker_v3.TICKS if self._transport is not None else math.floor(u[0]))
+            self._segment = segment
         if changed or (moving and not self._moving):
             self._reset_remaining = round(self.reset_s * self.samplerate) if moving else 0
             self._velocity.fill(0)
@@ -349,19 +358,16 @@ class TrackerCV:
             self._landing_lanes.fill(0)
             # A gate the change interrupts closes for 1 ms, so a hit it lands on rises again.
             self._retrigger = np.where(self._gate_was & moving, round(.001 * self.samplerate), 0)
-            if changed:
-                # Heard as it starts, from the anchor's row; only the first playhead this
-                # output ever sees is joined late, from its own tick (evaluator.md#evaluate).
-                self._follower.begin(-tracker_v3.TICKS if self._transport is not None else math.floor(u[0]))
             if moving:
                 self._follower.advance(snapshot, u[0])
-                self._landing_v3(0. if changed or self._stood is None else self._stood, float(u[0]), d['bpm'])
+                landing = 0. if changed or new_segment or self._stood is None else self._stood
+                self._landing_v3(landing, float(u[0]), d['bpm'])
         if not moving:
             self._reset_remaining = 0
             self._landing_lanes.fill(0)
             self._retrigger[:] = 0
             self._stood = float(u[-1])
-        self._transport, self._moving = segment, moving
+        self._transport, self._moving = snapshot['transport_revision'], moving
         if moving:
             self._follower.advance(snapshot, u[-1])
         reset = np.arange(frames) < self._reset_remaining

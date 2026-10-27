@@ -199,3 +199,24 @@ def test_patch_lane_signals_count_every_hit_between_frames():
     frame = lanes.update_v3(snapshot, 3.2 * 480, True)
     assert frame['gate'][2] == 0. and frame['since'][2] is None     # muted in the score
     assert lanes.update_v3(dict(snapshot, transport_revision=1), 0., True)['note'][5] == 60.
+
+
+def test_a_new_segment_without_a_transport_change_sends_no_reset():
+    # A chain-mode score upgraded to version 3 while playing gets a segment of its own with
+    # the same transport_revision: evaluation restarts, but nothing resets or plays twice.
+    p = pattern()
+    p['lanes'][0]['cells'][2] = hit(note='C-2')
+    score = blank(bpm=120, patterns=[p] + [None] * 127)
+    mapping = {0: 'reset', 1: 'gate1', 2: 'vel1'}
+    cv, before = render(v3(score, revision=4), .26, mapping)            # into row 2's gate
+    synth = BreaksSynth()
+    synth.render(cv.snapshot, 100., 1, SR)
+    synth.render(cv.snapshot, 100. + 1 / SR, int(.26 * SR), SR)
+    moved = v3(score, tick=round(.26 * 2 * TICKS), revision=4)         # the same place, as a new anchor
+    moved.anchor_time = .26
+    cv.publish(moved, .26, 100.26, True)
+    after = cv.render(int(.1 * SR), 100.26)
+    assert not after[:, 0].any() and after[0, 1] == 5. and after[0, 2] == before[-1, 2]
+    voices = len(synth.voices)
+    synth.render(cv.snapshot, 100.26, int(.1 * SR), SR)
+    assert len(synth.voices) == voices                                 # row 2's kick isn't heard again

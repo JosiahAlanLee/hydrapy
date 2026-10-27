@@ -64,6 +64,7 @@ class BreaksSynth:
         self.moving = False
         self.voices = []
         self.serial = 0
+        self.segment = None
         self.follower = tracker_v3.Follower()
 
     def render(self, snapshot, start, frames, samplerate):
@@ -73,15 +74,19 @@ class BreaksSynth:
         moving = snapshot['enabled'] and snapshot['playing']
         d = snapshot['document']
         v3 = d['format'] == tracker_v3.FORMAT
-        transport = (snapshot['transport_revision'], snapshot['start']['tick']) if v3 else snapshot['transport_revision']
+        transport = snapshot['transport_revision']
         times = start + np.arange(frames) / samplerate
+        live = self.transport is not None and (transport != self.transport or (moving and not self.moving))
         if transport != self.transport or moving != self.moving:
             self.voices.clear()
             self.row = None
-        if v3 and transport != self.transport:
-            # Heard as it starts unless this is the first playhead the synth has seen.
+        if v3 and (snapshot['transport_revision'], snapshot['start']['tick']) != self.segment:
+            # A transport change heard as it starts plays the anchor's row, as a version-2
+            # seek does; otherwise (joining, or a segment without a transport change)
+            # start from the current tick, so no hit already heard sounds again.
             u = tracker_v3.elapsed(snapshot, times[:1])[0]
-            self.follower.begin(-tracker_v3.TICKS if self.transport is not None else math.floor(u))
+            self.follower.begin(-tracker_v3.TICKS if live else math.floor(u))
+            self.segment = (snapshot['transport_revision'], snapshot['start']['tick'])
         self.transport, self.moving = transport, moving
         if not moving:
             return out

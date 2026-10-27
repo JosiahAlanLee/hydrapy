@@ -226,6 +226,7 @@ class LaneState:
         self.since = [None] * 6     # seconds since each lane's latest hit
         self.last_row = self.last_beat = None
         self.started = [None] * 6   # version 3: the tick of each lane's latest hit
+        self.segment = None
         self._follower = tracker_v3.Follower()
 
     @staticmethod
@@ -277,11 +278,14 @@ class LaneState:
         """``update`` for a version-3 score, at elapsed tick ``u`` of the playhead ``snapshot``."""
         d = snapshot['document']
         segment = (snapshot['transport_revision'], snapshot['start']['tick'])
-        if segment != self.transport:
-            joined = self.transport is None
-            self.__init__()
-            self.transport = segment
-            self._follower.begin(math.floor(u) if joined else -tracker_v3.TICKS)
+        if segment != self.segment:
+            # A transport change heard as it starts plays the anchor's row and clears the holds;
+            # a new segment without one (a change of format) starts from the current tick.
+            live = self.transport is not None and snapshot['transport_revision'] != self.transport
+            if live or self.transport is None:
+                self.__init__()
+            self.transport, self.segment, self.started = snapshot['transport_revision'], segment, [None] * 6
+            self._follower.begin(-tracker_v3.TICKS if live else math.floor(u))
         beat, _, row = tracker_v3.position(d, snapshot['start']['tick'], [u])
         gate = [0.] * 6
         if not moving:
