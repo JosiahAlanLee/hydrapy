@@ -141,6 +141,10 @@ class BreaksSynth:
                 self.serial += 1
         self.row = int(rows[-1])
 
+    def evaluated(self, segment):
+        """The first tick of version-3 ``segment`` the synth hasn't evaluated, or None."""
+        return self.follower.frontier if segment == self.segment else None
+
     def _candidates(self, snapshot, times):
         """Start a voice for each version-3 candidate of lane 1 that fires, at its own tick."""
         u = tracker_v3.elapsed(snapshot, times[[0, -1]])
@@ -188,6 +192,9 @@ class StudioAudio:
 
     def publish(self, tracker, clock_time, wall, playing):
         self.snapshot = playhead(tracker, clock_time, wall, playing)
+
+    def evaluated(self, segment):
+        return self.synth.evaluated(segment)
 
     def configure(self, values):
         prepared = settings(values)

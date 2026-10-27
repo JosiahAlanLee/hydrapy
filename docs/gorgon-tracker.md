@@ -307,6 +307,28 @@ follower's reset pulse or discard held notes. The browser endpoint and transport
 replies also include it. The Gorgon integration workflow runs real Chromium
 tests and connects the Rack module from the Gorgon repository's `main` to this Studio.
 
+### Version 3 scores
+
+Studio also plays Gorgon's score format 3 (`hydrapy-tracker-3`: six lanes, 128
+patterns and a chain, per-pattern rates, cell conditions, lane transforms and the
+bus layer). The editor opens it in a later release; until then a version-3 score
+reaches Studio through `POST /api/tracker_score` as `{"document": …, "revision": N}`.
+Direct CV, the Breaks synth and patch lane signals play it as the spec says.
+
+- The playhead adds `start`, `elapsed`, `entry`, `fill` and `bus` in integer ticks,
+  1920 per quarter note. A seek lands on the nearest tick; Play starts a new
+  segment at the playhead without changing `transport_revision`.
+- Changing `loop`, the looped pattern, the chain, or any rate, bar or bars that
+  moves the chain is a transport change; Studio keeps the playing entry and the
+  beats into it where score-v3.md says so.
+- `POST /api/tracker_transport` takes `{"fill": true}` for Studio's FILL, stamped at
+  the first tick none of Studio's outputs has evaluated. A Rack module sends its
+  bus window as `segment`, `sender` and `bus`, never with `beat`, `enabled` or
+  `playing`. One module holds the layer at a time; three seconds after its last
+  request Studio clears the layer.
+- `hydrapy studio --tracker-trace FILE` appends the event trace, one JSON line per
+  candidate the picture evaluates and per change to FILL or the bus layer.
+
 ## Preview and measurements
 
 Program reuses Studio's bounded preview. Auxiliary has an additional encoder

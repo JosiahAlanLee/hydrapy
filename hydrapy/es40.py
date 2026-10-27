@@ -241,6 +241,10 @@ class CVGroup:
         for output in self.outputs:
             output.publish(*args)
 
+    def evaluated(self, segment):
+        ticks = [t for t in (output.evaluated(segment) for output in self.outputs) if t is not None]
+        return max(ticks) if ticks else None
+
     def describe(self):
         devices = [output.describe() for output in self.outputs]
         return dict(devices=devices, polarity_routes=self.polarity_routes(), ports=[p for d in devices for p in d['ports']],

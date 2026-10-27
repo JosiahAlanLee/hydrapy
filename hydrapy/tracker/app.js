@@ -324,6 +324,8 @@ async function pollRemote(){
   try{
     const result=await api('tracker');
     if(!result.document)throw new Error('Studio is starting.');
+    // Studio plays version-3 scores; this editor shows them in a later release.
+    if(result.document.format==='hydrapy-tracker-3')throw new Error('Studio is playing a version-3 score, which this editor can\'t show yet.');
     if(result.server_now-result.sampled>3)throw new Error('Studio renderer is not responding.');
     if(!remote||(!conflicted&&!scoreFailed&&!pendingScore&&!scoreRequest&&result.revision>revision)){
       if(!remote){editPattern=result.document.pattern;$('savedState').textContent='Live score · save to keep';}
