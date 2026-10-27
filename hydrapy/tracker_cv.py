@@ -14,12 +14,17 @@ Signals a channel can carry:
 ``clock``           pulses at ``ppqn`` per quarter note (default 4 = sixteenths), 50% duty
 ``reset``           a trigger on start/resume/seek and at the score/pattern loop boundary
 ``run``             high while the tracker is playing
-``gate1``-``gate4`` the four audio lanes: high for ``gate`` of a row when a hit is there,
+``gate1``-``gate6`` the audio lanes: high for ``gate`` of a row when a hit is there,
                     kept whole when a seek or start is heard late (``_landing_gate``),
                     and retriggered (1 ms low) when a seek interrupts an open gate
-``pitch1``-``pitch4`` held 1 V/oct pitch, C4 = 0 V by default, with key transposition
-``vel1``-``vel4``   the last hit's velocity on that lane, 0..``high`` volts, held
+``pitch1``-``pitch6`` held 1 V/oct pitch, C4 = 0 V by default, with key transposition
+``vel1``-``vel6``   the last hit's velocity on that lane, 0..``high`` volts, held
 ``z`` ``roll`` ``feedback``  the automation lanes, scaled to their volt ranges
+
+Lanes 5 and 6 exist in version-3 scores (Gorgon's ``hydrapy-tracker-3``); with an
+older score they stay silent. A version-3 score plays ``tracker_v3.evaluate()``'s
+candidates: a ``ply`` sub-step gets its own gate, and conditions, transforms and
+mutes are judged once, at each candidate's tick.
 """
 from __future__ import annotations
 
@@ -28,9 +33,10 @@ import time
 
 import numpy as np
 
+from . import tracker_v3
 from .studio_tracker import LANES, note_midi
 
-SIGNALS = ('clock', 'reset', 'run', *(f'gate{i}' for i in range(1, 5)), *(f'vel{i}' for i in range(1, 5)), *(f'pitch{i}' for i in range(1, 5)), *LANES)
+SIGNALS = ('clock', 'reset', 'run', *(f'gate{i}' for i in range(1, 7)), *(f'vel{i}' for i in range(1, 7)), *(f'pitch{i}' for i in range(1, 7)), *LANES)
 # The ES-3 has eight outputs. Feedback, run and velocities are opt-in.
 DEFAULT_SIGNALS = ('clock', 'reset', 'gate1', 'gate2', 'gate3', 'gate4', 'z', 'roll')
 # Volts at each lane's minimum and maximum. Roll is bipolar, the others unipolar.
@@ -83,6 +89,16 @@ def lane_values(pattern, lane, rows):
     return np.where(rows >= r[-1], v[-1], out)
 
 
+def snapshot(tracker, clock_time, wall, playing):
+    """The playhead a follower reads, at monotonic ``wall``; version 3 adds its anchor, ticks, FILL and bus."""
+    result = dict(document=tracker.document, enabled=tracker.enabled, anchor_beat=tracker.anchor_beat,
+                  anchor_time=tracker.anchor_time, clock_time=clock_time, wall=wall, playing=bool(playing),
+                  transport_revision=tracker.transport_revision)
+    if tracker.document['format'] == tracker_v3.FORMAT:
+        result.update(start=tracker.start, elapsed=tracker.elapsed, fill=tracker.fill, bus=tracker.bus)
+    return result
+
+
 class TrackerCV:
     """Render the tracker score as voltages.
 
@@ -113,17 +129,21 @@ class TrackerCV:
         if self.samplerate <= 0 or type(blocksize) is not int or blocksize < 24:
             raise ValueError('Use a positive sample rate and an audio block of at least 24 frames')
         self.snapshot = None
-        self._velocity = np.zeros(4)
-        self._pitch = np.zeros(4)
+        self._velocity = np.zeros(6)
+        self._pitch = np.zeros(6)
         self.pitch_zero = pitch_zero
         self._transport = None
+        self._segment = None            # version 3: (transport_revision, anchor tick)
         self._moving = False
         self._reset_remaining = 0
         self._landing_remaining = 0
         self._landing_row = None
         self._stood = None
-        self._gate_was = np.zeros(4, bool)
-        self._retrigger = np.zeros(4, int)
+        self._gate_was = np.zeros(6, bool)
+        self._retrigger = np.zeros(6, int)
+        self._follower = tracker_v3.Follower()
+        self._landing_lanes = np.zeros(6, int)        # version 3: landing-gate samples left, per lane
+        self._landing_span = [(0, 0)] * 6
         self._silencing = False
         self._silenced = False
         self._silence_frames = 1
@@ -168,10 +188,13 @@ class TrackerCV:
     # -- render thread --------------------------------------------------------
     def publish(self, tracker, clock_time, wall, playing):
         """Called at render boundaries: the playhead at monotonic ``wall``."""
-        self.snapshot = dict(document=tracker.document, cells=self._cells(tracker.document), enabled=tracker.enabled,
-                             anchor_beat=tracker.anchor_beat, anchor_time=tracker.anchor_time,
-                             clock_time=clock_time, wall=wall, playing=bool(playing),
-                             transport_revision=tracker.transport_revision)
+        self.snapshot = snapshot(tracker, clock_time, wall, playing)
+        if self.snapshot['document']['format'] != tracker_v3.FORMAT:
+            self.snapshot['cells'] = self._cells(tracker.document)
+
+    def evaluated(self, segment):
+        """The first tick of version-3 ``segment`` this output has not evaluated, or None."""
+        return self._follower.frontier if segment == self._segment else None
 
     # -- evaluation -----------------------------------------------------------
     def _cells(self, document):
@@ -214,6 +237,8 @@ class TrackerCV:
         out = np.zeros((frames, len(self.mapping)))
         if snapshot is None or not frames:
             return out
+        if snapshot['document']['format'] == tracker_v3.FORMAT:
+            return self._render_v3(frames, start, snapshot, out)
         d = snapshot['document']
         moving = snapshot['playing'] and snapshot['enabled']
         transport = snapshot['transport_revision']
@@ -261,6 +286,9 @@ class TrackerCV:
                 held = np.where(index >= 0, values[np.maximum(index, 0)], memory[lane])
                 memory[lane] = held[-1]
                 target[lane] = held
+        for lane in (4, 5):                                 # version 3's lanes, silent here
+            hits[lane] = np.zeros(frames, bool)
+            held_velocity[lane], held_pitch[lane] = np.full(frames, self._velocity[lane]), np.full(frames, self._pitch[lane])
         self._retrigger = np.maximum(0, self._retrigger - frames)
         for column, (channel, name) in enumerate(self.mapping.items()):
             if name == 'clock':
@@ -304,6 +332,115 @@ class TrackerCV:
             return
         seconds = min(self.gate - landing_phase, 1 - phase) * 15 / bpm - .001
         self._landing_remaining, self._landing_row = max(0, round(seconds * self.samplerate)), landing_row
+
+    def _render_v3(self, frames, start, snapshot, out):
+        """``render`` for a version-3 score: the signals of the candidates that fire (cv-semantics.md)."""
+        d = snapshot['document']
+        moving = snapshot['playing'] and snapshot['enabled']
+        segment = (snapshot['transport_revision'], snapshot['start']['tick'])
+        times = start + self.offset_s + np.arange(frames) / self.samplerate
+        u = tracker_v3.elapsed(snapshot, times)
+        beat, entry, row_pos = tracker_v3.position(d, snapshot['start']['tick'], u)
+        # A transport change is a new transport_revision or moving becoming true (cv-semantics.md).
+        # A new segment can also come without one, when a score changes format in chain mode:
+        # that restarts evaluation but sends no reset.
+        changed = snapshot['transport_revision'] != self._transport
+        new_segment = segment != self._segment
+        if new_segment:
+            # Heard as it starts, from the anchor's row; only the first playhead this
+            # output ever sees is joined late, from its own tick (evaluator.md#evaluate).
+            self._follower.begin(-tracker_v3.TICKS if self._transport is not None else math.floor(u[0]))
+            self._segment = segment
+        if changed or (moving and not self._moving):
+            self._reset_remaining = round(self.reset_s * self.samplerate) if moving else 0
+            self._velocity.fill(0)
+            self._pitch.fill(0)
+            self._landing_lanes.fill(0)
+            # A gate the change interrupts closes for 1 ms, so a hit it lands on rises again.
+            self._retrigger = np.where(self._gate_was & moving, round(.001 * self.samplerate), 0)
+            if moving:
+                self._follower.advance(snapshot, u[0])
+                landing = 0. if changed or new_segment or self._stood is None else self._stood
+                self._landing_v3(landing, float(u[0]), d['bpm'])
+        if not moving:
+            self._reset_remaining = 0
+            self._landing_lanes.fill(0)
+            self._retrigger[:] = 0
+            self._stood = float(u[-1])
+        self._transport, self._moving = snapshot['transport_revision'], moving
+        if moving:
+            self._follower.advance(snapshot, u[-1])
+        reset = np.arange(frames) < self._reset_remaining
+        self._reset_remaining = max(0, self._reset_remaining - frames)
+        hits, held_velocity, held_pitch = {}, {}, {}
+        for lane in range(6):
+            gate = np.zeros(frames, bool)
+            velocity, pitch = np.full(frames, np.nan), np.full(frames, np.nan)
+            for c in self._follower.candidates:
+                if c['lane'] == lane and c['fires'] and c['at'] <= u[-1] and c['at'] + c['duration'] > u[0]:
+                    gate |= (u >= c['at']) & (u < c['at'] + self.gate * c['duration'])
+                    span = (u >= c['at']) & (u < c['at'] + c['duration'])
+                    midi = note_midi(c['note'])
+                    velocity[span] = c['vel']
+                    pitch[span] = np.nan if midi is None else (midi + d['key'] - 2 - self.pitch_zero) / 12
+            if self._landing_lanes[lane]:
+                low, high = self._landing_span[lane]
+                landing = (np.arange(frames) < self._landing_lanes[lane]) & (u >= low) & (u < high)
+                # Leaving the landing candidate's span ends it for good.
+                self._landing_lanes[lane] = self._landing_lanes[lane] - frames if landing[-1] else 0
+                gate |= landing
+            hits[lane] = gate & moving & (np.arange(frames) >= self._retrigger[lane])
+            self._gate_was[lane] = hits[lane][-1]
+            for values, memory, target in ((velocity, self._velocity, held_velocity), (pitch, self._pitch, held_pitch)):
+                seen = np.isfinite(values) & moving
+                index = np.maximum.accumulate(np.where(seen, np.arange(frames), -1))
+                held = np.where(index >= 0, values[np.maximum(index, 0)], memory[lane])
+                memory[lane] = held[-1]
+                target[lane] = held
+        self._retrigger = np.maximum(0, self._retrigger - frames)
+        self._follower.forget(u[0])
+        for column, (channel, name) in enumerate(self.mapping.items()):
+            if name == 'clock':
+                out[:, column] = ((np.mod(beat * self.ppqn, 1.) < .5) & moving) * self.high
+            elif name == 'reset':
+                out[:, column] = ((reset | (beat < self.reset_s * d['bpm'] / 60)) & moving) * self.high
+            elif name == 'run':
+                out[:, column] = self.high if moving else 0.
+            elif name.startswith('gate'):
+                out[:, column] = hits[int(name[4]) - 1] * self.high
+            elif name.startswith('vel'):
+                out[:, column] = held_velocity[int(name[3]) - 1] / 127 * self.high
+            elif name.startswith('pitch'):
+                out[:, column] = held_pitch[int(name[5]) - 1]
+            else:
+                low, high = LANES[name][:2]
+                volts_low, volts_high = LANE_VOLTS[name]
+                values = np.full(frames, LANES[name][2])
+                entries = tracker_v3.timeline(d).entries
+                for e in np.unique(entry):
+                    pattern = d['patterns'][entries[e]]
+                    if pattern is not None:
+                        sel = entry == e
+                        values[sel] = lane_values(pattern, name, row_pos[sel])
+                out[:, column] = volts_low + (values - low) / (high - low) * (volts_high - volts_low)
+        return out
+
+    def _landing_v3(self, landing, now, bpm):
+        """``_landing_gate`` for version 3: the candidate's span plays the part of the row.
+
+        Per lane, the firing candidate whose span holds the landing tick starts a gate when the
+        landing is inside its gate fraction and this sample is still inside its span
+        (cv-semantics.md#landing-gate, evaluator.md's vector V6).
+        """
+        for c in self._follower.candidates:
+            end = c['at'] + c['duration']
+            if c['fires'] and c['at'] <= landing < end and c['at'] <= now < end:
+                phase = (landing - c['at']) / c['duration']
+                if phase < self.gate:
+                    ticks = min(self.gate - phase, 1 - (now - c['at']) / c['duration']) * c['duration']
+                    seconds = ticks * 60 / bpm / tracker_v3.TICKS - .001
+                    self._landing_lanes[c['lane']] = max(0, round(seconds * self.samplerate))
+                    self._landing_span[c['lane']] = (c['at'], end)
 
     # -- audio thread ---------------------------------------------------------
     def _callback(self, outdata, frames, time_info, status):

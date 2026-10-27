@@ -221,14 +221,15 @@ Channel numbers count from 0, as `CvOut` does. Choose signals explicitly with
 | `clock` | 5 V pulses, `--cv-ppqn` per quarter note (default 4: sixteenths), 50% duty |
 | `reset` | 5 ms, 5 V on start/resume/seek and at the score or pattern-loop boundary |
 | `run` | 5 V while the tracker is playing |
-| `gate1`–`gate4` | 5 V for half a row on each audio-lane hit; muted lanes send nothing |
-| `pitch1`–`pitch4` | held 1 V/oct pitch; C4 = 0 V by default, follows the key selector |
-| `vel1`–`vel4` | last hit's velocity on that lane, 0–5 V, held until the next hit |
+| `gate1`–`gate6` | 5 V for half a row on each audio-lane hit; muted lanes send nothing |
+| `pitch1`–`pitch6` | held 1 V/oct pitch; C4 = 0 V by default, follows the key selector |
+| `vel1`–`vel6` | last hit's velocity on that lane, 0–5 V, held until the next hit |
 | `z`, `feedback` | lane minimum to maximum as 0–5 V |
 | `roll` | −45° to 45° as −5 V to 5 V |
 
 The default map is `clock, reset, gate1–gate4, z, roll`, because the ES-3 has
-eight outputs; `feedback`, `run` and velocities are opt-in.
+eight outputs; `feedback`, `run` and velocities are opt-in. Lanes 5 and 6 exist
+in version-3 scores (Gorgon's `hydrapy-tracker-3`) and are silent before them.
 
 Every sample is evaluated in the audio callback from the render thread's latest
 playhead, so clock, gates and held key steps land on the exact sample rather than
@@ -305,6 +306,28 @@ independently of the score revision. Ordinary score edits do not restart a
 follower's reset pulse or discard held notes. The browser endpoint and transport
 replies also include it. The Gorgon integration workflow runs real Chromium
 tests and connects the Rack module from the Gorgon repository's `main` to this Studio.
+
+### Version 3 scores
+
+Studio also plays Gorgon's score format 3 (`hydrapy-tracker-3`: six lanes, 128
+patterns and a chain, per-pattern rates, cell conditions, lane transforms and the
+bus layer). The editor opens it in a later release; until then a version-3 score
+reaches Studio through `POST /api/tracker_score` as `{"document": …, "revision": N}`.
+Direct CV, the Breaks synth and patch lane signals play it as the spec says.
+
+- The playhead adds `start`, `elapsed`, `entry`, `fill` and `bus` in integer ticks,
+  1920 per quarter note. A seek lands on the nearest tick; Play starts a new
+  segment at the playhead without changing `transport_revision`.
+- Changing `loop`, the looped pattern, the chain, or any rate, bar or bars that
+  moves the chain is a transport change; Studio keeps the playing entry and the
+  beats into it where score-v3.md says so.
+- `POST /api/tracker_transport` takes `{"fill": true}` for Studio's FILL, stamped at
+  the first tick none of Studio's outputs has evaluated. A Rack module sends its
+  bus window as `segment`, `sender` and `bus`, never with `beat`, `enabled` or
+  `playing`. One module holds the layer at a time; three seconds after its last
+  request Studio clears the layer.
+- `hydrapy studio --tracker-trace FILE` appends the event trace, one JSON line per
+  candidate the picture evaluates and per change to FILL or the bus layer.
 
 ## Preview and measurements
 

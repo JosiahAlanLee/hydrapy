@@ -23,7 +23,7 @@ from .controls import apply_controls, carry_controls
 from .inspect import catalog, capabilities
 from .studio_preview import Preview
 from .scenes import check_scenes
-from .studio_tracker import Tracker, number, scene_fades
+from .studio_tracker import Tracker, cycle_beats, number, scene_fades
 from .studio_audio import StudioAudio, settings as audio_settings
 
 
@@ -146,7 +146,7 @@ class _Finishing:
 
 class Session:
     def __init__(self, root, patch=None, backend='auto', size=(640, 360), fps=30., cv=None, native=None,
-                 edit_delay_ms=None):
+                 edit_delay_ms=None, trace=None):
         """``native``: None renders as always (no window). ``'available'`` renders in a hidden
         window's context so the tracker's Display menu can show Program fullscreen (Linux, X
         display, glfw; otherwise the menu says why not). A monitor name or index, or
@@ -188,6 +188,9 @@ class Session:
         self.monitor_previews, self.monitor_captures = {}, {}
         self.monitor_next, self.monitor_cursor = 0., 0
         self.tracker = Tracker()
+        # Version 3's event trace (Gorgon evaluator.md#trace): one JSON line per candidate and change.
+        if trace is not None:
+            self.tracker.trace = open(trace, 'a', buffering=1, encoding='utf-8')
         self.tracker_state = {}
         self.bridge_state = {}
         self.tracker_blackout = False
@@ -281,6 +284,9 @@ class Session:
                 self.thread.join(timeout=10)
         if self.cv is not None:
             self.cv.close()
+        if self.tracker.trace is not None:
+            self.tracker.trace.close()
+            self.tracker.trace = None
         for proc in self.job_processes.values():
             if proc.poll() is None:
                 proc.terminate()
@@ -453,21 +459,37 @@ class Session:
                 self.aux_preview.reset(modes['aux'])
             return self.tracker.snapshot(self.clock_time, not self.paused)
         elif action == 'tracker_transport':
+            if {'segment', 'sender', 'bus'} & set(data):
+                # A Rack module's window of the bus layer (Gorgon bus-io.md): never a seek.
+                if not {'segment', 'sender', 'bus'} <= set(data) or {'beat', 'enabled', 'playing'} & set(data):
+                    raise ValueError('A bus window sends segment, sender and bus together, without beat, enabled or playing')
+                if not self.tracker.v3:
+                    raise ValueError('The bus layer needs a hydrapy-tracker-3 score')
+                self.tracker.apply_window(data['segment'], data['sender'], data['bus'], time.monotonic(),
+                                          self._first_unevaluated())
+                return dict(self.tracker.snapshot(self.clock_time, not self.paused), blackout=self.tracker_blackout)
             enabled = data.get('enabled', self.tracker.enabled)
             playing = data.get('playing', not self.paused)
-            beat = number(data.get('beat', self.tracker.beat(self.clock_time)), 0, 64, 'Beat')
+            cycle = cycle_beats(self.tracker.document)
+            beat = number(data.get('beat', self.tracker.beat(self.clock_time)), 0, cycle, 'Beat')
+            if self.tracker.v3 and beat >= cycle:
+                raise ValueError(f'Beat must be below the cycle\'s {cycle:g}')
             blackout = data.get('blackout', self.tracker_blackout)
-            if any(type(v) is not bool for v in (enabled, playing, blackout)):
+            fill = data.get('fill')
+            if any(type(v) is not bool for v in (enabled, playing, blackout)) or 'fill' in data and type(fill) is not bool:
                 raise ValueError('Transport states must be boolean')
+            if 'fill' in data and not self.tracker.v3:
+                raise ValueError('FILL needs a hydrapy-tracker-3 score')
             if enabled and self.armed and patch.transport:
                 raise ValueError('Disconnect the external clock before enabling tracker automation')
-            if 'beat' in data or enabled != self.tracker.enabled:
+            seek = 'beat' in data or enabled != self.tracker.enabled
+            if seek:
                 self.tracker.seek(beat, self.clock_time)
             self.tracker.enabled = enabled
             self.tracker_blackout = blackout
-            if self.paused != (not playing):
-                self.last_wall = time.monotonic()
-            self.paused = not playing
+            self._set_paused(not playing, segment=not seek)
+            if 'fill' in data:
+                self.tracker.set_fill(fill, self._first_unevaluated())
             return dict(self.tracker.snapshot(self.clock_time, not self.paused), blackout=self.tracker_blackout)
         elif action == 'jack_audio':
             old = dict(self.audio.config)
@@ -521,7 +543,7 @@ class Session:
             return dict(file=str(path.relative_to(self.root)), document=self.tracker.document,
                         revision=self.tracker.revision)
         elif action == 'pause':
-            self.paused = bool(data.get('paused', not self.paused))
+            self._set_paused(bool(data.get('paused', not self.paused)))
             self.last_wall = time.monotonic()
         elif action == 'output':
             index = int(data['index'])
@@ -820,6 +842,7 @@ class Session:
                                      playing=playing, transport_revision=self.tracker.transport_revision,
                                      anchor_beat=self.tracker.anchor_beat, anchor_time=self.tracker.anchor_time,
                                      clock_time=self.clock_time, wall=wall, document=self.tracker.document,
+                                     **self.tracker.playhead(),
                                      controls=[dict(name=x.name, min=x.min, max=x.max, value=x.base)
                                                for x in self.renderer.patch.controls.values()] if self.renderer else [])
             self.tracker_state = self.tracker.snapshot(self.clock_time, playing)
@@ -849,6 +872,25 @@ class Session:
             result.put(ValueError(self.error))
         if action in VISIBLE:
             self.latency_pending.append(dict(action=action, mark=mark, received=received, applied=time.monotonic()))
+
+    def _set_paused(self, paused, *, segment=True):
+        """Pause or play. Playing again starts a version-3 segment, unless the same request seeked."""
+        if self.paused and not paused and segment:
+            self.tracker.play(self.clock_time)
+        if self.paused != paused:
+            self.last_wall = time.monotonic()
+        self.paused = paused
+
+    def _first_unevaluated(self):
+        """The first tick of the current segment that none of Studio's outputs has evaluated.
+
+        Studio stamps its own changes there (Gorgon evaluator.md#ticks), so the picture,
+        the CV and the listening audio all agree with the record. Never below 0.
+        """
+        segment = (self.tracker.transport_revision, self.tracker.start['tick'])
+        ticks = [self.tracker.evaluated(), self.audio.evaluated(segment),
+                 getattr(self.cv, 'evaluated', lambda _: None)(segment)]
+        return max([0] + [t for t in ticks if t is not None])
 
     def _step(self, now):
         """Advance the clock and render one frame. Returns (GPU query or None, rendered)."""
@@ -914,6 +956,7 @@ class Session:
     def _housekeeping(self, now):
         """Status, measured fps, window events and the patch file watch, once per loop."""
         self.last_wall = now
+        self.tracker.housekeep(now, self._first_unevaluated())
         if self.native is not None and self.native.poll() and self.native.active:
             self._native_output(dict(enabled=False))  # its window was closed on the desktop
         self._publish_playhead(now)
@@ -1334,12 +1377,12 @@ def withdraw(path, token):
 
 
 def serve(root='.', patch=None, backend='auto', size=(640, 360), fps=30, port=8765, open_browser=True, tracker=False, cv=None,
-          native=None, edit_delay_ms=None):
+          native=None, edit_delay_ms=None, trace=None):
     root = Path(root).resolve()
     # Match CLI patch execution: relative asset paths belong to the project.
     os.chdir(root)
     try:
-        session = Session(root, patch, backend, size, fps, cv=cv, native=native, edit_delay_ms=edit_delay_ms)
+        session = Session(root, patch, backend, size, fps, cv=cv, native=native, edit_delay_ms=edit_delay_ms, trace=trace)
     except BaseException:
         if cv is not None:
             cv.close()

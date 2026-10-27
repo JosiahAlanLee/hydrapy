@@ -5,12 +5,14 @@ replays hooks, or clears feedback. Browser audio is deliberately outside it.
 """
 from __future__ import annotations
 
+import bisect
 import copy
 import json
 import math
 import re
 from pathlib import Path
 
+from . import tracker_v3
 from .sound_controls import controls, validate_sounds
 
 LANES = {'z': (0., 1., .35), 'roll': (-45., 45., 0.), 'feedback': (0., .9, .25)}
@@ -40,9 +42,11 @@ def number(value, low, high, label):
 
 def validate(document):
     """Copy before validation so accepted scores cannot change behind the renderer."""
+    if isinstance(document, dict) and document.get('format') == tracker_v3.FORMAT:
+        return tracker_v3.validate(document)
     d = copy.deepcopy(document)
     if not isinstance(d, dict) or d.get('format') not in ('hydrapy-tracker-1', 'hydrapy-tracker-2'):
-        raise ValueError('Expected a hydrapy-tracker-1 or hydrapy-tracker-2 score')
+        raise ValueError('Expected a hydrapy-tracker-1, hydrapy-tracker-2 or hydrapy-tracker-3 score')
     validate_sounds(d)
     number(d.get('bpm'), 60, 200, 'Tempo')
     # bool is a numeric subclass in Python, but JSON false is not the key C.
@@ -57,14 +61,7 @@ def validate(document):
             raise ValueError(f'{name} must be boolean')
     if not isinstance(d.get('mutes'), list) or len(d['mutes']) != 4 or any(type(m) is not bool for m in d['mutes']):
         raise ValueError('Four audio mute states are required')
-    if not isinstance(d.get('modes'), dict) or set(d['modes']) != {'program', 'aux'} or any(v not in ('o0', 'o1', 'o2', 'o3') for v in d['modes'].values()):
-        raise ValueError('Route program and auxiliary to o0–o3')
-    bindings = d.get('bindings')
-    if not isinstance(bindings, dict) or set(bindings) != set(LANES) or any(not isinstance(v, str) or len(v) > 120 for v in bindings.values()):
-        raise ValueError('Three named parameter bindings are required; use an empty name to disconnect')
-    named = [v for v in bindings.values() if v]
-    if len(named) != len(set(named)):
-        raise ValueError('Bind each parameter to only one lane')
+    validate_outputs(d)
     if not isinstance(d.get('patterns'), list) or len(d['patterns']) != 4:
         raise ValueError('Four patterns are required')
     for p in d['patterns']:
@@ -85,41 +82,79 @@ def validate(document):
                         controls(hit['locks'], machine=True)
                     note_midi(hit.get('note'))
                     number(hit.get('vel'), 0, 127, 'Velocity')
-        if not isinstance(p.get('keys'), dict) or set(p['keys']) != set(LANES) or not isinstance(p.get('easing'), dict):
-            raise ValueError('Three automation lanes are required')
-        for name, (lo, hi, _) in LANES.items():
-            if p['easing'].get(name) not in ('hold', 'linear', 'smooth'):
-                raise ValueError('Interpolation must be hold, linear or smooth')
-            keys = p['keys'][name]
-            if not isinstance(keys, list) or len(keys) > 64:
-                raise ValueError('At most 64 keys per lane')
-            previous = -1
-            for key in keys:
-                if not isinstance(key, dict) or type(key.get('r')) is not int or not previous < key['r'] <= 63:
-                    raise ValueError('Key rows must be unique, sorted integers from 0 to 63')
-                number(key.get('v'), lo, hi, 'Key value')
-                previous = key['r']
-        # The SCENE lane is optional, so scores saved before it existed still load.
-        scenes = p.setdefault('scenes', [])
-        if not isinstance(scenes, list) or len(scenes) > 64:
-            raise ValueError('At most 64 scene changes per pattern')
-        previous = -1
-        for key in scenes:
-            if not isinstance(key, dict) or type(key.get('r')) is not int or not previous < key['r'] <= 63:
-                raise ValueError('Scene rows must be unique, sorted integers from 0 to 63')
-            if not isinstance(key.get('name'), str) or not SCENE_NAME.fullmatch(key['name']):
-                raise ValueError('Scene names are 1-24 letters, digits, - or _')
-            key.setdefault('fade', 0)
-            if type(key['fade']) is not int or not 0 <= key['fade'] <= 64:
-                raise ValueError('A scene fade is 0-64 rows')
-            if set(key) != {'r', 'name', 'fade'}:
-                raise ValueError('A scene change has a row, a name and a fade')
-            previous = key['r']
+        validate_automation(p, 64)
     return d
 
 
+def validate_outputs(d):
+    """Monitor routes and parameter bindings, which every format shares."""
+    if not isinstance(d.get('modes'), dict) or set(d['modes']) != {'program', 'aux'} or any(v not in ('o0', 'o1', 'o2', 'o3') for v in d['modes'].values()):
+        raise ValueError('Route program and auxiliary to o0–o3')
+    bindings = d.get('bindings')
+    if not isinstance(bindings, dict) or set(bindings) != set(LANES) or any(not isinstance(v, str) or len(v) > 120 for v in bindings.values()):
+        raise ValueError('Three named parameter bindings are required; use an empty name to disconnect')
+    named = [v for v in bindings.values() if v]
+    if len(named) != len(set(named)):
+        raise ValueError('Bind each parameter to only one lane')
+
+
+def validate_automation(p, rows):
+    """A pattern's keys, easing and scenes, for a pattern of ``rows`` rows (64 before version 3)."""
+    if not isinstance(p.get('keys'), dict) or set(p['keys']) != set(LANES) or not isinstance(p.get('easing'), dict):
+        raise ValueError('Three automation lanes are required')
+    for name, (lo, hi, _) in LANES.items():
+        if p['easing'].get(name) not in ('hold', 'linear', 'smooth'):
+            raise ValueError('Interpolation must be hold, linear or smooth')
+        keys = p['keys'][name]
+        if not isinstance(keys, list) or len(keys) > rows:
+            raise ValueError(f'At most {rows} keys per lane')
+        previous = -1
+        for key in keys:
+            if not isinstance(key, dict) or type(key.get('r')) is not int or not previous < key['r'] < rows:
+                raise ValueError(f'Key rows must be unique, sorted integers from 0 to {rows - 1}')
+            number(key.get('v'), lo, hi, 'Key value')
+            previous = key['r']
+    # The SCENE lane is optional, so scores saved before it existed still load.
+    scenes = p.setdefault('scenes', [])
+    if not isinstance(scenes, list) or len(scenes) > rows:
+        raise ValueError(f'At most {rows} scene changes per pattern')
+    previous = -1
+    for key in scenes:
+        if not isinstance(key, dict) or type(key.get('r')) is not int or not previous < key['r'] < rows:
+            raise ValueError(f'Scene rows must be unique, sorted integers from 0 to {rows - 1}')
+        if not isinstance(key.get('name'), str) or not SCENE_NAME.fullmatch(key['name']):
+            raise ValueError('Scene names are 1-24 letters, digits, - or _')
+        key.setdefault('fade', 0)
+        if type(key['fade']) is not int or not 0 <= key['fade'] <= rows:
+            raise ValueError(f'A scene fade is 0-{rows} rows')
+        if set(key) != {'r', 'name', 'fade'}:
+            raise ValueError('A scene change has a row, a name and a fade')
+        previous = key['r']
+
+
+def cycle_beats(document):
+    """The playing cycle's length in beats: a pattern or the song, or version 3's chain."""
+    if document['format'] == tracker_v3.FORMAT:
+        return tracker_v3.timeline(document).cycle / tracker_v3.TICKS
+    return 16 if document['loop'] else 64
+
+
 def scene_events(document):
-    """Scene changes in the playing cycle as (beat, name, fade in beats), in order."""
+    """Scene changes in the playing cycle as (beat, name, fade in beats), in order.
+
+    In version 3 each chain entry contributes its pattern's changes, at that
+    pattern's own rate, so a pattern played twice changes scene twice.
+    """
+    if document['format'] == tracker_v3.FORMAT:
+        t = tracker_v3.timeline(document)
+        events = []
+        for start, p in zip(t.starts, t.entries):
+            pattern = document['patterns'][p]
+            if pattern is not None:
+                rows = 4 * pattern['rate']
+                events += [(start / tracker_v3.TICKS + key['r'] / rows, key['name'], key['fade'] / rows)
+                           for key in pattern.get('scenes', [])]
+        return events
     patterns = [document['pattern']] if document['loop'] else range(4)
     return [(p * 16 + key['r'] / 4, key['name'], key['fade'] / 4)
             for p in patterns for key in document['patterns'][p].get('scenes', [])]
@@ -149,7 +184,7 @@ def scene_weights(document, beat, scenes):
     the scene already showing doesn't fade at all.
     """
     order = {name: k for k, name in enumerate(scenes)}
-    length = 16 if document['loop'] else 64
+    length = cycle_beats(document)
     weights = {name: 0. for name in scenes}
     for index in sorted({value[0] for value in scenes.values()}):
         mine = [name for name, value in scenes.items() if value[0] == index]
@@ -202,15 +237,27 @@ class LaneState:
     passed since the last frame counts, even at a low frame rate, and a hit
     that has been muted or deleted never fires again. Note and velocity hold
     the last hit; a seek or a new transport clears them.
+
+    There are six lanes; 5 and 6 stay silent before version 3. A version-3 score
+    (``update_v3``) plays the candidates that fire, judged once at their tick.
     """
     GATE = .5
 
     def __init__(self):
         self.transport = None
-        self.note = [60.] * 4
-        self.vel = [0.] * 4
-        self.since = [None] * 4     # seconds since each lane's latest hit
+        self.note = [60.] * 6
+        self.vel = [0.] * 6
+        self.since = [None] * 6     # seconds since each lane's latest hit
         self.last_row = self.last_beat = None
+        self.started = [None] * 6   # version 3: the tick of each lane's latest hit
+        self.segment = None
+        self.moving = False
+        self.new = []               # version 3: the candidates the last update evaluated
+        self._follower = tracker_v3.Follower()
+
+    def evaluated(self, segment):
+        """The first tick of version-3 ``segment`` not yet evaluated, or None."""
+        return self._follower.frontier if segment == self.segment else None
 
     @staticmethod
     def _hit(document, row, lane):
@@ -231,10 +278,10 @@ class LaneState:
         length, seconds = rows / 4, 60 / document['bpm']
         current = min(int(beat * 4), first + rows - 1)
         rowpos = beat % 16 * 4
-        gate = [0.] * 4
+        gate = [0.] * 6
         if not moving:
             self.last_row = self.last_beat = None
-            return dict(gate=gate, since=[None] * 4, note=list(self.note), vel=list(self.vel),
+            return dict(gate=gate, since=[None] * 6, note=list(self.note), vel=list(self.vel),
                         beat=beat, row=float(current % 64))
         if self.last_row is None:
             crossed = [current]
@@ -257,8 +304,87 @@ class LaneState:
         return dict(gate=gate, since=list(self.since), note=list(self.note), vel=list(self.vel),
                     beat=beat, row=float(current % 64))
 
+    def update_v3(self, snapshot, u, moving):
+        """``update`` for a version-3 score, at elapsed tick ``u`` of the playhead ``snapshot``."""
+        d = snapshot['document']
+        segment = (snapshot['transport_revision'], snapshot['start']['tick'])
+        if segment != self.segment:
+            # A transport change (a new transport_revision, or Play) heard as it starts plays the
+            # anchor's row and clears the holds; a new segment without one (a change of format)
+            # starts from the current tick.
+            live = self.transport is not None and (snapshot['transport_revision'] != self.transport
+                                                   or moving and not self.moving)
+            if live or self.transport is None:
+                self.__init__()
+            self.transport, self.segment, self.started = snapshot['transport_revision'], segment, [None] * 6
+            self._follower.begin(-tracker_v3.TICKS if live else math.floor(u))
+        self.moving = moving
+        beat, _, row = tracker_v3.position(d, snapshot['start']['tick'], [u])
+        gate = [0.] * 6
+        if not moving:
+            self.new = []
+            return dict(gate=gate, since=[None] * 6, note=list(self.note), vel=list(self.vel),
+                        beat=float(beat[0]), row=float(int(row[0])))
+        self.new = self._follower.advance(snapshot, u)
+        for c in self.new:
+            if c['fires']:
+                midi = note_midi(c['note'])
+                if midi is not None:
+                    self.note[c['lane']] = float(midi + d['key'] - 2)
+                self.vel[c['lane']], self.started[c['lane']] = c['vel'] / 127, c['at']
+        for c in self._follower.candidates:
+            if c['fires'] and c['at'] <= u < c['at'] + self.GATE * c['duration']:
+                gate[c['lane']] = 1.
+        self._follower.forget(u)
+        seconds = 60 / d['bpm'] / tracker_v3.TICKS
+        self.since = [None if at is None else (u - at) * seconds for at in self.started]
+        return dict(gate=gate, since=list(self.since), note=list(self.note), vel=list(self.vel),
+                    beat=float(beat[0]), row=float(int(row[0])))
+
+
+def _timeline(document):
+    """Version 3's timeline for any score: versions 1 and 2 as they map onto version 3."""
+    if document['format'] == tracker_v3.FORMAT:
+        t = tracker_v3.timeline(document)
+        return t.loop, list(t.entries), list(t.starts)
+    entries = [document['pattern']] if document['loop'] else [0, 1, 2, 3]
+    return document['loop'], entries, [k * 16 * tracker_v3.TICKS for k in range(len(entries) + 1)]
+
+
+def _carry(before, after, entry, offset):
+    """The new anchor's cycle tick for score-v3.md's transport changes.
+
+    ``before`` and ``after`` are timelines (loop, entries, starts); the playhead
+    was ``offset`` ticks into entry ``entry`` of ``before``.
+    """
+    loop, entries, starts = after
+    length = [b - a for a, b in zip(starts, starts[1:])]
+    if loop != before[0]:
+        if loop:            # the selected pattern: if it was playing, keep the place in it
+            return offset % length[0] if before[1][entry] == entries[0] else 0
+        if before[1][0] in entries:     # the first chain entry that plays the looped pattern
+            e = entries.index(before[1][0])
+            return starts[e] + offset % length[e]
+        return 0
+    if loop:                # a new looped pattern, or a new length: keep the elapsed beats, wrapped
+        return offset % length[0]
+    if entry < len(entries) and entries[entry] == before[1][entry]:
+        return starts[entry] + offset % length[entry]
+    return 0
+
 
 class Tracker:
+    """Studio's playhead and score.
+
+    Versions 1 and 2 anchor a beat. Version 3 (Gorgon's evaluator.md) plays
+    segments: ``start`` is the anchor ``{tick, entry}``, ``elapsed`` the whole
+    ticks played at ``anchor_time``, ``fill`` Studio's FILL transitions and
+    ``bus`` the layer of FILL and lane mutes a Rack module writes (bus-io.md).
+    """
+    LEASE = 3.          # seconds without a window before the bus layer is cleared
+    FOLD = 10.          # how far behind the frontier transitions may be folded, in seconds
+    FOLD_AFTER = 32     # fold a list once it holds more transitions than this
+
     def __init__(self, document=None):
         if document is None:
             document = json.loads(Path(__file__).with_name('tracker').joinpath('demo.json').read_text())
@@ -270,20 +396,83 @@ class Tracker:
         self.enabled = False
         self.transport_revision = 0
         self.anchor_time = self.anchor_beat = 0.
+        self.start, self.elapsed = {'tick': 0, 'entry': None}, 0
+        self.fill = [{'at': 0, 'on': False}]
+        self.bus = {'fill': [{'at': 0, 'on': False}], 'mutes': [[{'at': 0, 'on': False}] for _ in range(6)]}
+        self.lease = None           # [sender, monotonic time of its last request]
+        self.trace = None           # a text file that takes JSONL trace lines, or None
         self._lanes = LaneState()
+        if self.v3:
+            self._segment(0, 0., None)
+
+    @property
+    def v3(self):
+        return self.document['format'] == tracker_v3.FORMAT
 
     def normalize(self, beat):
+        if self.v3:
+            return beat % cycle_beats(self.document)
         start, length = (self.document['pattern'] * 16, 16) if self.document['loop'] else (0, 64)
         return start + (beat - start) % length
 
+    def ticks(self, clock_time, bpm=None):
+        """Version 3's elapsed ticks ``u`` at ``clock_time``, a real number."""
+        if not self.enabled:
+            return float(self.elapsed)
+        return self.elapsed + (clock_time - self.anchor_time) * (bpm or self.document['bpm']) / 60 * tracker_v3.TICKS
+
     def beat(self, clock_time):
+        if self.v3:
+            cycle = tracker_v3.timeline(self.document).cycle
+            return (self.start['tick'] + self.ticks(clock_time)) % cycle / tracker_v3.TICKS
         elapsed = clock_time - self.anchor_time if self.enabled else 0.
         return self.normalize(self.anchor_beat + elapsed * self.document['bpm'] / 60)
 
     def seek(self, beat, clock_time, *, discontinuity=True):
+        if self.v3:
+            if not discontinuity:
+                self._reanchor(clock_time, self.document['bpm'])
+                return
+            # A seek lands on the nearest tick (evaluator.md#ticks).
+            now = self.ticks(clock_time)
+            self._segment(math.floor(beat * tracker_v3.TICKS + .5) % tracker_v3.timeline(self.document).cycle,
+                          clock_time, now)
+            self.transport_revision += 1
+            return
         self.anchor_beat, self.anchor_time = self.normalize(beat), clock_time
         if discontinuity:
             self.transport_revision += 1
+
+    def play(self, clock_time):
+        """Studio started playing: version 3 starts a segment at the tick nearest the playhead.
+
+        Play doesn't change ``transport_revision``; ``start`` tells the segments apart.
+        """
+        if self.v3 and self.enabled:
+            now = self.ticks(clock_time)
+            self._segment(round(self.start['tick'] + now) % tracker_v3.timeline(self.document).cycle, clock_time, now)
+
+    def _segment(self, tick, clock_time, now):
+        """Start a segment at cycle ``tick``. FILL and the bus layer carry their state at elapsed
+        tick ``now`` of the segment it ends (all off when there was none)."""
+        def carried(transitions):
+            return [{'at': 0, 'on': now is not None and tracker_v3.state_at(transitions, now)}]
+        self.fill = carried(self.fill)
+        self.bus = {'fill': carried(self.bus['fill']), 'mutes': [carried(m) for m in self.bus['mutes']]}
+        self.start, self.elapsed = tracker_v3.anchor(self.document, tick), 0
+        self.anchor_time, self.anchor_beat = clock_time, tick / tracker_v3.TICKS
+
+    def _reanchor(self, clock_time, bpm):
+        """Keep the segment for a tempo change: ``elapsed`` becomes the whole tick most recently
+        reached at ``bpm``, and ``anchor_time`` the clock time at which the playhead reached it."""
+        if self.enabled:
+            u = self.ticks(clock_time, bpm)
+            self.elapsed = math.floor(u)
+            self.anchor_time = clock_time - (u - self.elapsed) * 60 / bpm / tracker_v3.TICKS
+        else:
+            self.anchor_time = clock_time
+        cycle = tracker_v3.timeline(self.document).cycle
+        self.anchor_beat = (self.start['tick'] + self.elapsed) % cycle / tracker_v3.TICKS
 
     def replace(self, document, clock_time, revision):
         """Apply a score edit based on ``revision``.
@@ -310,12 +499,128 @@ class Tracker:
         self._commit(validate(document), clock_time)
 
     def _commit(self, prepared, clock_time):
-        beat = self.beat(clock_time)
+        old = self.document
+        if old['format'] != tracker_v3.FORMAT and prepared['format'] != tracker_v3.FORMAT:
+            beat = self.beat(clock_time)
+            self.document = prepared
+            self.revision += 1
+            self.seek(beat, clock_time, discontinuity=False)  # tempo changes preserve position
+            return
+        # Where the playhead is, as an entry and the ticks into it, on the old score's timeline.
+        before, after = _timeline(old), _timeline(prepared)
+        if self.v3:
+            now = self.ticks(clock_time)
+            tick = (self.start['tick'] + now) % before[2][-1]
+        else:
+            now, tick = None, (self.beat(clock_time) - (16 * old['pattern'] if old['loop'] else 0)) * tracker_v3.TICKS
+        entry = bisect.bisect_right(before[2], tick) - 1
+        moved = before != after                     # score-v3.md's transport changes
+        # A looped pattern's beats count from the song's start in versions 1 and 2 and from the
+        # pattern's in version 3, so changing format there moves the beat origin too.
+        changes_format = old['format'] != prepared['format']
+        transport = moved or changes_format and old['loop']
+        tick = _carry(before, after, entry, tick - before[2][entry]) if moved else tick
+        tick = round(tick) % after[2][-1]
+        bpm = old['bpm']
         self.document = prepared
         self.revision += 1
-        self.seek(beat, clock_time, discontinuity=False)  # tempo changes preserve position
+        if not self.v3:                             # back to version 1 or 2: a beat anchor
+            self.anchor_beat = self.normalize(tick / tracker_v3.TICKS + (16 * prepared['pattern'] if prepared['loop'] else 0))
+            self.anchor_time = clock_time
+        elif transport or changes_format:
+            self._segment(tick, clock_time, now)
+        else:
+            self._reanchor(clock_time, bpm)         # an ordinary edit: tempo changes keep the place
+        if transport:
+            self.transport_revision += 1
 
+    # -- FILL and the bus layer (version 3) -----------------------------------
+    def set_fill(self, on, stamp):
+        """Studio's FILL key: on or off from ``stamp``, the first tick Studio's outputs haven't evaluated."""
+        if tracker_v3.state_at(self.fill, stamp) == on:
+            return                                  # reapplying the state in force is not a change
+        self.fill = [t for t in self.fill if t['at'] <= stamp] + [{'at': stamp, 'on': on}]
+        self._trace({'fill': {'at': stamp, 'on': on}, 'received': stamp})
+
+    def apply_window(self, segment, sender, window, wall, received):
+        """Apply a Rack module's window of the bus layer (bus-io.md#bus-in).
+
+        ``received`` is the first tick Studio's outputs haven't evaluated. Returns
+        False for a window of a segment that is no longer current, which is dropped.
+        """
+        if not isinstance(sender, str) or not re.fullmatch(r'[0-9a-f]{16}', sender):
+            raise ValueError('sender is 16 hexadecimal digits')
+        first = window.get('from') if isinstance(window, dict) else None
+        if type(first) is not int or first < 0 or set(window) != {'from', 'fill', 'mutes'} or \
+                not isinstance(window['mutes'], list) or len(window['mutes']) != 6:
+            raise ValueError('A bus window is {from, fill, mutes}: a tick and seven lists')
+        lists = [window['fill'], *window['mutes']]
+        for transitions in lists:
+            if not isinstance(transitions, list) or not transitions or any(
+                    not isinstance(t, dict) or set(t) != {'at', 'on'} or type(t['at']) is not int or type(t['on']) is not bool
+                    for t in transitions):
+                raise ValueError('Each bus list holds {at, on} transitions')
+            ats = [t['at'] for t in transitions]
+            if ats[0] != first or ats != sorted(ats):
+                raise ValueError('Each bus list starts at the window\'s from and is sorted')
+        self.expire(wall, received)
+        if self.lease and self.lease[0] != sender:
+            raise ValueError('bus held by another module')
+        if segment != {'transport_revision': self.transport_revision, 'start': self.start}:
+            if self.lease:
+                self.lease[1] = wall
+            self._trace({'bus': {'window': 'dropped', 'reason': 'stale segment', 'from': first}, 'received': received})
+            return False
+        self.lease = [sender, wall]
+        old = [self.bus['fill'], *self.bus['mutes']]
+        new = [[t for t in kept if t['at'] < first] + [dict(t) for t in given] for kept, given in zip(old, lists)]
+        for k, (was, now) in enumerate(zip(old, new)):
+            seen = {(t['at'], t['on']) for t in was if t['at'] >= first}
+            for t in now:
+                if t['at'] >= first and (t['at'], t['on']) not in seen and tracker_v3.state_at(was, t['at']) != t['on']:
+                    change = {'fill': t} if k == 0 else {'mute': dict(t, lane=k - 1)}
+                    self._trace({'bus': change, 'received': received})
+        self.bus = {'fill': new[0], 'mutes': new[1:]}
+        return True
+
+    def expire(self, wall, stamp):
+        """End a lease 3 s after its sender's last request: the layer clears from ``stamp``."""
+        if self.lease and wall - self.lease[1] >= self.LEASE:
+            sender, self.lease = self.lease[0], None
+            def cleared(transitions):
+                kept = [t for t in transitions if t['at'] <= stamp]
+                return kept + [{'at': stamp, 'on': False}] if tracker_v3.state_at(kept, stamp) else kept
+            self.bus = {'fill': cleared(self.bus['fill']), 'mutes': [cleared(m) for m in self.bus['mutes']]}
+            self._trace({'bus': {'lease': 'ended', 'sender': sender}, 'received': stamp})
+
+    def fold(self, stamp):
+        """Fold long transition lists at least ``FOLD`` seconds behind ``stamp`` (bus-io.md#transport-endpoint)."""
+        horizon = math.floor(stamp - self.FOLD * self.document['bpm'] / 60 * tracker_v3.TICKS)
+        def folded(transitions):
+            if len(transitions) <= self.FOLD_AFTER or horizon <= 0 or transitions[1]['at'] > horizon:
+                return transitions
+            return [{'at': 0, 'on': tracker_v3.state_at(transitions, horizon)}] + [t for t in transitions if t['at'] > horizon]
+        self.fill = folded(self.fill)
+        self.bus = {'fill': folded(self.bus['fill']), 'mutes': [folded(m) for m in self.bus['mutes']]}
+
+    def housekeep(self, wall, stamp):
+        """Once a frame: end a lapsed lease and fold long lists."""
+        if self.v3:
+            self.expire(wall, stamp)
+            self.fold(stamp)
+
+    def evaluated(self):
+        """The first tick of the current segment the patch's lane signals haven't evaluated, or None."""
+        return self._lanes.evaluated((self.transport_revision, self.start['tick']))
+
+    def _trace(self, record):
+        if self.trace is not None:
+            self.trace.write(tracker_v3.trace_line(record, self.transport_revision, self.start) + '\n')
+
+    # -- per frame ------------------------------------------------------------
     def apply(self, patch, clock_time):
+        if self.v3:
+            return self._apply_v3(patch, clock_time)
         beat = self.beat(clock_time)
         # Lane signals for the patch (scenes.TrackerSignal): gates stop while disabled.
         patch.tracker_frame = self._lanes.update(self.document, beat, self.enabled, self.transport_revision)
@@ -329,10 +634,35 @@ class Tracker:
         if patch.scenes:
             patch.scene_weights = scene_weights(self.document, beat, patch.scenes)
 
+    def _apply_v3(self, patch, clock_time):
+        u = self.ticks(clock_time)
+        playhead = dict(document=self.document, transport_revision=self.transport_revision, start=self.start,
+                        fill=self.fill, bus=self.bus)
+        patch.tracker_frame = self._lanes.update_v3(playhead, u, self.enabled)
+        for c in self._lanes.new:
+            self._trace(c)
+        if not self.enabled:
+            return
+        beat, entry, row = tracker_v3.position(self.document, self.start['tick'], [u])
+        pattern = self.document['patterns'][tracker_v3.timeline(self.document).entries[entry[0]]]
+        for lane, name in self.document['bindings'].items():
+            if name in patch.controls:
+                patch.controls[name].set(value_at(pattern, lane, row[0]) if pattern else LANES[lane][2])
+        if patch.scenes:
+            patch.scene_weights = scene_weights(self.document, float(beat[0]), patch.scenes)
+
+    def playhead(self):
+        """Version 3's playhead fields (evaluator.md#playhead-fields); none before version 3."""
+        if not self.v3:
+            return {}
+        t = tracker_v3.timeline(self.document)
+        return dict(start=self.start, elapsed=self.elapsed, fill=self.fill, bus=self.bus,
+                    entry=None if t.loop else t.entry((self.start['tick'] + self.elapsed) % t.cycle))
+
     def snapshot(self, clock_time, playing):
         return dict(document=self.document, revision=self.revision, enabled=self.enabled,
                     beat=self.beat(clock_time), playing=playing and self.enabled,
-                    transport_revision=self.transport_revision)
+                    transport_revision=self.transport_revision, **self.playhead())
 
     def frames(self, patch, *, seconds, fps, size, backend, start=0., beat=0.):
         """Apply automation at the render boundary, not at a pipelined JPEG yield.
