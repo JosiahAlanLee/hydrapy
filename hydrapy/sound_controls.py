@@ -26,14 +26,14 @@ def controls(value, *, machine=False):
 
 def validate_sounds(document):
     """Validate the reserved fields without upgrading a legacy score."""
-    v2 = document['format'] == 'hydrapy-tracker-2'
-    if not v2:
+    count = {'hydrapy-tracker-2': 4, 'hydrapy-tracker-3': 6}.get(document['format'])
+    if count is None:
         if 'sounds' in document:
             raise ValueError('Sound defaults require hydrapy-tracker-2')
         return
     sounds = document.get('sounds')
-    if not isinstance(sounds, list) or len(sounds) != 4:
-        raise ValueError('Four track sound defaults are required')
+    if not isinstance(sounds, list) or len(sounds) != count:
+        raise ValueError(f'{"Four" if count == 4 else "Six"} track sound defaults are required')
     for sound in sounds:
         if not isinstance(sound, dict) or set(sound) != {'machine', 'params'}:
             raise ValueError('A track sound has machine and params')

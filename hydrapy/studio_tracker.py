@@ -57,14 +57,7 @@ def validate(document):
             raise ValueError(f'{name} must be boolean')
     if not isinstance(d.get('mutes'), list) or len(d['mutes']) != 4 or any(type(m) is not bool for m in d['mutes']):
         raise ValueError('Four audio mute states are required')
-    if not isinstance(d.get('modes'), dict) or set(d['modes']) != {'program', 'aux'} or any(v not in ('o0', 'o1', 'o2', 'o3') for v in d['modes'].values()):
-        raise ValueError('Route program and auxiliary to o0–o3')
-    bindings = d.get('bindings')
-    if not isinstance(bindings, dict) or set(bindings) != set(LANES) or any(not isinstance(v, str) or len(v) > 120 for v in bindings.values()):
-        raise ValueError('Three named parameter bindings are required; use an empty name to disconnect')
-    named = [v for v in bindings.values() if v]
-    if len(named) != len(set(named)):
-        raise ValueError('Bind each parameter to only one lane')
+    validate_outputs(d)
     if not isinstance(d.get('patterns'), list) or len(d['patterns']) != 4:
         raise ValueError('Four patterns are required')
     for p in d['patterns']:
@@ -85,37 +78,54 @@ def validate(document):
                         controls(hit['locks'], machine=True)
                     note_midi(hit.get('note'))
                     number(hit.get('vel'), 0, 127, 'Velocity')
-        if not isinstance(p.get('keys'), dict) or set(p['keys']) != set(LANES) or not isinstance(p.get('easing'), dict):
-            raise ValueError('Three automation lanes are required')
-        for name, (lo, hi, _) in LANES.items():
-            if p['easing'].get(name) not in ('hold', 'linear', 'smooth'):
-                raise ValueError('Interpolation must be hold, linear or smooth')
-            keys = p['keys'][name]
-            if not isinstance(keys, list) or len(keys) > 64:
-                raise ValueError('At most 64 keys per lane')
-            previous = -1
-            for key in keys:
-                if not isinstance(key, dict) or type(key.get('r')) is not int or not previous < key['r'] <= 63:
-                    raise ValueError('Key rows must be unique, sorted integers from 0 to 63')
-                number(key.get('v'), lo, hi, 'Key value')
-                previous = key['r']
-        # The SCENE lane is optional, so scores saved before it existed still load.
-        scenes = p.setdefault('scenes', [])
-        if not isinstance(scenes, list) or len(scenes) > 64:
-            raise ValueError('At most 64 scene changes per pattern')
-        previous = -1
-        for key in scenes:
-            if not isinstance(key, dict) or type(key.get('r')) is not int or not previous < key['r'] <= 63:
-                raise ValueError('Scene rows must be unique, sorted integers from 0 to 63')
-            if not isinstance(key.get('name'), str) or not SCENE_NAME.fullmatch(key['name']):
-                raise ValueError('Scene names are 1-24 letters, digits, - or _')
-            key.setdefault('fade', 0)
-            if type(key['fade']) is not int or not 0 <= key['fade'] <= 64:
-                raise ValueError('A scene fade is 0-64 rows')
-            if set(key) != {'r', 'name', 'fade'}:
-                raise ValueError('A scene change has a row, a name and a fade')
-            previous = key['r']
+        validate_automation(p, 64)
     return d
+
+
+def validate_outputs(d):
+    """Monitor routes and parameter bindings, which every format shares."""
+    if not isinstance(d.get('modes'), dict) or set(d['modes']) != {'program', 'aux'} or any(v not in ('o0', 'o1', 'o2', 'o3') for v in d['modes'].values()):
+        raise ValueError('Route program and auxiliary to o0–o3')
+    bindings = d.get('bindings')
+    if not isinstance(bindings, dict) or set(bindings) != set(LANES) or any(not isinstance(v, str) or len(v) > 120 for v in bindings.values()):
+        raise ValueError('Three named parameter bindings are required; use an empty name to disconnect')
+    named = [v for v in bindings.values() if v]
+    if len(named) != len(set(named)):
+        raise ValueError('Bind each parameter to only one lane')
+
+
+def validate_automation(p, rows):
+    """A pattern's keys, easing and scenes, for a pattern of ``rows`` rows (64 before version 3)."""
+    if not isinstance(p.get('keys'), dict) or set(p['keys']) != set(LANES) or not isinstance(p.get('easing'), dict):
+        raise ValueError('Three automation lanes are required')
+    for name, (lo, hi, _) in LANES.items():
+        if p['easing'].get(name) not in ('hold', 'linear', 'smooth'):
+            raise ValueError('Interpolation must be hold, linear or smooth')
+        keys = p['keys'][name]
+        if not isinstance(keys, list) or len(keys) > rows:
+            raise ValueError(f'At most {rows} keys per lane')
+        previous = -1
+        for key in keys:
+            if not isinstance(key, dict) or type(key.get('r')) is not int or not previous < key['r'] < rows:
+                raise ValueError(f'Key rows must be unique, sorted integers from 0 to {rows - 1}')
+            number(key.get('v'), lo, hi, 'Key value')
+            previous = key['r']
+    # The SCENE lane is optional, so scores saved before it existed still load.
+    scenes = p.setdefault('scenes', [])
+    if not isinstance(scenes, list) or len(scenes) > rows:
+        raise ValueError(f'At most {rows} scene changes per pattern')
+    previous = -1
+    for key in scenes:
+        if not isinstance(key, dict) or type(key.get('r')) is not int or not previous < key['r'] < rows:
+            raise ValueError(f'Scene rows must be unique, sorted integers from 0 to {rows - 1}')
+        if not isinstance(key.get('name'), str) or not SCENE_NAME.fullmatch(key['name']):
+            raise ValueError('Scene names are 1-24 letters, digits, - or _')
+        key.setdefault('fade', 0)
+        if type(key['fade']) is not int or not 0 <= key['fade'] <= rows:
+            raise ValueError(f'A scene fade is 0-{rows} rows')
+        if set(key) != {'r', 'name', 'fade'}:
+            raise ValueError('A scene change has a row, a name and a fade')
+        previous = key['r']
 
 
 def scene_events(document):
