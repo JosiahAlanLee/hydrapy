@@ -36,7 +36,7 @@ import numpy as np
 
 from .tracker_cv import SIGNALS, TrackerCV, parse_map
 
-GATE_SIGNALS = ('clock', 'reset', 'run', 'gate1', 'gate2', 'gate3', 'gate4')
+GATE_SIGNALS = ('clock', 'reset', 'run', *(f'gate{i}' for i in range(1, 7)))
 POLARITIES = ('normal', 'invert_left', 'invert_right', 'invert_both')
 
 
@@ -176,7 +176,7 @@ class ES40CV(TrackerCV):
             if not isinstance(mapping, dict) or not mapping or any(str(k) not in tuple(map(str, range(1, 9))) or v not in SIGNALS for k, v in mapping.items()):
                 raise ValueError('Expander map uses jack numbers 1–8 and tracker signal names')
             if expander == '8gt' and any(v not in GATE_SIGNALS for v in mapping.values()):
-                raise ValueError('ESX-8GT carries gates only: use clock, reset, run or gate1–gate4; route pitch CV to a CV output')
+                raise ValueError('ESX-8GT carries gates only: use clock, reset, run or gate1–gate6; route pitch CV to a CV output')
             name = unit.get('name', f'ES-40 {len(self.units) + 1}')
             if not isinstance(name, str) or not 1 <= len(name) <= 80:
                 raise ValueError('ES-40 name must contain 1–80 characters')

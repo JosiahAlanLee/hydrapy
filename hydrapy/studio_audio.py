@@ -15,8 +15,9 @@ import time
 import numpy as np
 
 from .live import AudioQueue, Soundtrack
+from . import tracker_v3
 from .studio_tracker import note_midi
-from .tracker_cv import TrackerCV
+from .tracker_cv import TrackerCV, snapshot as playhead
 
 PORTS = ('optical_L', 'optical_R', 'breaks_L', 'breaks_R')
 DEFAULTS = dict(enabled=False, optical_gain=.5, breaks_gain=.4, lead_blocks=2)
@@ -50,6 +51,8 @@ class BreaksSynth:
     (C-2), snare (D-2), or hat (other notes, and AIR) by pitch, so C2 is the kick too;
     velocity and mute follow the score.
     Voice envelopes and phase use seconds on the audio clock, not video frames.
+    A version-3 score plays lane 1's candidates that fire, ``ply`` repeats included;
+    a mute stops new hits but lets one that has started ring out.
     """
     def __init__(self):
         self.timeline = TrackerCV({0: 'clock'}, open_stream=False)
@@ -61,36 +64,31 @@ class BreaksSynth:
         self.moving = False
         self.voices = []
         self.serial = 0
+        self.follower = tracker_v3.Follower()
 
     def render(self, snapshot, start, frames, samplerate):
         out = np.zeros(frames, np.float32)
         if not snapshot or not frames:
             return out
         moving = snapshot['enabled'] and snapshot['playing']
-        transport = snapshot['transport_revision']
+        d = snapshot['document']
+        v3 = d['format'] == tracker_v3.FORMAT
+        transport = (snapshot['transport_revision'], snapshot['start']['tick']) if v3 else snapshot['transport_revision']
+        times = start + np.arange(frames) / samplerate
         if transport != self.transport or moving != self.moving:
             self.voices.clear()
             self.row = None
+        if v3 and transport != self.transport:
+            # Heard as it starts unless this is the first playhead the synth has seen.
+            u = tracker_v3.elapsed(snapshot, times[:1])[0]
+            self.follower.begin(-tracker_v3.TICKS if self.transport is not None else math.floor(u))
         self.transport, self.moving = transport, moving
         if not moving:
             return out
-        d = snapshot['document']
-        if d['mutes'][0]:
-            self.voices.clear()
-        times = start + np.arange(frames) / samplerate
-        beat, _ = self.timeline.beats(snapshot, times)
-        absolute_rows = np.floor(beat * 4 + 1e-9).astype(int)
-        rows = absolute_rows % 256
-        changes = np.flatnonzero(np.r_[rows[0] != self.row, rows[1:] != rows[:-1]])
-        for index in changes:
-            row = int(rows[index])
-            hit = d['patterns'][row // 64]['audio'][0][row % 64]
-            if hit and hit['vel'] > 0 and not d['mutes'][0]:
-                # Reconstruct the onset when attaching in the middle of a row.
-                elapsed = max(0., beat[index] * 4 - absolute_rows[index]) * 15 / d['bpm']
-                self.voices.append((times[index] - elapsed, drum(hit['note']), hit['vel'] / 127, self.serial))
-                self.serial += 1
-        self.row = int(rows[-1])
+        if v3:
+            self._candidates(snapshot, times)
+        else:
+            self._rows(d, snapshot, times)
         active = []
         for onset, kind, velocity, seed in self.voices:
             age = np.rint((times - onset) * samplerate) / samplerate
@@ -119,6 +117,34 @@ class BreaksSynth:
                 active.append((onset, kind, velocity, seed))
         self.voices = active[-32:]
         return np.clip(out, -1, 1)
+
+    def _rows(self, d, snapshot, times):
+        """Start a voice for each version-1/2 row with a hit on the Breaks lane."""
+        if d['mutes'][0]:
+            self.voices.clear()
+        beat, _ = self.timeline.beats(snapshot, times)
+        absolute_rows = np.floor(beat * 4 + 1e-9).astype(int)
+        rows = absolute_rows % 256
+        changes = np.flatnonzero(np.r_[rows[0] != self.row, rows[1:] != rows[:-1]])
+        for index in changes:
+            row = int(rows[index])
+            hit = d['patterns'][row // 64]['audio'][0][row % 64]
+            if hit and hit['vel'] > 0 and not d['mutes'][0]:
+                # Reconstruct the onset when attaching in the middle of a row.
+                elapsed = max(0., beat[index] * 4 - absolute_rows[index]) * 15 / d['bpm']
+                self.voices.append((times[index] - elapsed, drum(hit['note']), hit['vel'] / 127, self.serial))
+                self.serial += 1
+        self.row = int(rows[-1])
+
+    def _candidates(self, snapshot, times):
+        """Start a voice for each version-3 candidate of lane 1 that fires, at its own tick."""
+        u = tracker_v3.elapsed(snapshot, times[[0, -1]])
+        seconds = 60 / snapshot['document']['bpm'] / tracker_v3.TICKS
+        for c in self.follower.advance(snapshot, u[1]):
+            if c['lane'] == 0 and c['fires']:
+                self.voices.append((times[0] + (c['at'] - u[0]) * seconds, drum(c['note']), c['vel'] / 127, self.serial))
+                self.serial += 1
+        self.follower.forget(u[0])
 
 
 class StudioAudio:
@@ -156,9 +182,7 @@ class StudioAudio:
             source.close()
 
     def publish(self, tracker, clock_time, wall, playing):
-        self.snapshot = dict(document=tracker.document, enabled=tracker.enabled, playing=bool(playing),
-                             anchor_beat=tracker.anchor_beat, anchor_time=tracker.anchor_time,
-                             clock_time=clock_time, wall=wall, transport_revision=tracker.transport_revision)
+        self.snapshot = playhead(tracker, clock_time, wall, playing)
 
     def configure(self, values):
         prepared = settings(values)

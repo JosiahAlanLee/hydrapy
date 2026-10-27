@@ -186,8 +186,9 @@ def test_lane_signals_follow_hits_mutes_key_and_seeks(patch):
 
 def test_lane_signals_default_without_the_tracker(patch):
     assert tracker.note(2)(None) == 60 and tracker.gate(3)(None) == 0 and tracker.hit(4)(None) == 0
+    assert tracker.gate(6)(None) == 0             # version 3's sixth lane
     with pytest.raises(ValueError):
-        tracker.gate(5)
+        tracker.gate(7)
 
 
 def test_session_publishes_scenes_and_rejects_a_reassigned_patch(tmp_path):

@@ -33,6 +33,9 @@ playhead, per frame, as signals::
 ``vel(n)``   the last hit's velocity on lane n, 0..1 (held)
 ``beat()``   the tracker's beat, 0..64;  ``row()`` the sixteenth row, 0..63
 
+Lanes are 1-6; 5 and 6 play only in a version-3 score, where ``beat()`` is the
+beat within the cycle and ``row()`` the playing pattern's row.
+
 Without the tracker these are 0 (``note`` is 60). Muted lanes and a stopped
 tracker send no gates or hits; held values keep their last value.
 """
@@ -146,12 +149,12 @@ class TrackerSignal(Signal):
 
 
 class _Tracker:
-    """``tracker.gate(1)`` etc.: lanes are numbered 1-4, as in the tracker."""
+    """``tracker.gate(1)`` etc.: lanes are numbered 1-6, as in the tracker; 5 and 6 need a version-3 score."""
 
     @staticmethod
     def _lane(n):
-        if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= 4:
-            raise ValueError('Tracker lanes are 1-4')
+        if isinstance(n, bool) or not isinstance(n, int) or not 1 <= n <= 6:
+            raise ValueError('Tracker lanes are 1-6')
         return n - 1
 
     def gate(self, lane):

@@ -301,10 +301,14 @@ def test_mixed_gate_cv_and_direct_pitch_routes_are_independent():
     assert not out[:, [1, 4, 5]].any()
 
 
-@pytest.mark.parametrize('signal', ['pitch1', 'vel1', 'roll'])
+@pytest.mark.parametrize('signal', ['pitch1', 'vel1', 'roll', 'pitch6'])
 def test_gate_expander_rejects_continuous_cv_signals(signal):
     with pytest.raises(ValueError, match='gates only'):
         ES40CV([gate_unit(mapping={'1': signal})], open_stream=False)
+
+
+def test_gate_expander_takes_version_3s_fifth_and_sixth_lanes():
+    ES40CV([gate_unit(mapping={'1': 'gate5', '2': 'gate6'})], open_stream=False)
 
 
 def test_unknown_expander_is_rejected_and_current_rack_profile_uses_gates():

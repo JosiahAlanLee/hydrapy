@@ -221,14 +221,15 @@ Channel numbers count from 0, as `CvOut` does. Choose signals explicitly with
 | `clock` | 5 V pulses, `--cv-ppqn` per quarter note (default 4: sixteenths), 50% duty |
 | `reset` | 5 ms, 5 V on start/resume/seek and at the score or pattern-loop boundary |
 | `run` | 5 V while the tracker is playing |
-| `gate1`–`gate4` | 5 V for half a row on each audio-lane hit; muted lanes send nothing |
-| `pitch1`–`pitch4` | held 1 V/oct pitch; C4 = 0 V by default, follows the key selector |
-| `vel1`–`vel4` | last hit's velocity on that lane, 0–5 V, held until the next hit |
+| `gate1`–`gate6` | 5 V for half a row on each audio-lane hit; muted lanes send nothing |
+| `pitch1`–`pitch6` | held 1 V/oct pitch; C4 = 0 V by default, follows the key selector |
+| `vel1`–`vel6` | last hit's velocity on that lane, 0–5 V, held until the next hit |
 | `z`, `feedback` | lane minimum to maximum as 0–5 V |
 | `roll` | −45° to 45° as −5 V to 5 V |
 
 The default map is `clock, reset, gate1–gate4, z, roll`, because the ES-3 has
-eight outputs; `feedback`, `run` and velocities are opt-in.
+eight outputs; `feedback`, `run` and velocities are opt-in. Lanes 5 and 6 exist
+in version-3 scores (Gorgon's `hydrapy-tracker-3`) and are silent before them.
 
 Every sample is evaluated in the audio callback from the render thread's latest
 playhead, so clock, gates and held key steps land on the exact sample rather than

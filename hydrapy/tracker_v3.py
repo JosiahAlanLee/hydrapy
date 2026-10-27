@@ -16,9 +16,12 @@ from __future__ import annotations
 import bisect
 import copy
 import json
+import math
 
+import numpy as np
+
+from . import studio_tracker         # read at call time: studio_tracker imports this module
 from .sound_controls import controls, validate_sounds
-from .studio_tracker import LANES, note_midi, number, validate_automation, validate_outputs
 
 FORMAT = 'hydrapy-tracker-3'
 TICKS = 1920                    # per quarter note
@@ -40,7 +43,8 @@ def empty_pattern(index):
     """What a null pattern plays as, and exactly what an editor writes on its first edit."""
     return {'name': code(index), 'rate': 1, 'bar': 16, 'bars': 4,
             'lanes': [{'len': 64, 'cells': [None] * 64, 'transforms': []} for _ in range(LANE_COUNT)],
-            'keys': {name: [] for name in LANES}, 'easing': {name: 'smooth' for name in LANES}, 'scenes': []}
+            'keys': {name: [] for name in studio_tracker.LANES},
+            'easing': {name: 'smooth' for name in studio_tracker.LANES}, 'scenes': []}
 
 
 # -- validation ---------------------------------------------------------------
@@ -114,8 +118,8 @@ def _pattern(p):
             if hit is not None:
                 if not isinstance(hit, dict):
                     raise ValueError('Expected a note and velocity')
-                note_midi(hit.get('note'))
-                number(hit.get('vel'), 0, 127, 'Velocity')
+                studio_tracker.note_midi(hit.get('note'))
+                studio_tracker.number(hit.get('vel'), 0, 127, 'Velocity')
                 if 'locks' in hit:
                     controls(hit['locks'], machine=True)
                 if 'cond' in hit:
@@ -128,7 +132,7 @@ def _pattern(p):
             product *= _transform(node, 3)
         if product > 4:
             raise ValueError('The ply counts in a lane multiply to at most 4')
-    validate_automation(p, rows)
+    studio_tracker.validate_automation(p, rows)
 
 
 def validate(document):
@@ -137,8 +141,8 @@ def validate(document):
     if not isinstance(d, dict) or d.get('format') != FORMAT:
         raise ValueError('Expected a hydrapy-tracker-3 score')
     validate_sounds(d)
-    number(d.get('bpm'), 60, 200, 'Tempo')
-    number(d.get('key'), 0, 7, 'Key')
+    studio_tracker.number(d.get('bpm'), 60, 200, 'Tempo')
+    studio_tracker.number(d.get('key'), 0, 7, 'Key')
     if d['key'] not in (0, 2, 5, 7):
         raise ValueError('Choose C, D, F or G minor')
     _integer(d.get('pattern'), 0, PATTERN_COUNT - 1, 'The selected pattern')
@@ -157,7 +161,7 @@ def validate(document):
     if not isinstance(lanes, list) or len(lanes) != LANE_COUNT or any(
             not isinstance(lane, dict) or not isinstance(lane.get('name'), str) or len(lane['name']) > 24 for lane in lanes):
         raise ValueError('Six lane names of at most 24 characters are required')
-    validate_outputs(d)
+    studio_tracker.validate_outputs(d)
     if not isinstance(d.get('patterns'), list) or len(d['patterns']) != PATTERN_COUNT:
         raise ValueError('128 patterns are required; null is an empty one')
     for p in d['patterns']:
@@ -433,3 +437,69 @@ def evaluate(score, transport, u0, u1):
 def trace_line(record, transport_revision, start):
     """One line of the JSONL trace: a candidate, or a change to FILL or the bus layer, with its segment."""
     return json.dumps({'transport_revision': transport_revision, 'start': start, **record})
+
+
+# -- followers ----------------------------------------------------------------
+
+def transport(snapshot):
+    """``evaluate()``'s transport from a version-3 playhead snapshot."""
+    return {'tick': snapshot['start']['tick'], 'fill': snapshot.get('fill'), 'bus': snapshot.get('bus')}
+
+
+def elapsed(snapshot, monotonic):
+    """Elapsed ticks ``u`` (real) at monotonic times, from a version-3 playhead (evaluator.md#playhead-fields).
+
+    ``u`` moves while the tracker is playing and enabled, as the beat does.
+    """
+    monotonic = np.asarray(monotonic, dtype=np.float64)
+    if not snapshot['enabled']:
+        return np.full(monotonic.shape, float(snapshot['elapsed']))
+    clock = snapshot['clock_time'] + np.where(snapshot['playing'], monotonic - snapshot['wall'], 0.)
+    return snapshot['elapsed'] + (clock - snapshot['anchor_time']) * snapshot['document']['bpm'] / 60 * TICKS
+
+
+def position(score, start, u):
+    """Where elapsed ticks ``u`` (an array) fall in the cycle.
+
+    Returns the cycle beat, each sample's entry and its fractional row position
+    (score-v3.md#the-timeline), for signals and automation.
+    """
+    t = timeline(score)
+    tick = np.mod(start + np.asarray(u, dtype=np.float64), t.cycle)
+    tick = np.minimum(tick, np.nextafter(float(t.cycle), 0))      # x % C can round to C
+    entry = np.searchsorted(t.starts, tick, side='right') - 1
+    rows = np.array([geometry(score['patterns'][p])[0] for p in t.entries], dtype=np.float64)
+    return tick / TICKS, entry, (tick - np.asarray(t.starts, dtype=np.float64)[entry]) / rows[entry]
+
+
+class Follower:
+    """One follower's candidates for the current segment.
+
+    Each tick is evaluated once per segment, so a FILL or bus change that
+    arrives after a candidate was judged never changes it (evaluator.md's late
+    transitions: nothing is replayed). Candidates are kept until they end.
+    """
+
+    def __init__(self):
+        self.frontier = None        # the first tick not yet evaluated, None before a segment
+        self.candidates = []
+
+    def begin(self, tick):
+        """Start a segment, evaluating from ``tick``: at or before the anchor's row when the
+        follower hears of the segment as it starts, its own current tick when it joins late."""
+        self.frontier, self.candidates = tick, []
+
+    def advance(self, snapshot, u):
+        """Evaluate through real tick ``u`` and return the candidates that are new."""
+        top = math.floor(u) + 1
+        if self.frontier is None or top <= self.frontier:
+            return []
+        new = evaluate(snapshot['document'], transport(snapshot), self.frontier, top)
+        self.frontier = top
+        self.candidates += new
+        return new
+
+    def forget(self, u):
+        """Drop candidates that ended at or before tick ``u``."""
+        self.candidates = [c for c in self.candidates if c['at'] + c['duration'] > u]
+

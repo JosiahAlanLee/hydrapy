@@ -11,6 +11,7 @@ import math
 import re
 from pathlib import Path
 
+from . import tracker_v3
 from .sound_controls import controls, validate_sounds
 
 LANES = {'z': (0., 1., .35), 'roll': (-45., 45., 0.), 'feedback': (0., .9, .25)}
@@ -212,15 +213,20 @@ class LaneState:
     passed since the last frame counts, even at a low frame rate, and a hit
     that has been muted or deleted never fires again. Note and velocity hold
     the last hit; a seek or a new transport clears them.
+
+    There are six lanes; 5 and 6 stay silent before version 3. A version-3 score
+    (``update_v3``) plays the candidates that fire, judged once at their tick.
     """
     GATE = .5
 
     def __init__(self):
         self.transport = None
-        self.note = [60.] * 4
-        self.vel = [0.] * 4
-        self.since = [None] * 4     # seconds since each lane's latest hit
+        self.note = [60.] * 6
+        self.vel = [0.] * 6
+        self.since = [None] * 6     # seconds since each lane's latest hit
         self.last_row = self.last_beat = None
+        self.started = [None] * 6   # version 3: the tick of each lane's latest hit
+        self._follower = tracker_v3.Follower()
 
     @staticmethod
     def _hit(document, row, lane):
@@ -241,10 +247,10 @@ class LaneState:
         length, seconds = rows / 4, 60 / document['bpm']
         current = min(int(beat * 4), first + rows - 1)
         rowpos = beat % 16 * 4
-        gate = [0.] * 4
+        gate = [0.] * 6
         if not moving:
             self.last_row = self.last_beat = None
-            return dict(gate=gate, since=[None] * 4, note=list(self.note), vel=list(self.vel),
+            return dict(gate=gate, since=[None] * 6, note=list(self.note), vel=list(self.vel),
                         beat=beat, row=float(current % 64))
         if self.last_row is None:
             crossed = [current]
@@ -266,6 +272,35 @@ class LaneState:
         self.last_row, self.last_beat = current, beat
         return dict(gate=gate, since=list(self.since), note=list(self.note), vel=list(self.vel),
                     beat=beat, row=float(current % 64))
+
+    def update_v3(self, snapshot, u, moving):
+        """``update`` for a version-3 score, at elapsed tick ``u`` of the playhead ``snapshot``."""
+        d = snapshot['document']
+        segment = (snapshot['transport_revision'], snapshot['start']['tick'])
+        if segment != self.transport:
+            joined = self.transport is None
+            self.__init__()
+            self.transport = segment
+            self._follower.begin(math.floor(u) if joined else -tracker_v3.TICKS)
+        beat, _, row = tracker_v3.position(d, snapshot['start']['tick'], [u])
+        gate = [0.] * 6
+        if not moving:
+            return dict(gate=gate, since=[None] * 6, note=list(self.note), vel=list(self.vel),
+                        beat=float(beat[0]), row=float(int(row[0])))
+        for c in self._follower.advance(snapshot, u):
+            if c['fires']:
+                midi = note_midi(c['note'])
+                if midi is not None:
+                    self.note[c['lane']] = float(midi + d['key'] - 2)
+                self.vel[c['lane']], self.started[c['lane']] = c['vel'] / 127, c['at']
+        for c in self._follower.candidates:
+            if c['fires'] and c['at'] <= u < c['at'] + self.GATE * c['duration']:
+                gate[c['lane']] = 1.
+        self._follower.forget(u)
+        seconds = 60 / d['bpm'] / tracker_v3.TICKS
+        self.since = [None if at is None else (u - at) * seconds for at in self.started]
+        return dict(gate=gate, since=list(self.since), note=list(self.note), vel=list(self.vel),
+                    beat=float(beat[0]), row=float(int(row[0])))
 
 
 class Tracker:
