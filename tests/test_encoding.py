@@ -247,3 +247,35 @@ def test_cli_render_routes_encoding_options(tmp_path, ffmpeg, capsys):
           "--fps", "12", "--encoder", "software", "--quality", "7", "--bitrate", "500k", "--ffmpeg", ffmpeg])
     assert "encoding with libx264 (software)" in capsys.readouterr().out
     assert path.stat().st_size > 0
+
+
+@pytest.mark.parametrize("audio_seconds", [.25, 1, 2])
+@pytest.mark.parametrize("fps,frame_count", [(12, 12), (29.97, 31)])
+def test_external_audio_matches_video_duration(tmp_path, ffmpeg, audio_seconds, fps, frame_count):
+    """Video length wins over short, equal, and long external WAV tracks."""
+    import wave
+    wav = tmp_path / "external.wav"
+    sr = 44100
+    samples = .2 * np.sin(2 * np.pi * 440 * np.arange(round(audio_seconds * sr)) / sr)
+    with wave.open(str(wav), "wb") as stream:
+        stream.setnchannels(1)
+        stream.setsampwidth(2)
+        stream.setframerate(sr)
+        stream.writeframes((samples * 32767).astype("<i2").tobytes())
+    path = tmp_path / "external.mp4"
+    save_mp4((np.zeros((36, 64, 3), np.uint8) for _ in range(frame_count)),
+             path, fps=fps, audio=wav, encoder="software", ffmpeg=ffmpeg)
+    streams = inspect_video(path)
+    video = next(s for s in streams if s["codec_type"] == "video")
+    audio = next(s for s in streams if s["codec_type"] == "audio")
+    expected = frame_count / fps
+    assert int(video["nb_frames"]) == frame_count
+    assert float(video["duration"]) == pytest.approx(expected, abs=.002)
+    assert float(audio["duration"]) == pytest.approx(expected, abs=.002)
+    decoded = subprocess.check_output([ffmpeg, "-v", "error", "-i", str(path),
+                                       "-map", "0:a:0", "-f", "f32le", "pipe:1"])
+    pcm = np.frombuffer(decoded, dtype="<f4")
+    if audio_seconds == .25:
+        assert np.max(np.abs(pcm[round(.5 * sr):round(.9 * sr)])) < .001
+    else:
+        assert np.sqrt(np.mean(pcm[round(.9 * sr):round(.98 * sr)] ** 2)) > .05

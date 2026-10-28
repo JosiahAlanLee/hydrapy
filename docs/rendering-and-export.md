@@ -66,7 +66,9 @@ Output remains H.264 with 4:2:0 chroma; WebM is not supported by this export pat
 Frames stream once; the first is buffered while encoders are tested. If encoding fails
 mid-stream, export stops without retrying the stateful renderer, removes temporary files,
 and preserves any existing destination. Soundtrack audio is muxed as AAC without re-encoding
-the video. Hardware encoding offloads compression; frames still pass through CPU memory,
+the video. Its duration is the rendered frame count divided by fps: short audio
+is padded with silence and long audio is cut at the video end. This also applies
+to CLI and Studio offline exports. Hardware encoding offloads compression; frames still pass through CPU memory,
 so this does not yet eliminate GPU readback or RGB conversion costs.
 
 ## Timing, transparent materials, and streaming exports

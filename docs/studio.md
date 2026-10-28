@@ -135,7 +135,9 @@ unique recording destinations to avoid overwriting previous takes. Studio's sepa
 **Record video** captures the running preview at wall-clock speed, repeating held frames
 when rendering falls behind. It records video only. Stop to finish and download the MP4.
 For a finished piece with music, use an offline MP4 export and specify an audio file
-inside the project, for example `media/track.flac`. Original music and local exports are
+inside the project, for example `media/track.flac`. The rendered video duration
+controls the export: shorter audio is padded with silence and longer audio is cut
+at the video end. Original music and local exports are
 ignored by Git. A declared `Soundtrack` is used when no external audio file is selected.
 
 Offline exports use the last successfully running source and a snapshot of its current

@@ -56,6 +56,8 @@ def save_mp4(frames, path: str, fps: float = 30.0, quality: int = 8, scale: int 
     to even after upscaling. The destination is replaced only after a successful export.
     ``audio`` may be a ``Soundtrack`` rendered along with the frames, a WAV path, or
     ``(samples, sr)``; it is muxed in as AAC without re-encoding the video.
+    Video duration (frame count / fps) is authoritative: shorter audio is padded
+    with silence and longer audio is cut at the video end.
     """
     import tempfile
     from .encoding import _select_encoder, _validate, _write_video
@@ -105,12 +107,17 @@ def save_mp4(frames, path: str, fps: float = 30.0, quality: int = 8, scale: int 
         if on_encoder is not None:
             on_encoder(selected)
 
+        frame_count = 0
+
         def prepared_frames():
+            nonlocal frame_count
+            frame_count += 1
             yield first
             for frame in iterator:
                 frame = prepare(frame)
                 if frame.shape != first.shape:
                     raise ValueError("all video frames must have the same dimensions after scaling/cropping")
+                frame_count += 1
                 yield frame
 
         def temporary_video():
@@ -125,7 +132,7 @@ def save_mp4(frames, path: str, fps: float = 30.0, quality: int = 8, scale: int 
         close_frames()
         if audio is not None:
             muxed = temporary_video()
-            _mux_audio(video, audio, muxed, ffmpeg=selected.ffmpeg)
+            _mux_audio(video, audio, muxed, duration=frame_count / fps, ffmpeg=selected.ffmpeg)
             video = muxed
         os.replace(video, destination)
         temporary.remove(video)
@@ -141,7 +148,8 @@ def save_mp4(frames, path: str, fps: float = 30.0, quality: int = 8, scale: int 
             close_frames()
 
 
-def _mux_audio(video: str, audio, path: str, *, ffmpeg=None):
+def _mux_audio(video: str, audio, path: str, *, duration: float, ffmpeg=None):
+    """Pad/cut AAC to the rendered video duration, avoiding shortest/DTS truncation."""
     import subprocess
     import tempfile
     import wave
@@ -162,7 +170,8 @@ def _mux_audio(video: str, audio, path: str, *, ffmpeg=None):
             wav = tmp.name
         exe = ffmpeg or _ffmpeg_candidates()[0]
         cmd = [exe, "-y", "-loglevel", "error", "-i", video, "-i", wav, "-map", "0:v:0", "-map", "1:a:0",
-               "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-shortest"]
+               "-c:v", "copy", "-c:a", "aac", "-b:a", "160k",
+               "-af", "apad", "-t", str(float(duration))]
         if os.path.splitext(path)[1].lower() in (".mp4", ".mov"):
             cmd += ["-movflags", "+faststart"]
         result = subprocess.run([*cmd, path], capture_output=True)
