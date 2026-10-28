@@ -37,6 +37,10 @@ latency), on both backends; that's the image as a sequencer. `CvOut(file="cv.wav
 the voltages as a multichannel WAV during an offline render instead, to play from the DAW into the
 ES-3 next to the video.
 
+`channels` must contain distinct physical channel numbers from 0 to 255; `send(k, ...)`
+uses a zero-based index into that list. `volts_per_fs` must be positive and finite.
+CV targets are clipped to the interface range before ramping; non-finite signal values send 0 V.
+
 **Audio out: the painted oscillator.** `out.send(k, Soundtrack(o0, x=0.5, gain=0.5))` sends a drawn
 soundtrack ([how it works](film-and-sound.md#fischinger-cut-paper-and-the-drawn-soundtrack)) down an ES-3 channel at audio rate — a VCO made of charcoal, ±5 V, to be put
 through a filter — while the other channels carry CVs, and the ES-6 brings pitch, wobble and grit

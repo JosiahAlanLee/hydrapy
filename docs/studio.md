@@ -71,7 +71,10 @@ queries are opt-in; leave them off for an ordinary performance. See
 Python remains executable code with your local permissions. Studio runs trusted patches;
 its local HTTP token is an access boundary, not a Python sandbox. Only files within the
 workspace root can be opened/saved through the interface. A user script's independent
-file, process or network side effects cannot be undone by reload recovery.
+file, process or network side effects cannot be undone by reload recovery. Generated
+`.hydrapy/` settings, presets, previews and exports obey the same workspace boundary;
+symlinks that point outside the workspace are refused. Text saves use exclusive temporary
+files in the destination directory and replace the destination only after writing succeeds.
 
 ## Declare performance controls
 

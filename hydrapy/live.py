@@ -622,7 +622,12 @@ class CvOut:
     def __init__(self, device=None, channels: Sequence[int] = (0, 1), samplerate: Optional[int] = None,
                  blocksize: int = 256, volts_per_fs: float = 10.0, file: Optional[str] = None, fps: float = 30.0):
         self.channels = list(channels)
+        if (not self.channels or any(type(c) is not int or not 0 <= c < 256 for c in self.channels)
+                or len(set(self.channels)) != len(self.channels)):
+            raise ValueError('CV channels must be distinct zero-based integers from 0 to 255')
         self.volts_per_fs = float(volts_per_fs)
+        if not math.isfinite(self.volts_per_fs) or self.volts_per_fs <= 0:
+            raise ValueError('volts_per_fs must be positive and finite')
         self.routes: dict[int, Signal] = {}
         self.audio_routes: dict[int, AudioQueue] = {}
         self._target = np.zeros(len(self.channels), dtype=np.float32)
@@ -653,6 +658,8 @@ class CvOut:
         register_hook(self.tick)
 
     def send(self, k: int, signal) -> "CvOut":
+        if type(k) is not int or not 0 <= k < len(self.channels):
+            raise ValueError('CV route index must address a configured channel')
         if isinstance(signal, Soundtrack) or (hasattr(signal, "listeners") and hasattr(signal, "sr")):   # audio-rate streams
             if k in self.audio_routes:
                 self.audio_routes[k].close()
@@ -669,7 +676,10 @@ class CvOut:
     def tick(self, ctx, renderer=None):
         for k, sig in self.routes.items():
             v = sig(ctx)
-            self._target[k] = (float(v) if math.isfinite(v) else 0.0) / self.volts_per_fs
+            # Clamp before float32 conversion; a finite Python float can overflow
+            # there, making even the first (zero-ramp) sample NaN.
+            value = (float(v) if math.isfinite(v) else 0.0) / self.volts_per_fs
+            self._target[k] = max(-1., min(1., value))
         if self.file is not None:
             self._frames.append(self._target.copy())
             self._frame_times.append((getattr(ctx, "presentation_time", (len(self._frames) - 1) / self.fps),
