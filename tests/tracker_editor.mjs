@@ -168,3 +168,57 @@ test('sound locks survive clipboard, pitch/velocity edits, history and the versi
     assert.throws(()=>readBlock(JSON.stringify(bad)));
   }
 });
+
+test('a refused edit leaves the score as it was, with no undo step (#6)', () => {
+  const d=score(),h=new ScoreHistory();
+  // app.js's reshape: change the shape, then refuse more than 128 rows.
+  const reshape=change=>h.change(d,'bars',()=>{
+    const p=d.patterns[0];change(p);
+    if(p.bar*p.bars>128)throw new Error('A pattern has at most 128 rows (bar × bars).');
+  },{});
+  assert.equal(reshape(p=>{p.bar=20;}),true);
+  const accepted=structuredClone(d);
+  assert.throws(()=>reshape(p=>{p.bars=8;}),/128 rows/);
+  assert.deepEqual(d,accepted);assert.equal(d.patterns[0].bar*d.patterns[0].bars,80);
+  assert.equal(h.past.length,1);assert.equal(h.future.length,0);
+  // An empty pattern written in by the refused edit goes back to null too.
+  assert.throws(()=>h.change(d,'bars',()=>{(d.patterns[20]??=emptyPattern(20)).bars=9;throw new Error('no');},{}),/no/);
+  assert.equal(d.patterns[20],null);
+  h.undo(d);assert.equal(d.patterns[0].bar,16);
+});
+
+test('a pasted scene fade is cut to the destination pattern\'s rows (#7)', async () => {
+  const {SCENE} = await import('../hydrapy/tracker/editor.js');
+  const d=score(),big=emptyPattern(5);
+  big.bars=8;big.lanes.forEach(l=>{l.len=128;l.cells=Array(128).fill(null);});
+  big.scenes=[{r:0,name:'wash',fade:100}];
+  const block=readBlock(JSON.stringify(copyBlock(big,{r0:0,r1:0,c0:SCENE,c1:SCENE})));
+  const small=emptyPattern(6);small.bars=1;small.lanes.forEach(l=>{l.len=16;l.cells=Array(16).fill(null);});
+  assert.deepEqual(pasteBlock(d.patterns[0],{row:3,col:SCENE},block),{written:1,skipped:0});
+  assert.deepEqual(d.patterns[0].scenes.find(k=>k.r===3),{r:3,name:'wash',fade:64});
+  assert.deepEqual(pasteBlock(small,{row:0,col:SCENE},block),{written:1,skipped:0});
+  assert.deepEqual(small.scenes,[{r:0,name:'wash',fade:16}]);
+  assert.equal(block.rows[0][0].fade,100,'the clipboard keeps its fade');
+});
+
+test('an edit that leaves an empty pattern empty writes nothing and keeps the old format (#24)', async () => {
+  const {keepEmptyNull} = await import('../hydrapy/tracker/editor.js');
+  assert.equal(typeof keepEmptyNull,'function');
+  const d=score(),h=new ScoreHistory();
+  assert.equal(d.legacy,'hydrapy-tracker-1');assert.equal(d.patterns[16],null);
+  // app.js's changeScore and editable() for pattern B01.
+  const edit=(label,mutate)=>h.change(d,label,()=>{keepEmptyNull(d,mutate);settleFormat(d);},{});
+  const editable=()=>d.patterns[16]??=emptyPattern(16);
+  assert.equal(edit('clear cells',()=>clearBlock(editable(),{r0:0,r1:63,c0:0,c1:9})),false);
+  assert.equal(edit('interpolation',()=>{editable().easing.z='smooth';}),false);
+  assert.equal(d.patterns[16],null);assert.equal(d.legacy,'hydrapy-tracker-1');assert.equal(h.past.length,0);
+  // A real edit still writes the pattern and upgrades, in one undo step.
+  assert.equal(edit('toggle cell',()=>putCell(editable(),0,0,{note:'C-4',vel:100})),true);
+  assert.equal(d.legacy,undefined);assert.equal(d.patterns[16].lanes[0].cells[0].note,'C-4');
+  h.undo(d);assert.equal(d.patterns[16],null);assert.equal(d.legacy,'hydrapy-tracker-1');
+  // A pattern that already exists keeps being written, even when it is empty.
+  d.patterns[0]=emptyPattern(0);
+  assert.equal(edit('interpolation',()=>{d.patterns[0].easing.z='hold';}),true);
+  assert.equal(edit('interpolation',()=>{d.patterns[0].easing.z='smooth';}),true);
+  assert.deepEqual(d.patterns[0],emptyPattern(0));
+});

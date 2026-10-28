@@ -597,6 +597,8 @@ class Tracker:
                 raise ValueError('Each bus list starts at the window\'s from and is sorted')
         self.expire(wall, received)
         if self.lease and self.lease[0] != sender:
+            self._trace({'bus': {'window': 'refused', 'reason': 'bus held by another module', 'from': first},
+                         'received': received})
             raise ValueError('bus held by another module')
         if segment != {'transport_revision': self.transport_revision, 'start': self.start}:
             if self.lease:

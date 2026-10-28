@@ -502,6 +502,24 @@ def test_validation_rejects(change):
         validate(d)
 
 
+@pytest.mark.parametrize('where', [
+    lambda d, x: d.update(x_note=x),                                          # an unknown key at the top
+    lambda d, x: d.update(x_editor={'zoom': [1, x]}),                         # nested in one
+    lambda d, x: d['patterns'][1].update(x_pattern=x),                        # in a pattern
+    lambda d, x: d['patterns'][1]['lanes'][2]['cells'][0].update(x_note=x),   # in a hit
+    lambda d, x: d['lanes'][0].update(x_lane=x),
+])
+@pytest.mark.parametrize('value', [float('nan'), float('inf'), float('-inf')])
+def test_validation_rejects_non_finite_numbers_in_unknown_keys(where, value):
+    """score-v3.md: unknown keys are kept, but non-finite numbers are rejected everywhere (#22)."""
+    d = rich()
+    where(d, value)
+    with pytest.raises(ValueError, match='finite'):
+        validate(d)
+    with pytest.raises(ValueError, match='finite'):                           # what Studio parses from a body
+        validate(json.loads(json.dumps(d)))
+
+
 def test_validation_does_not_change_its_argument():
     d = rich()
     del d['patterns'][1]['scenes'][0]['fade']

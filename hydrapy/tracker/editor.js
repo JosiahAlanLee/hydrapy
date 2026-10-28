@@ -2,7 +2,7 @@
 // (score3.js): the editor keeps every score that way.
 import {noteMidi, canonicalNote} from './notes.js';
 import {validateLocks} from './sounds.js';
-import {condCode, geometry, parseCond} from './score3.js';
+import {condCode, emptyPattern, geometry, parseCond} from './score3.js';
 
 export const LANES = ['z', 'roll', 'feedback'];
 const LIMITS = [[0, 1], [-45, 45], [0, .9]];
@@ -23,7 +23,8 @@ export class ScoreHistory {
   clear() { this.past = []; this.future = []; }
   change(score, label, mutate, context, merge = '') {
     const before = snapshot(score);
-    mutate();
+    // A refused edit (mutate throws) leaves the score as it was and no undo step.
+    try { mutate(); } catch (error) { apply(score, before); throw error; }
     const after = snapshot(score);
     if (JSON.stringify(before) === JSON.stringify(after)) return false;
     const last = this.past.at(-1), now = Date.now();
@@ -53,6 +54,17 @@ export class ScoreHistory {
   }
 }
 
+// score-v3.md writes a pattern's object on its first edit. An edit that leaves a pattern that was
+// null equal to the empty pattern puts null back, so a no-op on it changes nothing.
+export function keepEmptyNull(score, mutate) {
+  const empty = score.patterns.flatMap((p, i) => p == null ? [i] : []);
+  mutate();
+  for (const i of empty) {
+    const p = score.patterns[i];
+    if (p != null && JSON.stringify(p) === JSON.stringify(emptyPattern(i))) score.patterns[i] = null;
+  }
+}
+
 export function bounds(cell, anchor = cell) {
   return {r0: Math.min(cell.row, anchor.row), r1: Math.max(cell.row, anchor.row),
           c0: Math.min(cell.col, anchor.col), c1: Math.max(cell.col, anchor.col)};
@@ -68,7 +80,8 @@ export function getCell(pattern, row, col) {
 export function putCell(pattern, row, col, value) {
   if (col === SCENE) {
     pattern.scenes = (pattern.scenes ?? []).filter(key => key.r !== row);
-    if (value) pattern.scenes.push({r: row, name: value.name, fade: value.fade ?? 0});
+    // A fade lasts at most the pattern's rows (score-v3.md); a pasted one may come from a longer pattern.
+    if (value) pattern.scenes.push({r: row, name: value.name, fade: Math.min(value.fade ?? 0, rowsOf(pattern))});
     pattern.scenes.sort((a, b) => a.r - b.r);
   } else if (col < AUDIO) {
     const lane = pattern.lanes[col];
