@@ -31,17 +31,17 @@ OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTEST_DISABLE_PLUGIN
 ```
 
 FFprobe and Node must be on `PATH`; FFmpeg may also come from imageio-ffmpeg.
-The encoded A/V tests probe each FFmpeg candidate with a one-second H.264-copy/AAC
-mux independently of HydraPy. Ubuntu 22.04's FFmpeg 4.4.2 truncates the AAC stream
-at the video's decode-time endpoint when using `-shortest` with reordered
-B-frames: one second becomes 0.789002 seconds. This is tail truncation, not
-sample-clock drift. The tests use a working candidate (here imageio-ffmpeg's
-7.0.2) or skip with versions and the observed truncation if none works. An
-`IMAGEIO_FFMPEG_EXE` override remains authoritative, so selecting the affected
-4.4.2 binary produces an explicit skip rather than silently changing binaries.
-The original PCM sample-count, duration and decoded midpoint checks remain intact.
-The application still uses the requested FFmpeg; select a newer binary with
-`--ffmpeg` or `IMAGEIO_FFMPEG_EXE` for audio exports on affected systems.
+The encoded A/V tests check H.264/AAC availability, then exercise HydraPy's own
+mux path with a one-second video. Missing or unusable codecs/tools skip; a mux
+failure or incorrect duration in HydraPy fails the tests. An `IMAGEIO_FFMPEG_EXE`
+override remains authoritative.
+
+Ubuntu 22.04's FFmpeg 4.4.2 truncates AAC at the video's decode-time endpoint
+when `-shortest` is used with reordered B-frames (one second becomes 0.789002
+seconds). HydraPy avoids this by bounding the mux explicitly to the rendered
+frame count divided by fps, and padding short audio with silence. Long audio is
+cut at the video end. This applies to Python, CLI and Studio offline exports,
+including FFmpeg 4.4.2. PCM sample-count and decoded midpoint checks remain intact.
 
 On Linux, Sardine's RtMidi
 dependency may need a C++ compiler, `pkg-config` and `libasound2-dev` to build.
