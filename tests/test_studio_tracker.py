@@ -13,6 +13,7 @@ import pytest
 from hydrapy import Ctx, Param, Patch, solid, src
 from hydrapy.backend_np import Renderer, iter_frames
 from hydrapy.studio import Session, make_server
+from studio_helpers import published_output
 from hydrapy.studio_tracker import Tracker, validate, value_at
 
 
@@ -170,14 +171,14 @@ def test_http_assets_auth_independent_aux_and_output_restore(tmp_path):
                 assert response.status == 200
                 data = np.asarray(Image.open(io.BytesIO(response.read())))
                 assert data[0,0,channel] > 195
-        assert session.renderer.patch.display.name == 'o0'
+        assert published_output(session) == 'o0'
         session.call('output', index=1)
         assert session.tracker.document['modes']['program'] == 'o1'
         session.call('pause', paused=True)
         d=score();d['modes']['aux']='o0'
         session.call('tracker_score', document=d, revision=session.tracker.revision)
         with get('/api/frame?bus=aux&output=o0') as response: assert response.status == 200
-        assert session.renderer.patch.display.name == 'o0'
+        assert published_output(session) == 'o0'
     finally:
         server.shutdown(); server.server_close(); session.close()
 
@@ -263,7 +264,7 @@ def test_switching_studio_output_does_not_reject_the_open_tracker(tmp_path):
         result = session.call('tracker_score', document=d, revision=base)
         assert result['document']['bpm'] == 100
         assert result['document']['modes']['program'] == 'o1'
-        assert session.renderer.patch.display.name == 'o1'
+        assert published_output(session) == 'o1'
         session.call('output', index=0)    # another sync after the edit
         session.call('tracker_save', revision=result['revision'])
         assert json.loads((tmp_path/'.hydrapy'/'tracker.json').read_text())['bpm'] == 100

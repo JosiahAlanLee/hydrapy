@@ -12,6 +12,7 @@ import pytest
 
 from hydrapy import Patch, Soundtrack, delay, noise, osc, solid, src, voronoi
 from hydrapy.studio import Session, make_server
+from studio_helpers import published_output
 from hydrapy.studio_preview import Preview
 
 
@@ -229,7 +230,7 @@ def test_blocked_jpeg_does_not_block_render_record_snapshot_or_pause(tmp_path, m
         snapshot = s.call('snapshot')
         image = np.asarray(Image.open(tmp_path / snapshot['file']))
         assert np.all(image[..., 1] == 128) and np.all(image[..., 0] == 0)
-        assert s.renderer.patch.display.index == 1
+        assert published_output(s) == 'o1'
         s.call('record')
         assert all(frame.shape == (18, 32, 3) for frame in recorder.frames)
         assert any(np.all(frame[..., 1] == 128) for frame in recorder.frames)
@@ -308,7 +309,7 @@ def test_independent_monitor_http_shows_four_outputs_without_changing_program(tm
                 image = Image.open(io.BytesIO(response.read()))
                 assert image.size == (480, 270)
                 assert np.asarray(image)[135, 240].astype(float) == pytest.approx(colour, abs=2)
-            assert s.renderer.patch.display.name == 'o0' and s.tracker.document == document
+            assert published_output(s) == 'o0' and s.tracker.document == document
             assert s.tracker.revision == revision and s.clock_time == clock and s.renderer.frame == frame
         assert len(s.monitor_previews) == 4
         snapshot = s.call('snapshot')
@@ -318,7 +319,7 @@ def test_independent_monitor_http_shows_four_outputs_without_changing_program(tm
         with fetch('o2') as response:
             image = np.asarray(Image.open(io.BytesIO(response.read())))
             assert image[0, 0, 2] > 200 and image[0, 0, 1] < 3
-        assert s.renderer.patch.display.name == 'o1'
+        assert published_output(s) == 'o1'
         with pytest.raises(urllib.error.HTTPError) as error:
             fetch('o9')
         assert error.value.code == 400 and len(s.monitor_previews) == 4
@@ -384,6 +385,40 @@ def test_paused_monitor_retries_an_encoding_failure_on_the_next_request(tmp_path
         frame = preview.frame('o2', timeout=2, thumbnails=False)
         assert frame is not None and not preview.error and not s.error
         assert np.asarray(Image.open(io.BytesIO(frame['data'])))[0, 0, 2] > 200
-        assert s.paused and s.renderer.patch.display.name == 'o0'
+        assert s.paused and published_output(s) == 'o0'
     finally:
+        s.close()
+
+
+def test_published_output_stays_program_during_auxiliary_readback(tmp_path, monkeypatch):
+    """Hold the transient selection open so the former test-thread race is certain."""
+    from hydrapy.studio import Session
+    entered, resume = threading.Event(), threading.Event()
+    read = Session._read_frame
+
+    def blocked(session, *args, **kwargs):
+        if session.renderer.patch.display.name == 'o1':
+            entered.set()
+            assert resume.wait(5)
+        return read(session, *args, **kwargs)
+
+    (tmp_path / 'p.py').write_text(
+        'from hydrapy import *\nsolid(.8,0,0).out(o0)\nsolid(0,.8,0).out(o1)\n')
+    s = Session(tmp_path, 'p.py', backend='cpu', size=(32, 18), fps=30)
+    try:
+        s.call('pause', paused=True)
+        until(lambda: published_output(s) == 'o0')
+        monkeypatch.setattr(Session, '_read_frame', blocked)
+        s.aux_preview.reset('o1')
+        s.aux_preview.frame('o1', timeout=0, thumbnails=False)
+        assert entered.wait(2)
+        # Deliberately inspect the unsafe value to demonstrate the race. Ordinary
+        # assertions must use the locked snapshot, which stays Program throughout.
+        assert s.renderer.patch.display.name == 'o1'
+        assert published_output(s) == 'o0'
+        resume.set()
+        s.call('pause', paused=True)  # queued command runs after readback restores Program
+        assert published_output(s) == 'o0'
+    finally:
+        resume.set()
         s.close()
