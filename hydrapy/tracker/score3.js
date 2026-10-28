@@ -13,6 +13,7 @@
 export const FORMAT = 'hydrapy-tracker-3', TICKS = 1920, LANE_COUNT = 6, PATTERN_COUNT = 128;
 export const RATES = [.25, .5, 1, 2, 4, 8];
 const LEGACY_META = 'legacyMeta', COLLIDING = ['rate', 'bar', 'bars', 'lanes', LEGACY_META];
+const TOP_COLLIDING = ['chain', 'seed', 'lanes', 'legacy', 'legacyTop'];
 const PROB = 0x70726f62, DEGRADE = 0x64656772;       // "prob" and "degr", chance's salts
 const clone = value => structuredClone(value);
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -43,10 +44,7 @@ export function upgrade(document) {
   for (const p of d.patterns) {
     const cells = [...p.audio, Array(64).fill(null), Array(64).fill(null)];
     delete p.audio;
-    const meta = Object.fromEntries(COLLIDING.filter(key => key in p).map(key => [key, p[key]]));
-    delete p[LEGACY_META];
     Object.assign(p, {rate: 1, bar: 16, bars: 4, lanes: cells.map(c => ({len: 64, cells: c, transforms: []}))});
-    if (Object.keys(meta).length) p[LEGACY_META] = meta;
   }
   d.patterns = [...d.patterns, ...Array(PATTERN_COUNT - 4).fill(null)];
   return d;
@@ -73,7 +71,7 @@ export function fits(score, format) {
 export function downgrade(score, format) {
   const d = {};
   for (const [key, value] of Object.entries(score))
-    if (!['chain', 'seed', 'lanes', 'legacy'].includes(key)) d[key] = clone(value);
+    if (!TOP_COLLIDING.includes(key)) d[key] = clone(value);
   d.format = format;
   d.mutes = d.mutes.slice(0, 4);
   if (format === 'hydrapy-tracker-2') d.sounds = d.sounds.slice(0, 4); else delete d.sounds;
@@ -84,12 +82,24 @@ export function downgrade(score, format) {
     out.audio = p.lanes.slice(0, 4).map(lane => lane.cells);
     return Object.assign(out, p[LEGACY_META]);
   });
-  return d;
+  return Object.assign(d, clone(score.legacyTop ?? {}));
 }
 
 // A score from Studio, as the editor keeps it.
 export function incoming(document) {
-  return document.format === FORMAT ? clone(document) : {...upgrade(document), legacy: document.format};
+  if (document.format === FORMAT) return clone(document);
+  const d = {...upgrade(document), legacy: document.format};
+  d.legacyTop = Object.fromEntries(TOP_COLLIDING.filter(key => key in document)
+    .map(key => [key, clone(document[key])]));
+  // Recovery belongs only to the editor's legacy representation. Public upgrade() is
+  // the same document as Python's spec mapping, including unknown legacyMeta keys.
+  d.patterns.slice(0, 4).forEach((p, i) => {
+    const old = document.patterns[i];
+    const meta = Object.fromEntries(COLLIDING.filter(key => key in old).map(key => [key, clone(old[key])]));
+    delete p[LEGACY_META];
+    if (Object.keys(meta).length) p[LEGACY_META] = meta;
+  });
+  return d;
 }
 
 // The score to send Studio: in its old format while it fits there.
@@ -111,6 +121,7 @@ export function settleFormat(score) {
     return false;
   }
   delete score.legacy;
+  delete score.legacyTop;
   for (const p of score.patterns) if (p) delete p[LEGACY_META];
   return true;
 }

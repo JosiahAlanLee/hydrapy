@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hydrapy"
-version = "0.1.0"
+version = "0.1.1"
 description = "Hydra's video synth as a Python library: CPU + GPU backends, CV-style signals, feedback/reaction-diffusion ops, HTML/Hydra export"
 readme = "README.md"
 requires-python = ">=3.9"

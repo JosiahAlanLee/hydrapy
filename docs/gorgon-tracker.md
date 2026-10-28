@@ -344,7 +344,8 @@ A version-1 or 2 score stays in its format while the edits fit it. The first edi
 that needs version 3 (a fifth lane, a pattern past A04, a rate, a length, a
 condition, a transform, the chain or the seed) upgrades the score, and undo
 restores its old format. Until then its patterns' own keys come back unchanged,
-including metadata named `rate`, `bar`, `bars` or `lanes`; an upgrade gives those
+including pattern metadata named `rate`, `bar`, `bars` or `lanes` and top-level
+metadata named `chain`, `seed` or `lanes`; an upgrade gives those
 names their version-3 meanings. An edit that changes nothing, such as Delete on an empty
 pattern, leaves the score alone. Three transport actions select a pattern past A04
 to play, which only version 3 can hold, so they upgrade the score without an undo
