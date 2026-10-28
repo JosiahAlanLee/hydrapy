@@ -175,8 +175,20 @@ def test_audio_signals(tmp_path):
 @pytest.mark.skipif(not _gl_available(), reason="no GL context")
 @pytest.mark.parametrize("name,chain", [(n, c) for n, c in every_op_chain()
                                          if not REGISTRY[n].cpu_only and n not in ("white", "grain", "glitch")])
-def test_cpu_and_gpu_agree(name, chain):
+def test_cpu_and_gpu_agree(name, chain, monkeypatch):
     from hydrapy.backend_gl import GLRenderer
+    if name == "voronoi":
+        # Hydra's fract(sin(dot(...))*43758.5453) amplifies driver-specific
+        # sin errors into different seeds. Compare cell search, animation and
+        # shading with exactly representable seeds, rather than random images.
+        import importlib
+        ops = importlib.import_module("hydrapy.ops")
+        monkeypatch.setattr(ops, "hash22", lambda p: np.mod(
+            p * np.array([.25, .125], np.float32) + np.array([.125, .25], np.float32), 1))
+        op = REGISTRY[name]
+        monkeypatch.setattr(op, "glsl", op.glsl.replace(
+            "fract(sin(vec2(dot(p,vec2(127.1,311.7)),dot(p,vec2(269.5,183.3))))*43758.5453)",
+            "fract(p * vec2(.25,.125) + vec2(.125,.25))"))
     p = Patch(size=SIZE)
     chain.out(p.o0, patch=p)
     rn, rg = Renderer(p, size=SIZE, fps=30), GLRenderer(p, size=SIZE, fps=30)
@@ -184,6 +196,7 @@ def test_cpu_and_gpu_agree(name, chain):
     rg.step(1.3)
     b = np.clip(rg.read_rgba()[..., :3], 0, 1)
     d = np.abs(a - b)
+    rg.release()
     assert d.mean() < 0.02 and (d < 0.05).mean() > 0.97, name
 
 
@@ -995,3 +1008,30 @@ def test_frame_source_may_report_an_unchanged_frame():
         r.step(1.5)
         assert np.array_equal(r.read_rgba(), first) and r.media[fs.name]["version"] == fs.version
         r.release()
+
+
+@pytest.mark.skipif(not _gl_available(), reason="no GL context")
+def test_voronoi_native_hash_produces_animated_cells_on_both_backends():
+    # Keep the real Hydra hash covered without requiring nonportable seed parity.
+    from hydrapy.backend_gl import GLRenderer
+    for renderer in (Renderer, GLRenderer):
+        p = Patch(size=SIZE)
+        voronoi(5, .7, .3).out(p.o0, patch=p)
+        r = renderer(p, size=SIZE, fps=30)
+        try:
+            pictures = []
+            for t in (0, 1.3):
+                image = r.step(t)
+                if renderer is GLRenderer:
+                    image = r.read_rgba()
+                assert np.isfinite(image).all()
+                assert image[..., :3].min() >= 0 and image[..., :3].max() <= .9
+                assert image[..., 0].std() > .05
+                np.testing.assert_array_equal(image[..., 0], image[..., 1])
+                np.testing.assert_array_equal(image[..., 1], image[..., 2])
+                np.testing.assert_array_equal(image[..., 3], 1)
+                pictures.append(image.copy())
+            assert np.abs(pictures[0] - pictures[1]).mean() > .01
+        finally:
+            if renderer is GLRenderer:
+                r.release()
