@@ -23,6 +23,7 @@ turn any hydrapy field into line work for it.
 from __future__ import annotations
 
 import math
+import threading
 from typing import Callable, Optional, Sequence
 
 import numpy as np
@@ -258,6 +259,83 @@ class Contours(Curve):
 # XY out
 # -----------------------------------------------------------------------------
 
+def _trace(trav, phase, step, n, start, gain):
+    """``n`` samples of the beam over a traversal table from ``phase``, ``step`` traversals a sample (the exact
+    pitch), the gain ramping from ``start`` to reach ``gain`` at the end: (xy (n, 2), z (n,), the phase after)."""
+    per = len(trav)
+    pos = (phase + np.arange(n) * step) % 1.0
+    fi = pos * per
+    i0 = np.floor(fi).astype(int) % per
+    i1 = (i0 + 1) % per
+    f = (fi - np.floor(fi))[:, None]
+    s = trav[i0] * (1 - f) + trav[i1] * f
+    ramp = start + (gain - start) * np.arange(1, n + 1) / n
+    xy = np.clip(s[:, :2] * ramp[:, None], -1.0, 1.0).astype(np.float32)
+    return xy, (s[:, 2] >= 0.5).astype(np.float32), float((phase + n * step) % 1.0)
+
+
+class XYVoice:
+    """An XY played by the audio thread, as an instrument: each pull continues the beam from the latest frame's
+    traversal, pitch and gain, so its phase never breaks however unevenly frames arrive (a frame-pushed
+    AudioQueue has to repeat or drop whole chunks, which clicks on a pure tone).  Pitch and gain move at the
+    pull's block boundaries.  ``channels`` are x and y; pulling one generates both, kept for the other."""
+
+    def __init__(self, xy, samplerate):
+        self.xy, self.samplerate = xy, int(samplerate)
+        self._lock = threading.Lock()
+        self.channels = [_VoiceChannel(self, 0), _VoiceChannel(self, 1)]
+        self._reset()
+
+    def _reset(self):
+        self.phase, self._gain = 0.0, None
+        self._buffers = [np.zeros(0, np.float32), np.zeros(0, np.float32)]
+
+    def _pull(self, k, n):
+        if len(self._buffers[k]) < n:
+            m = n - len(self._buffers[k])
+            live = self.xy.live
+            if live is None:
+                block = np.zeros((m, 2), np.float32)
+            else:
+                trav, rate, gain = live
+                start = gain if self._gain is None else self._gain
+                self._gain = gain
+                block, _, self.phase = _trace(trav, self.phase, rate / self.samplerate, m, start, gain)
+            for c in range(2):          # a channel nobody pulls keeps at most a second
+                self._buffers[c] = np.concatenate([self._buffers[c], block[:, c]])[-max(self.samplerate, n):]
+        out, self._buffers[k] = self._buffers[k][:n], self._buffers[k][n:]
+        return out
+
+
+class _VoiceChannel:
+    """One side of an XYVoice, with the AudioQueue interface Studio's audio producer pulls from."""
+
+    def __init__(self, voice, k):
+        self.voice, self.k = voice, k
+
+    @property
+    def samplerate(self):
+        return self.voice.samplerate
+
+    @samplerate.setter
+    def samplerate(self, value):
+        self.voice.samplerate = int(value)
+
+    @property
+    def _lock(self):
+        return self.voice._lock
+
+    def _reset(self):
+        self.voice._reset()
+
+    def pull(self, n: int) -> np.ndarray:
+        with self.voice._lock:
+            return self.voice._pull(self.k, n)
+
+    def close(self):
+        pass
+
+
 class _Channel:
     """One audio-rate channel of an XY stream, routable with ``CvOut.send``."""
 
@@ -279,6 +357,15 @@ class _Channel:
     @property
     def samples(self) -> np.ndarray:
         return np.concatenate(self.chunks) if self.chunks else np.zeros(0, np.float32)
+
+    def live_source(self, samplerate):
+        """For Studio's audio producer: this channel of the XY's voice (x or y), pulled by the audio thread."""
+        if self.k > 1:
+            return None
+        voice = self.parent._voice
+        if voice is None or voice.samplerate != int(samplerate):
+            voice = self.parent._voice = XYVoice(self.parent, samplerate)
+        return voice.channels[self.k]
 
 
 class XY(Texture):
@@ -313,6 +400,8 @@ class XY(Texture):
         self._carry = 0.0
         self._last_t = None
         self._gain = None
+        self.live = None              # (traversal, rate, gain) of the latest frame
+        self._voice = None
         self.preview_size, self.persistence = tuple(preview), float(persistence)
         self.phosphor = np.zeros((self.preview_size[1], self.preview_size[0]), np.float32)
         self.patch = patch or default_patch()
@@ -367,17 +456,8 @@ class XY(Texture):
         self._gain = gain
         per = max(int(round(self.sr / rate)), 8)                          # points in the traversal table
         trav = self.traversal(self.source(ctx), per)
-        step = rate / self.sr                                               # traversals per sample: the exact pitch
-        pos = (self.phase + np.arange(n) * step) % 1.0                      # where the beam is, continuing from last frame
-        self.phase = float((self.phase + n * step) % 1.0)
-        fi = pos * per
-        i0 = np.floor(fi).astype(int) % per
-        i1 = (i0 + 1) % per
-        f = (fi - np.floor(fi))[:, None]
-        s = trav[i0] * (1 - f) + trav[i1] * f
-        ramp = start + (gain - start) * np.arange(1, n + 1) / n            # reaches this frame's gain at its end
-        xy = np.clip(s[:, :2] * ramp[:, None], -1.0, 1.0).astype(np.float32)
-        z = (s[:, 2] >= 0.5).astype(np.float32)
+        self.live = (trav, rate, gain)                                     # what an XYVoice plays from now on
+        xy, z, self.phase = _trace(trav, self.phase, rate / self.sr, n, start, gain)
         for ch, data in ((self.x, xy[:, 0]), (self.y, xy[:, 1]), (self.z, z)):
             if self.record:
                 ch.chunks.append(data)

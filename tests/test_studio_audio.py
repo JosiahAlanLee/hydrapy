@@ -173,9 +173,10 @@ def test_xy_streams_feed_the_optical_ports():
     audio.snapshot = snapshot()
     audio.configure(dict(enabled=True))
     try:
-        assert len(xy.x.listeners) == 1 and len(xy.y.listeners) == 1
+        assert not xy.x.listeners and not xy.y.listeners          # played by the audio thread, not queued
         assert audio.describe()['sources'] == [xy.x.label, xy.y.label]
+        left, right = audio.sources
+        assert left.voice is right.voice and not left.pull(64).any()   # silent until a frame has drawn
     finally:
         audio.configure(dict(enabled=False))
         xy.close(); clear_hooks()
-    assert not xy.x.listeners and not xy.y.listeners

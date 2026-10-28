@@ -186,7 +186,12 @@ class StudioAudio:
         tracks = ([p for p in patch.probes if isinstance(p, Soundtrack) or
                    (hasattr(p, 'listeners') and hasattr(p, 'sr') and hasattr(p, 'rate'))]
                   + list(getattr(patch, 'audio_streams', ())))[:2]
-        self.sources = tuple(AudioQueue(track, self.samplerate or 48000) for track in tracks) if self.client is not None else ()
+        rate = self.samplerate or 48000
+
+        def source(track):        # an instrument the audio thread plays (XY's voice), else frames queued as they render
+            live = getattr(track, 'live_source', None)
+            return (live(rate) if live else None) or AudioQueue(track, rate)
+        self.sources = tuple(source(track) for track in tracks) if self.client is not None else ()
         self.source_names = [getattr(t, 'label', None) or getattr(getattr(t, 'output', None), 'name', 'Optical source')
                              for t in tracks]
         for source in old:
