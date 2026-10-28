@@ -71,9 +71,13 @@ render timing and optical-audio timing tests in separate processes. This release
 GL state between groups. A failed test, skipped test, empty collection, timeout or
 missing prerequisite makes the check fail. Known failures should remain visible;
 do not loosen tolerances or exclude cases just to get a green report.
-Running the whole suite in one `pytest` process with ModernGL installed fails
-the four `test_automata.py` tests with `cannot create buffer`; they pass in their
-own group, as here, and on their own.
+Automata and patch-brightness tests create and release their GL context in
+function-scoped fixtures.
+Previously they cached contexts during collection; an earlier audio-timing test
+created and released another current context, so the cached object had no current
+GL context when reused (`cannot create buffer`). Passing `ctx=` to `GLRenderer`
+does not make an old context current. Per-test ownership fixes the isolation
+without reordering or skipping tests; renderers are released before their context.
 
 It then benchmarks `osc`, `rd`, `wave` and `nca`, with 30 warm-up frames and 120
 measured frames per case at 1920×1080. GPU execution and RGB readback are included.

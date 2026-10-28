@@ -18,16 +18,33 @@ def _gl():
         return None
 
 
-CTX = _gl()
+@pytest.fixture
+def gl_context():
+    # Contexts are thread-current, not selected by passing ctx= to GLRenderer.
+    # Create this after earlier tests have torn down their contexts, rather than
+    # caching one during collection and reusing it after it is no longer current.
+    ctx = _gl()
+    try:
+        yield ctx
+    finally:
+        if ctx is not None:
+            ctx.release()
+
+
 SIZE = (16, 12)
 
 
-def _renderers(build):
+def _renderers(build, ctx):
     out = [("numpy", Renderer(build(), size=SIZE, fps=10))]
-    if CTX is not None:
+    if ctx is not None:
         from hydrapy.backend_gl import GLRenderer
-        out.append(("gl", GLRenderer(build(), size=SIZE, fps=10, ctx=CTX)))
-    return out
+        out.append(("gl", GLRenderer(build(), size=SIZE, fps=10, ctx=ctx)))
+    try:
+        yield from out
+    finally:
+        for _, renderer in out:
+            if hasattr(renderer, "release"):
+                renderer.release()
 
 
 def _frame(r, t):
@@ -52,23 +69,21 @@ def test_rule_strings_become_masks():
         rule_masks("23/3")
 
 
-def test_a_blinker_blinks_on_both_backends():
+def test_a_blinker_blinks_on_both_backends(gl_context):
     def build(mode=0):
         p = Patch(size=SIZE)
         start = _start([(7, 6), (8, 6), (9, 6)])
         once = ((0.05 - H.Time()) * 1000).clip(0, 1)
         src(p.o0).ca(mode).blend(src(start), once).out(p.o0, patch=p)
         return p
-    for name, r in _renderers(build):
+    for name, r in _renderers(build, gl_context):
         frames = [(_frame(r, i / 10)[..., 0] > 0.99) for i in range(4)]
         assert frames[0][6, 7:10].all() and frames[0].sum() == 3, name
         assert frames[1][5:8, 8].all() and frames[1].sum() == 3, name           # vertical
         assert frames[2][6, 7:10].all() and frames[2].sum() == 3, name           # horizontal again
-        if hasattr(r, "release"):
-            r.release()
 
 
-def test_asynchrony_and_flips():
+def test_asynchrony_and_flips(gl_context):
     def build(p_=1.0, flip=0.0, mode=0):
         def make():
             p = Patch(size=SIZE)
@@ -77,34 +92,32 @@ def test_asynchrony_and_flips():
             src(p.o0).ca(mode, p_, flip).blend(src(start), once).out(p.o0, patch=p)
             return p
         return make
-    for name, r in _renderers(build(p_=0.0)):                  # nobody updates: the blinker is frozen
+    for name, r in _renderers(build(p_=0.0), gl_context):                  # nobody updates: the blinker is frozen
         frames = [(_frame(r, i / 10)[..., 0] > 0.99) for i in range(4)]
         assert all((f == frames[0]).all() for f in frames), name
-    for name, r in _renderers(build(flip=1.0)):                # everyone flips after updating: the inverse
+    for name, r in _renderers(build(flip=1.0), gl_context):                # everyone flips after updating: the inverse
         _frame(r, 0)
         f = _frame(r, 0.1)[..., 0] > 0.99
         assert (~f).sum() == 3 and not f[5:8, 8].any(), name
-    for name, r in _renderers(build(p_=0.5, flip=0.0, mode=CA_MODES["seeds"])):
+    for name, r in _renderers(build(p_=0.5, flip=0.0, mode=CA_MODES["seeds"]), gl_context):
         alive = [int((_frame(r, i / 10)[..., 0] > 0.99).sum()) for i in range(6)]
         assert alive[-1] > 3, name                             # seeds still grows when half the cells wait
 
 
-def test_generations_rules_leave_a_dying_tail():
+def test_generations_rules_leave_a_dying_tail(gl_context):
     def build():
         p = Patch(size=SIZE)
         start = _start([(8, 6)])
         once = ((0.05 - H.Time()) * 1000).clip(0, 1)
         src(p.o0).ca(CA_MODES["star-wars"]).blend(src(start), once).out(p.o0, patch=p)   # 4 states, S345
         return p
-    for name, r in _renderers(build):
+    for name, r in _renderers(build, gl_context):
         _frame(r, 0)
         a = _frame(r, 0.1)
         assert abs(a[6, 8, 0] - 2 / 3) < 0.01, name             # a lonely cell dies through 2/3 ...
         b = _frame(r, 0.2)
         assert abs(b[6, 8, 0] - 1 / 3) < 0.01, name             # ... and 1/3
         assert _frame(r, 0.3)[6, 8, 0] < 0.01, name               # then it is dead
-        if hasattr(r, "release"):
-            r.release()
 
 
 def test_mode_can_be_a_field():
@@ -137,20 +150,22 @@ def test_parity_copies_a_pattern_and_symmetric_draws_keep_symmetry():
             assert np.array_equal(a, a[::-1, :]) and np.array_equal(a, a[:, ::-1]), (mode, i)
 
 
-def test_mirrorgrid_gives_mirrored_cells_identical_coordinates():
+def test_mirrorgrid_gives_mirrored_cells_identical_coordinates(gl_context):
     n, m = 20, 12
     field = H.noise(7, 0.3).add(H.shape(64, 0.3, 0.2)).mirrorgrid(n, m)
     a = field.render(0.7, size=(n, m))
     assert np.array_equal(a, a[::-1]) and np.array_equal(a, a[:, ::-1])
-    if CTX is not None:
+    if gl_context is not None:
         from hydrapy.backend_gl import GLRenderer
         p = Patch(size=(n * 4, m * 4))
         field.out(p.o0, patch=p, scale=0.25)
-        r = GLRenderer(p, size=(n * 4, m * 4), fps=10, ctx=CTX)
-        r.step(0.7)
-        b = r.read_rgba()
-        assert b.shape[:2] == (m, n) and np.array_equal(b, b[::-1]) and np.array_equal(b, b[:, ::-1])
-        r.release()
+        r = GLRenderer(p, size=(n * 4, m * 4), fps=10, ctx=gl_context)
+        try:
+            r.step(0.7)
+            b = r.read_rgba()
+            assert b.shape[:2] == (m, n) and np.array_equal(b, b[::-1]) and np.array_equal(b, b[:, ::-1])
+        finally:
+            r.release()
 
 
 def test_patch_41_stays_symmetric(monkeypatch):
