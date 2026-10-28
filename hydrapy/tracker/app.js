@@ -987,7 +987,7 @@ if(outputType){
     const result=await api('tracker_score',{document,revision});
     const next=incoming(result.document);
     history.change(state,'import score',()=>{
-      for(const field of ['format','legacy','sounds','patterns','chain','seed','lanes','bpm','key','mutes','bindings'])
+      for(const field of ['format','legacy','legacyTop','sounds','patterns','chain','seed','lanes','bpm','key','mutes','bindings'])
         if(next[field]===undefined)delete state[field];else state[field]=structuredClone(next[field]);
     },{pattern:editPattern,selected});
     state=next;

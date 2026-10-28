@@ -132,3 +132,30 @@ test('evaluate() matches HydraPy, candidate by candidate', {skip: !process.env.G
   }
   assert(compared > 5000, `only ${compared} candidates compared`);
 });
+
+if (process.env.GORGON_UPGRADE_CASES) test('seeded v1/v2 upgrades match Python and imports round-trip metadata', () => {
+  const cases = JSON.parse(readFileSync(process.env.GORGON_UPGRADE_CASES));
+  for (const [index, {old, upgraded, reversible}] of cases.entries()) {
+    assert.deepEqual(upgrade(old), upgraded, `spec mapping case ${index}`);
+    if (reversible) assert.deepEqual(downgrade(upgrade(old), old.format), old, `direct round-trip case ${index}`);
+    assert.deepEqual(downgrade(incoming(old), old.format), old, `lossless editor case ${index}`);
+    assert.deepEqual(outgoing(incoming(old)), old, `save case ${index}`);
+  }
+});
+
+test('top-level legacy metadata survives saving, upgrading and undo', async () => {
+  const {ScoreHistory} = await import('../hydrapy/tracker/editor.js');
+  const old = demo();
+  for (const key of ['chain', 'seed', 'lanes', 'legacy', 'legacyTop', 'rate', 'bar', 'bars', 'audio'])
+    old[key] = {metadata: [key, null, 17]};
+  const s = incoming(old), h = new ScoreHistory();
+  assert.deepEqual(outgoing(s), old);
+  h.change(s, 'upgrade', () => {s.seed = 9; settleFormat(s);}, {});
+  assert.equal(s.legacyTop, undefined);
+  assert.equal(outgoing(s).seed, 9);
+  h.undo(s);
+  assert.deepEqual(outgoing(s), old);
+  h.redo(s);
+  assert.equal(s.legacyTop, undefined);
+  assert.equal(outgoing(s).seed, 9);
+});

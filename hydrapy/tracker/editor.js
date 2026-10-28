@@ -13,7 +13,7 @@ export const SCENE_NAME = /^[A-Za-z0-9_-]{1,24}$/;
 // What a column holds, so blocks only paste into columns of the same kind.
 export const kindOf = col => col < AUDIO ? 'audio' : col < SCENE ? LANES[col - AUDIO] : 'scene';
 export const rowsOf = pattern => geometry(pattern).rows;
-const EDITABLE = ['format', 'legacy', 'sounds', 'patterns', 'chain', 'seed', 'lanes', 'bpm', 'key', 'mutes', 'bindings'];
+const EDITABLE = ['format', 'legacy', 'legacyTop', 'sounds', 'patterns', 'chain', 'seed', 'lanes', 'bpm', 'key', 'mutes', 'bindings'];
 const clone = value => structuredClone(value);
 const snapshot = score => Object.fromEntries(EDITABLE.map(key => [key, clone(score[key])]));
 const apply = (score, data) => EDITABLE.forEach(key => { if (data[key] === undefined) delete score[key]; else score[key] = clone(data[key]); });
