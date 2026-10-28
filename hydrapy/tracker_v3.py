@@ -168,7 +168,21 @@ def validate(document):
     for p in d['patterns']:
         if p is not None:
             _pattern(p)
+    _finite(d)
     return d
+
+
+def _finite(document):
+    """score-v3.md: non-finite numbers are rejected everywhere, in the unknown keys a score keeps too."""
+    stack = [document]
+    while stack:
+        value = stack.pop()
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError('A score holds only finite numbers (no NaN or Infinity)')
+        if isinstance(value, dict):
+            stack.extend(value.values())
+        elif isinstance(value, list):
+            stack.extend(value)
 
 
 def upgrade(document):

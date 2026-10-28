@@ -542,7 +542,7 @@ class Session:
             if type(revision) is not int or not self.tracker.edit_revision <= revision <= self.tracker.revision:
                 raise ValueError('Score changed in another window. Reload before saving.')
             path = self.root / '.hydrapy' / 'tracker.json'
-            atomic_text(path, json.dumps(self.tracker.document, indent=2))
+            atomic_text(path, json.dumps(self.tracker.document, indent=2, allow_nan=False))   # JSON for the browser and Rack
             return dict(file=str(path.relative_to(self.root)), document=self.tracker.document,
                         revision=self.tracker.revision)
         elif action == 'pause':

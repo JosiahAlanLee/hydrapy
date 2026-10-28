@@ -166,6 +166,25 @@ def test_bus_windows_replace_from_their_tick_and_the_lease_keeps_one_owner():
     assert t.apply_window(segment(t), 'ffffffffffffffff', window(5000), 14., 5010)
 
 
+def test_a_window_refused_for_the_lease_is_traced(tmp_path):
+    """evaluator.md#trace: a window Studio refuses is a line, like a dropped one (#23)."""
+    t = playing(chain())
+    t.trace = (tmp_path / 'trace.jsonl').open('w')
+    assert t.apply_window(segment(t), SENDER, window(4800), 10., 4810)
+    with pytest.raises(ValueError, match='held by another module'):
+        t.apply_window(segment(t), 'ffffffffffffffff', window(4800), 11., 4840)
+    assert not t.apply_window(dict(segment(t), transport_revision=0), SENDER, window(0), 11., 4850)
+    t.trace.close()
+    lines = [json.loads(line) for line in (tmp_path / 'trace.jsonl').read_text().splitlines()]
+    windows = [line for line in lines if 'window' in line.get('bus', {})]
+    assert windows == [
+        {'transport_revision': 1, 'start': t.start, 'received': 4840,
+         'bus': {'window': 'refused', 'reason': 'bus held by another module', 'from': 4800}},
+        {'transport_revision': 1, 'start': t.start, 'received': 4850,
+         'bus': {'window': 'dropped', 'reason': 'stale segment', 'from': 0}},
+    ]
+
+
 @pytest.mark.parametrize('broken', [
     lambda w: w.update({'from': -1}),
     lambda w: w.update({'from': 1.5}),

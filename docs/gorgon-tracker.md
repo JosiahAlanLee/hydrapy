@@ -329,7 +329,12 @@ opposite. **Score seed** (Pattern tools) drives every `%` and `degrade`.
 A version-1 or 2 score stays in its format while the edits fit it. The first edit
 that needs version 3 (a fifth lane, a pattern past A04, a rate, a length, a
 condition, a transform, the chain or the seed) upgrades the score, and undo
-restores its old format.
+restores its old format. An edit that changes nothing, such as Delete on an empty
+pattern, leaves the score alone. Three transport actions select a pattern past A04
+to play, which only version 3 can hold, so they upgrade the score without an undo
+step: launching one, turning ↻ on while editing one, and seeking to a row of one
+while ↻ is on. Undo doesn't bring the old format back after these; Reload or
+Import does.
 
 - The playhead adds `start`, `elapsed`, `entry`, `fill` and `bus` in integer ticks,
   1920 per quarter note. A seek lands on the nearest tick; Play starts a new
@@ -344,7 +349,14 @@ restores its old format.
   `playing`. One module holds the layer at a time; three seconds after its last
   request Studio clears the layer.
 - `hydrapy studio --tracker-trace FILE` appends the event trace, one JSON line per
-  candidate the picture evaluates and per change to FILL or the bus layer.
+  candidate the picture evaluates and per change to FILL or the bus layer. A bus
+  window Studio drops or refuses is a line too, `{"bus": {"window": "dropped" or
+  "refused", "reason", "from"}, "received"}`: `dropped` with reason `stale segment`
+  for a window of an old segment, `refused` with reason `bus held by another
+  module` for one from a module that doesn't hold the layer. `from` is the
+  window's first tick and `received` the first tick Studio's outputs hadn't
+  evaluated when it arrived. Like every line, these carry `transport_revision`
+  and `start`.
 
 ## Preview and measurements
 

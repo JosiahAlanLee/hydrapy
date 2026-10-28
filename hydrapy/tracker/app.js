@@ -2,7 +2,7 @@ import {SOUND_KEYS} from './sounds.js';
 import {api, PreviewStream} from './backend.js';
 import {noteMidi, noteFrequency, canonicalNote, breaksVoice} from './notes.js';
 import {ScoreHistory, bounds, getCell, putCell, copyBlock, readBlock, pasteBlock, clearBlock,
-  transposeBlock, setBlockVelocity, pianoNote, activity, SCENE, SCENE_NAME, kindOf, AUDIO, COLUMNS, LANES, rowsOf} from './editor.js';
+  transposeBlock, setBlockVelocity, pianoNote, activity, SCENE, SCENE_NAME, kindOf, AUDIO, COLUMNS, LANES, rowsOf, keepEmptyNull} from './editor.js';
 import {TICKS, RATES, code, emptyPattern, geometry, incoming, outgoing, settleFormat, timeline, evaluate, stateAt,
   condCode, parseCond, transformsText, parseTransforms} from './score3.js';
 const $ = id => document.getElementById(id);
@@ -73,7 +73,8 @@ function listen(callback){
   else window.addEventListener('storage',e=>{if(e.key===channelName&&e.newValue)try{callback(JSON.parse(e.newValue));}catch{}});
 }
 function line(){return timeline(state);}
-// The pattern being edited, as it plays; editable() writes the empty pattern in on its first edit.
+// The pattern being edited, as it plays; editable() writes the empty pattern in on its first edit
+// (changeScore puts null back when the edit leaves it empty).
 function pat(){return state.patterns[editPattern]??emptyPattern(editPattern);}
 function editable(){return state.patterns[editPattern]??=emptyPattern(editPattern);}
 function cycleBeats(){return line().cycle/TICKS;}
@@ -132,7 +133,7 @@ function changeScore(label,mutate,merge=''){
   try{
     // An edit an older score can't hold upgrades it to version 3, inside the same undo step.
     let upgraded=false;
-    const changed=history.change(state,label,()=>{mutate();upgraded=settleFormat(state);},{pattern:editPattern,selected},merge);
+    const changed=history.change(state,label,()=>{keepEmptyNull(state,mutate);upgraded=settleFormat(state);},{pattern:editPattern,selected},merge);
     if(changed){redrawScore();saveLocal();}
     if(upgraded)toast('The score is now format 3 (six lanes, 128 patterns, conditions). Undo restores its old format.');
     return changed;
