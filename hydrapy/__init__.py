@@ -60,7 +60,7 @@ from .controls import Param
 from .scenes import scene
 from . import tracker
 
-__version__ = "0.1.1"
+__version__ = "0.1.0"
 
 
 # ---------------------------------------------------------------------------
