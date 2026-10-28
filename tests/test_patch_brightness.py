@@ -15,16 +15,25 @@ def _gl():
         return None
 
 
-CTX = _gl()
+@pytest.fixture
+def gl_context():
+    ctx = _gl()
+    if ctx is None:
+        pytest.skip("no GL context")
+    try:
+        yield ctx
+    finally:
+        ctx.release()
+
+
 BASE = json.load(open(BASELINE)) if os.path.exists(BASELINE) else {}
 
 
-@pytest.mark.skipif(CTX is None, reason="no GL context")
 @pytest.mark.parametrize("name", patch_files())
-def test_patch_brightness_matches_baseline(name):
+def test_patch_brightness_matches_baseline(name, gl_context):
     if name not in BASE:
         pytest.skip(f"no baseline for {name}: run python tests/patch_brightness.py")
-    got = measure(name, CTX)
+    got = measure(name, gl_context)
     for out, want in BASE[name].items():
         v = got.get(out)
         assert v is not None, f"{name} {out} no longer renders"

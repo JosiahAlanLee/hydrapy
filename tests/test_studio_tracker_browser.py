@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from hydrapy.studio import Session, make_server
+from studio_helpers import published_output
 
 pytestmark = pytest.mark.skipif(os.environ.get('HYDRAPY_BROWSER_TESTS') != '1',
                                 reason='set HYDRAPY_BROWSER_TESTS=1 for real Chromium checks')
@@ -113,7 +114,7 @@ def test_independent_output_windows_routing_blackout_and_closed_controller(works
     aux = window.value
     aux.locator('#outputDismiss').click()
     aux.wait_for_function('gorgonPreview.frames>=3 && gorgonPreview.output==="o1"')
-    assert session.renderer.patch.display.name == 'o0'
+    assert published_output(session) == 'o0'
     assert aux.evaluate("document.getElementById('outputCanvas').getContext('2d').getImageData(600,400,1,1).data[1]") > 195
     with page.expect_popup() as window:
         page.locator('#programBtn').click()
@@ -615,7 +616,7 @@ def test_monitor_output_picker_and_shortcuts_keep_program_auxiliary_and_score(wo
     page.wait_for_function("document.getElementById('previewCanvas').getContext('2d').getImageData(100,70,1,1).data[1]>190")
     assert session.tracker.document == document and session.tracker.revision == revision
     assert session.clock_time == clock and session.tracker.transport_revision == transport
-    assert session.renderer.patch.display.name == 'o0'
+    assert published_output(session) == 'o0'
     assert program.evaluate('gorgonPreview.output') == 'o0' and aux.evaluate('gorgonPreview.output') == 'o1'
     assert program.evaluate("document.getElementById('outputCanvas').getContext('2d').getImageData(600,400,1,1).data[1]") < 3
     # A changed live route does not override a pinned local preview.
@@ -672,7 +673,7 @@ def test_monitor_switches_discard_delayed_frames_and_controllers_inspect_indepen
     other.wait_for_function('gorgonPreview.output==="o1" && gorgonPreview.bus==="monitor"')
     page.wait_for_function('(n)=>gorgonPreview.frames>n+2', arg=count)
     assert all(sample['output']=='o3' for sample in page.evaluate('gorgonPreview.samples')[count:])
-    assert other.evaluate('gorgonPreview.output') == 'o1' and session.renderer.patch.display.name == 'o0'
+    assert other.evaluate('gorgonPreview.output') == 'o1' and published_output(session) == 'o0'
     assert max(peak) == 1
     assert all(p.snapshot()['pending'] <= 1 for p in session.monitor_previews.values())
     other.close()

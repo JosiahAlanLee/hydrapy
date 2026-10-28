@@ -175,8 +175,8 @@ def test_late_renderer_holds_previous_picture_and_rewind_resets_audio():
 @pytest.mark.parametrize("backend,sr,render_fps,hold", [
     ("numpy", 44100, 24, None), ("gl", 48000, 30, 18),
 ])
-def test_ten_minute_video_audio_sync(tmp_path, backend, sr, render_fps, hold):
-    ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
+def test_ten_minute_video_audio_sync(tmp_path, backend, sr, render_fps, hold, av_ffmpeg):
+    ffmpeg, ffprobe = av_ffmpeg, shutil.which("ffprobe")
     if not ffmpeg or not ffprobe:
         pytest.skip("ffmpeg and ffprobe required for encoded A/V synchronization")
     seconds = 600

@@ -127,14 +127,14 @@ def test_software_export_streams_once_scales_crops_and_preserves_rgb(tmp_path, f
         assert np.max(np.abs(picture.mean(axis=(0, 1)) - [40 + n * 20, 70, 180])) < 6
 
 
-def test_lazy_soundtrack_is_muxed_after_rendering(tmp_path, ffmpeg):
+def test_lazy_soundtrack_is_muxed_after_rendering(tmp_path, av_ffmpeg):
     patch = Patch(size=(64, 36))
     osc(8, .1, 1).out(patch.o0, patch=patch)
     track = Soundtrack(patch.o0, fps=12, record=True, keep=2, patch=patch)
     path = tmp_path / "sound.mp4"
     assert len(track.samples) == 0
     save_mp4(iter_frames(patch, seconds=1, fps=12), path, fps=12, audio=track,
-             encoder="software", ffmpeg=ffmpeg)
+             encoder="software", ffmpeg=av_ffmpeg)
     assert len(track.samples) == 44100
     streams = inspect_video(path)
     video = next(s for s in streams if s["codec_type"] == "video")

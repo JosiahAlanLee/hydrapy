@@ -9,7 +9,10 @@ pushes to `main`, and manual dispatch. It tests Python 3.9 (the declared minimum
 and 3.13 on Ubuntu, using fresh environments with the `test`, `osc`, `video` and
 `vector` extras. The 3.13 job also installs Sardine 0.4.0 and requires Vortex to
 import before running its integration test. Node and FFmpeg/ffprobe are required
-so browser-runtime assertions and encoded audio/video checks execute.
+so browser-runtime assertions and encoded audio/video checks execute. The CPU job
+installs Node explicitly with apt rather than relying on the runner image.
+`python -m pytest` includes skip reasons by default (`-ra`), including missing
+Node, optional Python packages, and opt-in device/browser integrations.
 
 ModernGL, Torch and sounddevice are not installed. GPU and other unavailable
 optional integrations remain explicit skips; they are not hardware qualification.
@@ -27,10 +30,20 @@ OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTEST_DISABLE_PLUGIN
   /tmp/hydrapy-cpu-check/bin/python -m pytest -q -ra
 ```
 
-FFmpeg, ffprobe and Node must also be on `PATH`. FFmpeg 4.4, Ubuntu 22.04's
-package, is too old: with it as `ffmpeg`, both `test_ten_minute_video_audio_sync`
-cases and `test_lazy_soundtrack_is_muxed_after_rendering` fail. They pass with
-FFmpeg 7.0, and with Ubuntu 24.04's 6.1 in CI. On Linux, Sardine's RtMidi
+FFprobe and Node must be on `PATH`; FFmpeg may also come from imageio-ffmpeg.
+The encoded A/V tests probe each FFmpeg candidate with a one-second H.264-copy/AAC
+mux independently of HydraPy. Ubuntu 22.04's FFmpeg 4.4.2 truncates the AAC stream
+at the video's decode-time endpoint when using `-shortest` with reordered
+B-frames: one second becomes 0.789002 seconds. This is tail truncation, not
+sample-clock drift. The tests use a working candidate (here imageio-ffmpeg's
+7.0.2) or skip with versions and the observed truncation if none works. An
+`IMAGEIO_FFMPEG_EXE` override remains authoritative, so selecting the affected
+4.4.2 binary produces an explicit skip rather than silently changing binaries.
+The original PCM sample-count, duration and decoded midpoint checks remain intact.
+The application still uses the requested FFmpeg; select a newer binary with
+`--ffmpeg` or `IMAGEIO_FFMPEG_EXE` for audio exports on affected systems.
+
+On Linux, Sardine's RtMidi
 dependency may need a C++ compiler, `pkg-config` and `libasound2-dev` to build.
 For Python 3.9 omit Sardine;
 that package requires Python 3.10 or newer. CI resolves compatible dependencies
@@ -58,9 +71,13 @@ render timing and optical-audio timing tests in separate processes. This release
 GL state between groups. A failed test, skipped test, empty collection, timeout or
 missing prerequisite makes the check fail. Known failures should remain visible;
 do not loosen tolerances or exclude cases just to get a green report.
-Running the whole suite in one `pytest` process with ModernGL installed fails
-the four `test_automata.py` tests with `cannot create buffer`; they pass in their
-own group, as here, and on their own.
+Automata and patch-brightness tests create and release their GL context in
+function-scoped fixtures.
+Previously they cached contexts during collection; an earlier audio-timing test
+created and released another current context, so the cached object had no current
+GL context when reused (`cannot create buffer`). Passing `ctx=` to `GLRenderer`
+does not make an old context current. Per-test ownership fixes the isolation
+without reordering or skipping tests; renderers are released before their context.
 
 It then benchmarks `osc`, `rd`, `wave` and `nca`, with 30 warm-up frames and 120
 measured frames per case at 1920×1080. GPU execution and RGB readback are included.
@@ -109,6 +126,18 @@ previous `main`, `2d4553e`. `test_studio_jack.py` passed 3/3 against a private
 `jackd` dummy server and 3/3 against a private PipeWire 1.0.7 instance.
 Audio devices, ADAT/CV, RAVE inference, end-to-end latency and hardware encoding
 were not measured.
+
+### Voronoi comparison
+
+Hydra's original Voronoi uses `fract(sin(dot(p, constants)) * 43758.5453)`.
+Small implementation differences in `sin` become large changes in the cell
+seeds; cross-driver pixel parity is not a valid expectation. On the RTX 4090,
+NVIDIA 580.178.04 (GL 3.3), the original CPU/GPU mean image difference is 0.206.
+The parity test now injects identical, exactly representable spatial seeds on
+both backends and retains its existing pixel tolerances for cell selection,
+animation and shading. A separate test exercises the original hash on both
+backends for finite, grayscale, opaque, spatially varied and animated output.
+The application's Hydra-compatible hash and appearance have not changed.
 
 ## Audio, ADAT and model qualification
 
