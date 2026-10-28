@@ -67,6 +67,12 @@ def atomic_text(path, text):
     fd, name = tempfile.mkstemp(prefix='.hydrapy-', suffix='.tmp', dir=path.parent)
     temp = Path(name)
     try:
+        # mkstemp makes the file 0600: keep a saved file's mode, and give a new one 0644.
+        try:
+            mode = path.stat().st_mode & 0o777
+        except OSError:
+            mode = 0o644
+        os.fchmod(fd, mode)
         with os.fdopen(fd, 'w', encoding='utf-8') as handle:
             handle.write(text)
         os.replace(temp, path)

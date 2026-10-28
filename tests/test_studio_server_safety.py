@@ -192,3 +192,15 @@ def test_cv_invalid_physical_channels_are_refused_before_activation(channels):
     with ResourceStage():
         with pytest.raises(ValueError):
             CvOut(channels=channels)
+
+
+def test_atomic_text_keeps_the_saved_files_mode(tmp_path):
+    from hydrapy.studio import atomic_text
+    saved = tmp_path / 'patch.py'
+    saved.write_text('old')
+    saved.chmod(0o640)
+    atomic_text(saved, 'new')
+    assert saved.read_text() == 'new' and saved.stat().st_mode & 0o777 == 0o640
+    fresh = tmp_path / 'fresh.json'
+    atomic_text(fresh, '{}')
+    assert fresh.stat().st_mode & 0o777 == 0o644
