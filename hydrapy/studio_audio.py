@@ -183,10 +183,12 @@ class StudioAudio:
     def attach(self, patch):
         self._patch = patch
         old = self.sources
-        tracks = [p for p in patch.probes if isinstance(p, Soundtrack) or
-                  (hasattr(p, 'listeners') and hasattr(p, 'sr') and hasattr(p, 'rate'))][:2]
+        tracks = ([p for p in patch.probes if isinstance(p, Soundtrack) or
+                   (hasattr(p, 'listeners') and hasattr(p, 'sr') and hasattr(p, 'rate'))]
+                  + list(getattr(patch, 'audio_streams', ())))[:2]
         self.sources = tuple(AudioQueue(track, self.samplerate or 48000) for track in tracks) if self.client is not None else ()
-        self.source_names = [getattr(getattr(t, 'output', None), 'name', 'Optical source') for t in tracks]
+        self.source_names = [getattr(t, 'label', None) or getattr(getattr(t, 'output', None), 'name', 'Optical source')
+                             for t in tracks]
         for source in old:
             source.close()
 

@@ -263,6 +263,7 @@ class _Channel:
 
     def __init__(self, parent, k):
         self.parent, self.k = parent, k
+        self.label = f"{parent.name} {'xyz'[k]}"
         self.listeners: list[Callable] = []
         self.chunks: list[np.ndarray] = []
         self._generation = 0          # bumped on clear(): an AudioQueue drops what it had queued
@@ -284,27 +285,38 @@ class XY(Texture):
     """A frame of paths as an audio-rate beam: ``x``, ``y`` and ``z`` (1 drawing, 0 blanked).
 
     ``rate``: traversals of the whole frame per second (the refresh of the scope, and the pitch
-    you hear; under ~40 it flickers).  ``gain``: ±full scale (±10 V out of an ES-3 at 1.0; 0.5 is
-    ±5 V).  ``jump``: fraction of each traversal spent on blanked travel between paths.
+    you hear; under ~40 it flickers).  The beam advances by exactly ``rate`` traversals a second,
+    so the pitch is exact even when a period isn't a whole number of samples.  ``gain``: ±full
+    scale (±10 V out of an ES-3 at 1.0; 0.5 is ±5 V), ramped across each frame's samples so an
+    envelope doesn't step.  ``jump``: fraction of each traversal spent on blanked travel between
+    paths.
+
+    ``x`` and ``y`` join the patch's audio streams, so Studio plays them on its optical ports
+    (x left, y right): the picture as an oscillator another instrument can filter.
     """
 
     _counter = 0
 
     def __init__(self, source, rate=80.0, sr: int = 48000, fps: float = 60.0, gain=0.5, jump: float = 0.03,
-                 record: bool = True, keep: float = 1200.0, preview=(320, 180), persistence: float = 0.6):
+                 record: bool = True, keep: float = 1200.0, preview=(320, 180), persistence: float = 0.6,
+                 patch=None):
+        from .core import default_patch
         from .live import register_hook
         self.source = source if callable(source) else Paths(source)
         self.rate, self.gain = as_signal(rate), as_signal(gain)
         self.sr, self.fps, self.jump = int(sr), float(fps), float(jump)
         self.record, self.keep = bool(record), float(keep)
+        XY._counter += 1
+        self.name = f"xy{XY._counter}"
         self.x, self.y, self.z = _Channel(self, 0), _Channel(self, 1), _Channel(self, 2)
         self.phase = 0.0
         self._carry = 0.0
         self._last_t = None
+        self._gain = None
         self.preview_size, self.persistence = tuple(preview), float(persistence)
         self.phosphor = np.zeros((self.preview_size[1], self.preview_size[0]), np.float32)
-        XY._counter += 1
-        self.name = f"xy{XY._counter}"
+        self.patch = patch or default_patch()
+        self.patch.audio_streams += [self.x, self.y]
         register_hook(self.tick)
         from .live import _RESOURCES
         _RESOURCES.append(self)
@@ -351,16 +363,20 @@ class XY(Texture):
             return
         rate = max(float(self.rate(ctx)), 1e-3)
         gain = float(self.gain(ctx))
-        per = max(int(round(self.sr / rate)), 8)                          # samples per traversal
+        start = gain if self._gain is None else self._gain
+        self._gain = gain
+        per = max(int(round(self.sr / rate)), 8)                          # points in the traversal table
         trav = self.traversal(self.source(ctx), per)
-        pos = (self.phase + np.arange(n) / per) % 1.0                       # where the beam is, continuing from last frame
-        self.phase = float((self.phase + n / per) % 1.0)
+        step = rate / self.sr                                               # traversals per sample: the exact pitch
+        pos = (self.phase + np.arange(n) * step) % 1.0                      # where the beam is, continuing from last frame
+        self.phase = float((self.phase + n * step) % 1.0)
         fi = pos * per
         i0 = np.floor(fi).astype(int) % per
         i1 = (i0 + 1) % per
         f = (fi - np.floor(fi))[:, None]
         s = trav[i0] * (1 - f) + trav[i1] * f
-        xy = np.clip(s[:, :2] * gain, -1.0, 1.0).astype(np.float32)
+        ramp = start + (gain - start) * np.arange(1, n + 1) / n            # reaches this frame's gain at its end
+        xy = np.clip(s[:, :2] * ramp[:, None], -1.0, 1.0).astype(np.float32)
         z = (s[:, 2] >= 0.5).astype(np.float32)
         for ch, data in ((self.x, xy[:, 0]), (self.y, xy[:, 1]), (self.z, z)):
             if self.record:
@@ -418,13 +434,14 @@ class XY(Texture):
         for ch in (self.x, self.y, self.z):
             ch.chunks = []
             ch._generation += 1
-        self.phase, self._carry, self._last_t = 0.0, 0.0, None
+        self.phase, self._carry, self._last_t, self._gain = 0.0, 0.0, None, None
         self.phosphor[:] = 0.0
 
     def close(self):
         from .live import _HOOKS
         if self.tick in _HOOKS:
             _HOOKS.remove(self.tick)
+        self.patch.audio_streams[:] = [s for s in self.patch.audio_streams if s not in (self.x, self.y)]
 
 
 # -----------------------------------------------------------------------------

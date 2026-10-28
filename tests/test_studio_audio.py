@@ -160,3 +160,22 @@ def test_breaks_kit_hears_equivalent_note_spellings_alike():
     a = BreaksSynth().render(canonical, 100., 48000, 48000)
     b = BreaksSynth().render(other, 100., 48000, 48000)
     np.testing.assert_array_equal(a, b)
+
+
+def test_xy_streams_feed_the_optical_ports():
+    from hydrapy import XY, Lissajous, Patch
+    from hydrapy.live import clear_hooks
+    clear_hooks()
+    patch = Patch(size=(16, 9))
+    xy = XY(Lissajous(3, 2), patch=patch)
+    audio = StudioAudio(client_factory=FakeClient)
+    audio.attach(patch)
+    audio.snapshot = snapshot()
+    audio.configure(dict(enabled=True))
+    try:
+        assert len(xy.x.listeners) == 1 and len(xy.y.listeners) == 1
+        assert audio.describe()['sources'] == [xy.x.label, xy.y.label]
+    finally:
+        audio.configure(dict(enabled=False))
+        xy.close(); clear_hooks()
+    assert not xy.x.listeners and not xy.y.listeners
