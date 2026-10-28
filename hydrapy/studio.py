@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import threading
+import tempfile
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -62,9 +63,15 @@ def project_path(root, name):
 
 def atomic_text(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(path.name + '.tmp')
-    temp.write_text(text, encoding='utf-8')
-    os.replace(temp, path)
+    # Exclusive, unpredictable sibling: never follow a pre-existing .tmp symlink.
+    fd, name = tempfile.mkstemp(prefix='.hydrapy-', suffix='.tmp', dir=path.parent)
+    temp = Path(name)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            handle.write(text)
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 class Recorder:
@@ -137,10 +144,10 @@ class _Finishing:
         try:
             self.recorder.close()
         except Exception as exc:
-            self.session.error = ''.join(traceback.format_exception_only(type(exc), exc)).strip()
-            raise ValueError(self.session.error) from None
-        if self.session.notice == self.NOTICE:  # not replaced by, say, a failed size restore
-            self.session.notice = 'Video recording saved.'
+            error = ''.join(traceback.format_exception_only(type(exc), exc)).strip()
+            self.session.call('_recording_finished', error=error)
+            raise ValueError(error) from None
+        self.session.call('_recording_finished', error='')
         return dict(file=str(self.recorder.path.relative_to(self.session.root)))
 
 
@@ -199,7 +206,7 @@ class Session:
         self.cv = cv
         self.output_settings = {}
         self.audio = StudioAudio()
-        settings_path = self.root / '.hydrapy' / 'outputs.json'
+        settings_path = project_path(self.root, '.hydrapy/outputs.json')
         if settings_path.is_file():
             try:
                 self.output_settings = json.loads(settings_path.read_text())
@@ -400,6 +407,12 @@ class Session:
 
     def _handle(self, action, data):
         from .live import resource_status
+        if action == '_recording_finished':
+            if data['error']:
+                self.error = data['error']
+            elif self.notice == _Finishing.NOTICE:
+                self.notice = 'Video recording saved.'
+            return {}
         if action == 'close':
             self.running = False
             return {}
@@ -499,7 +512,7 @@ class Session:
             state = self.audio.configure(data)
             prepared = dict(self.output_settings, audio=dict(self.audio.config))
             try:
-                atomic_text(self.root / '.hydrapy' / 'outputs.json', json.dumps(prepared, indent=2))
+                atomic_text(project_path(self.root, '.hydrapy/outputs.json'), json.dumps(prepared, indent=2))
             except BaseException:
                 self.audio.configure(old)
                 raise
@@ -513,7 +526,7 @@ class Session:
             prepared = dict(self.output_settings)
             prepared['polarity'] = dict(prepared.get('polarity', {}), **{route: mode})
             try:
-                atomic_text(self.root / '.hydrapy' / 'outputs.json', json.dumps(prepared, indent=2))
+                atomic_text(project_path(self.root, '.hydrapy/outputs.json'), json.dumps(prepared, indent=2))
             except BaseException:
                 self.cv.set_polarity(route, old)
                 raise
@@ -541,7 +554,7 @@ class Session:
             revision = data.get('revision')
             if type(revision) is not int or not self.tracker.edit_revision <= revision <= self.tracker.revision:
                 raise ValueError('Score changed in another window. Reload before saving.')
-            path = self.root / '.hydrapy' / 'tracker.json'
+            path = project_path(self.root, '.hydrapy/tracker.json')
             atomic_text(path, json.dumps(self.tracker.document, indent=2, allow_nan=False))   # JSON for the browser and Rack
             return dict(file=str(path.relative_to(self.root)), document=self.tracker.document,
                         revision=self.tracker.revision)
@@ -583,13 +596,13 @@ class Session:
         elif action == 'check':
             return capabilities(patch, data.get('target', 'html'))
         elif action in ('preset_save', 'preset_load', 'presets'):
-            preset_dir = self.root / '.hydrapy' / 'presets' / digest(str(self.path))[:12]
+            preset_dir = project_path(self.root, '.hydrapy/presets/' + digest(str(self.path))[:12])
             if action == 'presets':
                 return dict(names=sorted(p.stem for p in preset_dir.glob('*.json')))
             name = data.get('name', '').strip()
             if not name or len(name) > 80 or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_ -' for c in name):
                 raise ValueError('Preset names may contain letters, numbers, spaces, hyphens and underscores')
-            file = preset_dir / (name + '.json')
+            file = project_path(self.root, preset_dir / (name + '.json'))
             if action == 'preset_save':
                 atomic_text(file, json.dumps({k: p.snapshot() for k, p in patch.controls.items()}, indent=2))
             else:
@@ -617,9 +630,9 @@ class Session:
         return {'ok': True}
 
     def _new_output(self, extension):
-        folder = self.root / '.hydrapy' / 'exports'
+        folder = project_path(self.root, '.hydrapy/exports')
         folder.mkdir(parents=True, exist_ok=True)
-        return folder / (self.path.stem + '-' + time.strftime('%Y%m%d-%H%M%S') + '-' + secrets.token_hex(2) + '.' + extension)
+        return project_path(self.root, folder / (self.path.stem + '-' + time.strftime('%Y%m%d-%H%M%S') + '-' + secrets.token_hex(2) + '.' + extension))
 
     def _export(self, data):
         fmt = data.get('format', 'mp4')
@@ -647,7 +660,7 @@ class Session:
             if not Path(audio).is_file():
                 raise ValueError('Audio file not found')
         job_id = secrets.token_hex(8)
-        folder = self.root / '.hydrapy' / 'jobs' / job_id
+        folder = project_path(self.root, '.hydrapy/jobs/' + job_id)
         folder.mkdir(parents=True)
         output = self._new_output(fmt)
         spec = dict(root=str(self.root), patch=str(self.path), source=self.source,
@@ -770,7 +783,7 @@ class Session:
             self.preview_taken = now
             cache = None
             if self.path and self.clock_time > 1:
-                cache = self.root / '.hydrapy' / 'previews' / (digest(str(self.path.relative_to(self.root)))[:16] + '.jpg')
+                cache = project_path(self.root, '.hydrapy/previews/' + digest(str(self.path.relative_to(self.root)))[:16] + '.jpg')
             self.preview.submit(chosen.name, frame, metrics, cache=cache)
             self.preview_dirty = False
         if thumbnail is not None:
@@ -802,13 +815,13 @@ class Session:
         jobs = []
         for key, item in self.jobs.items():
             try:
-                status = json.loads((self.root / '.hydrapy' / 'jobs' / key / 'status.json').read_text())
-                proc = self.job_processes[key]
-                if status.get('state') in ('queued', 'running') and proc.poll() is not None:
-                    status = dict(state='error', error=f'Export process exited ({proc.returncode}); see .hydrapy/jobs/{key}/log.txt')
-                jobs.append(dict(item, **status))
+                status = json.loads(project_path(self.root, '.hydrapy/jobs/' + key + '/status.json').read_text())
             except (OSError, ValueError):
-                jobs.append(dict(item, state='running', progress=0))
+                status = dict(state='running', progress=0)
+            proc = self.job_processes[key]
+            if status.get('state') in ('queued', 'running') and proc.poll() is not None:
+                status = dict(state='error', error=f'Export process exited ({proc.returncode}); see .hydrapy/jobs/{key}/log.txt')
+            jobs.append(dict(item, **status))
         preview = self.preview.snapshot()
         state = dict(path=str(self.path.relative_to(self.root)) if self.path else None,
                      version=digest(self.source), playing=not self.paused, armed=self.armed,
@@ -868,7 +881,7 @@ class Session:
         window = action == 'tracker_transport' and 'bus' in data
         try:
             value = self._handle(action, data)
-            if action not in ('source', 'check', 'presets', 'devices', 'mouse') and not window:
+            if action not in ('source', 'check', 'presets', 'devices', 'mouse', '_recording_finished') and not window:
                 self.error = ''
             result.put(value)
         except Exception as exc:
@@ -1016,7 +1029,7 @@ class Session:
     def _save_output_setting(self, key, value):
         prepared = dict(self.output_settings, **{key: value})
         try:
-            atomic_text(self.root / '.hydrapy' / 'outputs.json', json.dumps(prepared, indent=2))
+            atomic_text(project_path(self.root, '.hydrapy/outputs.json'), json.dumps(prepared, indent=2))
         except OSError:
             return  # a read-only workspace still works; the choice is just not remembered
         self.output_settings = prepared
@@ -1236,7 +1249,7 @@ def make_server(session, port=8765):
             allowed = (f'127.0.0.1:{self.server.server_port}', f'localhost:{self.server.server_port}')
             origin = self.headers.get('Origin')
             return (host in allowed and (origin is None or origin in tuple('http://' + h for h in allowed))
-                    and secrets.compare_digest(self.headers.get('X-Hydrapy-Token', ''), token))
+                    and secrets.compare_digest(self.headers.get('X-Hydrapy-Token', '').encode('utf-8'), token.encode('ascii')))
 
         def _send(self, status, value, content_type='application/json', headers=None):
             payload = json.dumps(value).encode() if content_type == 'application/json' else value
@@ -1293,7 +1306,7 @@ def make_server(session, port=8765):
                         state.pop('document', None)
                     return self._send(200, state)
                 if parsed.path == '/api/tracker_saved':
-                    path = session.root / '.hydrapy' / 'tracker.json'
+                    path = project_path(session.root, '.hydrapy/tracker.json')
                     return self._send(200, {'document': json.loads(path.read_text()) if path.exists() else None})
                 if parsed.path == '/api/state':
                     with session.lock:

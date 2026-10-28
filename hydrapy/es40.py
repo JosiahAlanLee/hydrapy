@@ -208,7 +208,8 @@ class ES40CV(TrackerCV):
             self.polarity_clips[index] += clipped
             outdata[:, unit['channels']] = pcm
         for output, signal in self.direct.items():
-            value = volts[:, self.columns[signal]] / self.volts_per_fs
+            # float32 rounds INT32_MAX up to 2**31, which casts to INT32_MIN.
+            value = volts[:, self.columns[signal]].astype(np.float64) / self.volts_per_fs
             outdata[:, output] = np.clip(value * 2147483648., -2147483648, 2147483647).astype(np.int32)
 
     def describe(self):
