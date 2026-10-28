@@ -151,7 +151,36 @@ def test_reset_pulses_at_every_wrap_of_an_odd_length_cycle():
     p = pattern(bar=7)                                       # 7 rows: 1.75 beats, 0.875 s at 120 BPM
     _, volts = render(v3(blank(bpm=120, patterns=[p] + [None] * 127)), 3., {0: 'reset', 1: 'clock'})
     assert list(rising(volts[:, 0])) == [round(.875 * SR * k) for k in (1, 2, 3)]
-    assert volts[round(.875 * SR), 1] == 5.                  # the clock restarts with the cycle
+    assert volts[round(.875 * SR), 1] == 5.                  # 7 whole clock periods: a pulse starts at the wrap
+
+
+CLOCK = SR // 8                     # one clock period at 120 BPM and 4 PPQN, in samples
+
+
+@pytest.mark.parametrize('p, cycle', [
+    (pattern(rate=8, bar=3), 180),                           # 3/32 beat: shorter than half a clock period
+    (pattern(rate=2, bar=5), 1200),                          # 5 rows of 1/8 beat: 2.5 clock periods
+])
+def test_clock_runs_steadily_through_cycle_wraps(p, cycle):
+    tracker = v3(blank(bpm=120, patterns=[p] + [None] * 127))
+    assert Timeline(tracker.document).cycle == cycle
+    _, volts = render(tracker, 2., {0: 'clock', 1: 'reset'})
+    assert len(rising(volts[:, 1])) >= 3                     # several wraps, each still resets
+    high = volts[:, 0] > 0
+    edges = np.flatnonzero(high[1:] != high[:-1]) + 1
+    assert high[0] and list(edges) == [k * CLOCK // 2 for k in range(1, len(edges) + 1)]
+    assert len(edges) == 2 * SR // (CLOCK // 2) - 1
+
+
+@pytest.mark.parametrize('tick', [0, 7 * TICKS // 4 + 100])
+def test_a_whole_beat_cycle_clocks_as_it_did_with_the_cycle_beat(tick):
+    from hydrapy import tracker_v3
+    score = blank(bpm=120, patterns=[pattern(bars=2)] + [None] * 127)        # 8 beats
+    cv, volts = render(v3(score, tick=tick), 9., {0: 'clock'})
+    times = 100. + np.arange(len(volts)) / SR
+    u = tracker_v3.elapsed(cv.snapshot, times)
+    beat = tracker_v3.position(cv.snapshot['document'], tick, u)[0]
+    assert np.array_equal(volts[:, 0], (np.mod(beat * 4, 1.) < .5) * 5.)
 
 
 def test_automation_follows_each_entrys_own_rate_and_keys():

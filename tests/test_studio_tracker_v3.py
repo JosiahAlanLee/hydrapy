@@ -206,6 +206,34 @@ def test_malformed_windows_are_refused(broken):
         t.apply_window(segment(t), 'not hex', window(4800), 0., 0)
 
 
+@pytest.mark.parametrize('broken, first', [
+    (lambda w: w.update({'from': -1}), None),
+    (lambda w: w.update({'from': 1.5}), None),
+    (lambda w: w.update({'from': True}), None),
+    (lambda w: w.update(fill=[{'at': 4801, 'on': True}]), 4800),
+    (lambda w: w.update(extra=True), 4800),
+    (lambda w: [w.clear(), w.update(fill=None)], None),
+])
+def test_a_malformed_window_is_traced_as_refused(tmp_path, broken, first):
+    """evaluator.md#trace: a window that fails validation is a refused line too; the reply is still a 400."""
+    t = playing(chain())
+    t.trace = (tmp_path / 'trace.jsonl').open('w')
+    w = window(4800)
+    broken(w)
+    with pytest.raises(ValueError):
+        t.apply_window(segment(t), SENDER, w, 10., 4840)
+    with pytest.raises(ValueError):
+        t.apply_window(segment(t), SENDER, [], 10., 4850)                # not even an object
+    t.trace.close()
+    lines = [json.loads(line) for line in (tmp_path / 'trace.jsonl').read_text().splitlines()]
+    assert lines == [
+        {'transport_revision': 1, 'start': t.start, 'received': 4840,
+         'bus': {'window': 'refused', 'reason': 'malformed window', 'from': first}},
+        {'transport_revision': 1, 'start': t.start, 'received': 4850,
+         'bus': {'window': 'refused', 'reason': 'malformed window', 'from': None}},
+    ]
+
+
 def test_folding_keeps_what_plays_from_the_horizon_on():
     t = playing(chain())
     transitions = off(*[(k * 100, k % 2 == 1) for k in range(1, 60)])

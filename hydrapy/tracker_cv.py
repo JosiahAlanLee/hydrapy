@@ -11,7 +11,9 @@ channel numbers counted from 0, as ``hydrapy devices`` and ``CvOut`` use them.
 
 Signals a channel can carry:
 
-``clock``           pulses at ``ppqn`` per quarter note (default 4 = sixteenths), 50% duty
+``clock``           pulses at ``ppqn`` per quarter note (default 4 = sixteenths), 50% duty;
+                    a version-3 score counts beats from the segment's start tick, never
+                    wrapped at the cycle, so the clock runs steadily through cycle wraps
 ``reset``           a trigger on start/resume/seek and at the score/pattern loop boundary
 ``run``             high while the tracker is playing
 ``gate1``-``gate6`` the audio lanes: high for ``gate`` of a row when a hit is there,
@@ -403,7 +405,11 @@ class TrackerCV:
         self._follower.forget(u[0])
         for column, (channel, name) in enumerate(self.mapping.items()):
             if name == 'clock':
-                out[:, column] = ((np.mod(beat * self.ppqn, 1.) < .5) & moving) * self.high
+                # Elapsed beats from the segment's start tick, never wrapped at the cycle, so the
+                # clock runs steadily through wraps (cv-semantics.md). Gorgon's Rack engine uses
+                # this exact expression and its CI compares the two sample by sample: keep the form.
+                b = (snapshot['start']['tick'] + u) / tracker_v3.TICKS
+                out[:, column] = ((np.mod(b * self.ppqn, 1.) < .5) & moving) * self.high
             elif name == 'reset':
                 out[:, column] = ((reset | (beat < self.reset_s * d['bpm'] / 60)) & moving) * self.high
             elif name == 'run':

@@ -83,7 +83,9 @@ Studio's existing execution and hardware staging rules.
 - **Save session** writes `.hydrapy/tracker.json` and downloads JSON.
   **Restore saved score** or **Import score** reloads it explicitly. Browser reload
   reconnects to the server score. Edits are validated and revision-checked;
-  concurrent edits cannot silently overwrite a newer score. Switching Studio's
+  concurrent edits cannot silently overwrite a newer score. A score of any version
+  holding `NaN` or `Infinity` anywhere, even in a key Studio doesn't know, is
+  rejected, since neither is JSON for the browser or Rack. Switching Studio's
   displayed output is not an edit: an open tracker keeps working, and the new
   program output is kept. Restarting Studio
   starts with the initial study until Restore is chosen. Transport and blackout
@@ -218,7 +220,7 @@ Channel numbers count from 0, as `CvOut` does. Choose signals explicitly with
 
 | Signal | Voltage |
 | --- | --- |
-| `clock` | 5 V pulses, `--cv-ppqn` per quarter note (default 4: sixteenths), 50% duty |
+| `clock` | 5 V pulses, `--cv-ppqn` per quarter note (default 4: sixteenths), 50% duty; in a version-3 score it counts elapsed beats from the transport's start tick, so it runs steadily through cycle wraps |
 | `reset` | 5 ms, 5 V on start/resume/seek and at the score or pattern-loop boundary |
 | `run` | 5 V while the tracker is playing |
 | `gate1`–`gate6` | 5 V for half a row on each audio-lane hit; muted lanes send nothing |
@@ -240,6 +242,15 @@ A seek or start reaches the audio callback up to a frame and a block late; if th
 is after its row's gate would have closed, the hit it landed on still plays, late,
 for up to its usual length. A seek that interrupts an open gate closes it for 1 ms
 first, so the hit it lands on triggers again (Gorgon's `spec/cv-semantics.md`).
+
+In a version-3 score the clock is high while `frac(b · ppqn) < 0.5`, where `b` is
+the start tick of the current transport segment plus the ticks elapsed since, in
+beats, never wrapped at the cycle. It lines up with the cycle beat at every start,
+resume and seek, then keeps its period through every cycle wrap, so a cycle that
+is not a whole number of clock periods (a looped 5-row pattern at rate 2, or 3 rows
+at rate 8, shorter than half a period) neither cuts a pulse short nor merges two.
+`reset` still pulses at every wrap. Versions 1 and 2 loop in whole beats, where the
+two rules agree.
 
 `--cv-offset-ms` sends the voltages earlier (positive) or later (negative) than
 the picture. Set it after the click-and-flash comparison below, using a gate into
@@ -358,9 +369,11 @@ Import does.
   window Studio drops or refuses is a line too, `{"bus": {"window": "dropped" or
   "refused", "reason", "from"}, "received"}`: `dropped` with reason `stale segment`
   for a window of an old segment, `refused` with reason `bus held by another
-  module` for one from a module that doesn't hold the layer. `from` is the
-  window's first tick and `received` the first tick Studio's outputs hadn't
-  evaluated when it arrived. Like every line, these carry `transport_revision`
+  module` for one from a module that doesn't hold the layer, and `refused` with
+  reason `malformed window` for one that fails validation (still answered with a
+  400). `from` is the window's first tick (`null` for a malformed window whose
+  `from` isn't a non-negative integer) and `received` the first tick Studio's
+  outputs hadn't evaluated when it arrived. Like every line, these carry `transport_revision`
   and `start`.
 
 ## Preview and measurements
