@@ -30,6 +30,48 @@ test('versions 1 and 2 round-trip through the editor unchanged', () => {
   }
 });
 
+test('old-format metadata named rate, bar, bars or lanes survives the editor (#31)', () => {
+  // Unknown pattern keys in a version-1 or 2 score are metadata; version 3 gives these names
+  // meanings, so the editor keeps the originals aside and puts them back on the way out.
+  for (const format of ['hydrapy-tracker-1', 'hydrapy-tracker-2']) {
+    const old = demo();
+    old.format = format;
+    if (format === 'hydrapy-tracker-2') old.sounds = Array.from({length: 4}, () => ({machine: null, params: {}}));
+    old.patterns[0].rate = 2;
+    old.patterns[1].bar = 8;
+    old.patterns[1].bars = 'two';
+    old.patterns[2].lanes = [{note: 'metadata'}];
+    old.patterns[3].legacyMeta = {mine: true};        // even the editor's own private name
+    const kept = incoming(old);
+    assert.deepEqual([kept.patterns[0].rate, kept.patterns[1].bar, kept.patterns[1].bars], [1, 16, 4]);
+    assert.equal(kept.patterns[2].lanes.length, 6);
+    assert.deepEqual(outgoing(kept), old);
+    // An edit the old format holds keeps them too.
+    kept.patterns[0].lanes[0].cells[3] = {note: 'C-4', vel: 90};
+    assert.equal(settleFormat(kept), false);
+    const saved = outgoing(kept);
+    assert.equal(saved.patterns[0].rate, 2);
+    assert.equal(saved.patterns[1].bar, 8);
+    assert.deepEqual(saved.patterns[2].lanes, [{note: 'metadata'}]);
+    assert.deepEqual(saved.patterns[3].legacyMeta, {mine: true});
+    assert.deepEqual(incoming(saved).patterns[0].lanes[0].cells[3], {note: 'C-4', vel: 90});
+    // An upgrade gives the names their version-3 meanings and drops the private key, in the
+    // same undo step as the edit (settleFormat runs inside it), so no version-3 score carries it.
+    const s = incoming(old);
+    s.seed = 7;
+    assert.equal(settleFormat(s), true);
+    const v3 = outgoing(s);
+    assert.equal(v3.format, 'hydrapy-tracker-3');
+    assert(v3.patterns.every(p => p === null || !('legacyMeta' in p)));
+    assert.deepEqual([v3.patterns[0].rate, v3.patterns[1].bar, v3.patterns[1].bars], [1, 16, 4]);
+  }
+  // A native version-3 score keeps every unknown key, the private name included.
+  const native = upgrade(demo());
+  native.seed = 3;
+  native.patterns[0].legacyMeta = {theirs: 1};
+  assert.deepEqual(outgoing(incoming(native)), native);
+});
+
 test('an edit a version-2 score can’t hold upgrades it; one it can keeps the format', () => {
   const score = incoming(demo());
   score.patterns[0].lanes[0].cells[3] = {note: 'C-4', vel: 90, locks: {p1: 2}};

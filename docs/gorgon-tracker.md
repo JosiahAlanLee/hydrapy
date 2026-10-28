@@ -280,10 +280,13 @@ this page describes Studio's implementation of them. On start Studio writes
 removes it on exit if it is still its own. Set `HYDRAPY_STUDIO_FILE` to use another
 path. The module reads that file and polls Studio on loopback.
 
-GorgonBridge 2.0.1 puts the score's clock, gates, held velocities and automation
-on Rack jacks, with gates and unipolar lanes at 10 V. Its polyphonic **V/OCT** jack
-carries four held pitches (1 V/oct, C4 = 0 V by default; C3 is selectable). Notes,
-key transposition, AIR, velocity zero and mute follow direct CV semantics. Reset
+GorgonBridge 2.4.0 puts the score's clock, gates, held velocities and automation
+on Rack jacks, with gates and unipolar lanes at 10 V. It has one channel per audio
+lane: six for a version-3 score (GATE 1–6, and six channels on the polyphonic
+**GATES**, **VEL** and **V/OCT** jacks), four for versions 1 and 2, where GATE 5 and 6
+stay low. **V/OCT** carries the held pitches (1 V/oct, C4 = 0 V by default; C3 is
+selectable). Notes, key transposition, AIR, velocity zero and mute follow direct CV
+semantics. Reset
 is latched on start/resume/seek so a late network update cannot skip the pulse.
 The module generates signals per sample from Studio's playhead. It also
 sends values back: four CV inputs set the patch's named controls (0–10 V spans
@@ -329,7 +332,9 @@ opposite. **Score seed** (Pattern tools) drives every `%` and `degrade`.
 A version-1 or 2 score stays in its format while the edits fit it. The first edit
 that needs version 3 (a fifth lane, a pattern past A04, a rate, a length, a
 condition, a transform, the chain or the seed) upgrades the score, and undo
-restores its old format. An edit that changes nothing, such as Delete on an empty
+restores its old format. Until then its patterns' own keys come back unchanged,
+including metadata named `rate`, `bar`, `bars` or `lanes`; an upgrade gives those
+names their version-3 meanings. An edit that changes nothing, such as Delete on an empty
 pattern, leaves the score alone. Three transport actions select a pattern past A04
 to play, which only version 3 can hold, so they upgrade the score without an undo
 step: launching one, turning ↻ on while editing one, and seeking to a row of one

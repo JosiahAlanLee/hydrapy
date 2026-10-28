@@ -7,9 +7,12 @@
 // when it arrives and marked `legacy`, and goes back to Studio in its own format while it still
 // fits there: opening or saving never upgrades a score. The first edit it can't hold (a fifth
 // lane, a pattern past A04, a rate, a condition…) drops `legacy`, so the score upgrades, and
-// undo restores it.
+// undo restores it. An old pattern's own keys named like version 3's (`rate`, `bar`, `bars`,
+// `lanes`) are unknown metadata there; while the score is `legacy` each pattern keeps them
+// under the private key LEGACY_META, which downgrade puts back and an upgrade drops.
 export const FORMAT = 'hydrapy-tracker-3', TICKS = 1920, LANE_COUNT = 6, PATTERN_COUNT = 128;
 export const RATES = [.25, .5, 1, 2, 4, 8];
+const LEGACY_META = 'legacyMeta', COLLIDING = ['rate', 'bar', 'bars', 'lanes', LEGACY_META];
 const PROB = 0x70726f62, DEGRADE = 0x64656772;       // "prob" and "degr", chance's salts
 const clone = value => structuredClone(value);
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -40,7 +43,10 @@ export function upgrade(document) {
   for (const p of d.patterns) {
     const cells = [...p.audio, Array(64).fill(null), Array(64).fill(null)];
     delete p.audio;
+    const meta = Object.fromEntries(COLLIDING.filter(key => key in p).map(key => [key, p[key]]));
+    delete p[LEGACY_META];
     Object.assign(p, {rate: 1, bar: 16, bars: 4, lanes: cells.map(c => ({len: 64, cells: c, transforms: []}))});
+    if (Object.keys(meta).length) p[LEGACY_META] = meta;
   }
   d.patterns = [...d.patterns, ...Array(PATTERN_COUNT - 4).fill(null)];
   return d;
@@ -74,9 +80,9 @@ export function downgrade(score, format) {
   d.patterns = d.patterns.slice(0, 4).map((p, i) => {
     p = p ?? emptyPattern(i);
     const out = {};
-    for (const [key, value] of Object.entries(p)) if (!['rate', 'bar', 'bars', 'lanes'].includes(key)) out[key] = value;
+    for (const [key, value] of Object.entries(p)) if (!COLLIDING.includes(key)) out[key] = value;
     out.audio = p.lanes.slice(0, 4).map(lane => lane.cells);
-    return out;
+    return Object.assign(out, p[LEGACY_META]);
   });
   return d;
 }
@@ -96,6 +102,8 @@ export function outgoing(score) {
 
 // After an edit: keep the old format if the score still fits it, moving a version-1 score to
 // version 2 for sound locks, as the editor always has; else upgrade. Returns true on upgrade.
+// An upgrade drops the kept old-format metadata, as score-v3.md's mapping does, so no version-3
+// score carries LEGACY_META; undo brings it back with the old format.
 export function settleFormat(score) {
   if (!score.legacy || fits(score, score.legacy)) return false;
   if (score.legacy === 'hydrapy-tracker-1' && fits(score, 'hydrapy-tracker-2')) {
@@ -103,6 +111,7 @@ export function settleFormat(score) {
     return false;
   }
   delete score.legacy;
+  for (const p of score.patterns) if (p) delete p[LEGACY_META];
   return true;
 }
 
