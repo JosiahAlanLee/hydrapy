@@ -98,13 +98,15 @@ class GLRenderer:
         self.media: dict[str, object] = {}
         from .nca import NCA
         self._ncas: dict = {}
-        self._nca_refs, self._sims = [], []
+        self._nca_refs, self._sims, self._keeping_up = [], [], []
         for prog in self.programs:
             for u in prog.sampler_uniforms:
                 if isinstance(u.source, NCA) and u.source not in self._nca_refs:
                     self._nca_refs.append(u.source)
                 elif hasattr(u.source, "gl_step") and u.source not in self._sims:
                     self._sims.append(u.source)
+                elif hasattr(u.source, "keep_up") and u.source not in self._keeping_up:
+                    self._keeping_up.append(u.source)      # stepped every frame, drawn only when a pass binds it
         self._blank = self.ctx.texture((1, 1), 4, data=bytes([0, 0, 0, 255]))
 
     @property
@@ -533,6 +535,8 @@ class GLRenderer:
             self._step_ncas(ctx)
         for sim in self._sims:
             sim.gl_step(self, ctx)
+        for source in self._keeping_up:
+            source.keep_up(ctx.time)
         values = {}
 
         def value(source):                   # each signal once per frame, shared by every pass that uses it

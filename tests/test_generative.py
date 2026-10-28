@@ -66,6 +66,26 @@ def test_cellular_animation_is_fps_independent_and_replayable():
     assert not np.array_equal(sources[2].frame_at(2.04), expected)
 
 
+def test_hidden_cellular_keeps_up_so_its_scene_returns_without_a_stall():
+    import time
+    p = H.Patch(size=(64, 36))
+    cells = H.Cellular(width=320, height=180, rate=120, seed=3)
+    H.solid(0, 0, 0).out(p.o0, patch=p)
+    H.scene('plain', patch=p)(lambda: H.solid(.2, .2, .2))
+    H.scene('cells', patch=p)(lambda: H.src(cells))
+    p.scene_weights = {'plain': 1.0, 'cells': 0.0}
+    r = GLRenderer(p, size=(64, 36), ctx=_create_context(), fps=30)
+    for k in range(30 * 20):                     # twenty seconds with the automaton's scene hidden
+        r.step(k / 30)
+    assert cells._generation == 599 * 4           # kept up while hidden: 120 generations a second
+    p.scene_weights = {'plain': 0.0, 'cells': 1.0}
+    t0 = time.perf_counter()
+    r.step(600 / 30)
+    assert time.perf_counter() - t0 < .05        # no replay of 2400 generations on the way back
+    fresh = H.Cellular(width=320, height=180, rate=120, seed=3)
+    np.testing.assert_array_equal(fresh.frame_at(600 / 30), cells.frame_at(600 / 30))   # still a function of time
+
+
 def test_cellular_glyphs_and_python_roundtrip():
     c = H.Cellular(width=12, height=8, chars=" .:+#", cell=(8, 12), seed=3)
     assert c.frame_at(0).shape == (96, 96, 4)
