@@ -52,6 +52,29 @@ def test_rejected_score_does_not_change_the_running_document(change):
     assert tracker.revision == 0
 
 
+@pytest.mark.parametrize('fmt', ['hydrapy-tracker-1', 'hydrapy-tracker-2'])
+@pytest.mark.parametrize('where', [
+    lambda d, x: d.update(x_note=x),                                          # an unknown key at the top
+    lambda d, x: d.update(x_editor={'zoom': [1, x]}),                         # nested in one
+    lambda d, x: d['patterns'][1].update(x_pattern=x),                        # in a pattern
+    lambda d, x: d['patterns'][1]['audio'][2].__setitem__(0, {'note': 'C-4', 'vel': 90, 'x_hit': x}),   # in a hit
+    lambda d, x: d['patterns'][0]['keys']['z'].insert(1, {'r': 3, 'v': .5, 'x_key': [x]}),
+])
+@pytest.mark.parametrize('value', [float('nan'), float('inf'), float('-inf')])
+def test_versions_1_and_2_reject_non_finite_numbers_in_unknown_keys(fmt, where, value):
+    """As version 3 does (score-v3.md): NaN and Infinity aren't JSON for the browser or Rack."""
+    d = score()
+    d['format'] = fmt
+    if fmt == 'hydrapy-tracker-2':
+        d['sounds'] = [{'machine': None, 'params': {}} for _ in range(4)]
+    validate(d)
+    where(d, value)
+    with pytest.raises(ValueError, match=r'A score holds only finite numbers \(no NaN or Infinity\)'):
+        validate(d)
+    with pytest.raises(ValueError, match='finite'):                           # what Studio parses from a body
+        validate(json.loads(json.dumps(d)))
+
+
 @pytest.mark.parametrize('key', [0, 2, 5, 7, 0., 2., 5., 7.])
 def test_numeric_keys_keep_the_existing_transposition(key):
     from hydrapy.tracker_cv import TrackerCV

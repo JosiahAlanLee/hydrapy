@@ -168,12 +168,15 @@ def validate(document):
     for p in d['patterns']:
         if p is not None:
             _pattern(p)
-    _finite(d)
+    finite(d)
     return d
 
 
-def _finite(document):
-    """score-v3.md: non-finite numbers are rejected everywhere, in the unknown keys a score keeps too."""
+def finite(document):
+    """score-v3.md: non-finite numbers are rejected everywhere, in the unknown keys a score keeps too.
+
+    Version-1 and 2 scores follow the same rule (studio_tracker.validate).
+    """
     stack = [document]
     while stack:
         value = stack.pop()

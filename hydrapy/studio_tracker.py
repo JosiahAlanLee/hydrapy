@@ -83,6 +83,7 @@ def validate(document):
                     note_midi(hit.get('note'))
                     number(hit.get('vel'), 0, 127, 'Velocity')
         validate_automation(p, 64)
+    tracker_v3.finite(d)        # in the unknown keys a score keeps too, as version 3 (score-v3.md)
     return d
 
 
@@ -583,18 +584,14 @@ class Tracker:
         if not isinstance(sender, str) or not re.fullmatch(r'[0-9a-f]{16}', sender):
             raise ValueError('sender is 16 hexadecimal digits')
         first = window.get('from') if isinstance(window, dict) else None
-        if type(first) is not int or first < 0 or set(window) != {'from', 'fill', 'mutes'} or \
-                not isinstance(window['mutes'], list) or len(window['mutes']) != 6:
-            raise ValueError('A bus window is {from, fill, mutes}: a tick and seven lists')
-        lists = [window['fill'], *window['mutes']]
-        for transitions in lists:
-            if not isinstance(transitions, list) or not transitions or any(
-                    not isinstance(t, dict) or set(t) != {'at', 'on'} or type(t['at']) is not int or type(t['on']) is not bool
-                    for t in transitions):
-                raise ValueError('Each bus list holds {at, on} transitions')
-            ats = [t['at'] for t in transitions]
-            if ats[0] != first or ats != sorted(ats):
-                raise ValueError('Each bus list starts at the window\'s from and is sorted')
+        try:
+            lists = self._window_lists(window, first)
+        except ValueError:
+            # Traced like a window refused for the lease (evaluator.md#trace); still a 400.
+            traced = first if type(first) is int and first >= 0 else None
+            self._trace({'bus': {'window': 'refused', 'reason': 'malformed window', 'from': traced},
+                         'received': received})
+            raise
         self.expire(wall, received)
         if self.lease and self.lease[0] != sender:
             self._trace({'bus': {'window': 'refused', 'reason': 'bus held by another module', 'from': first},
@@ -616,6 +613,23 @@ class Tracker:
                     self._trace({'bus': change, 'received': received})
         self.bus = {'fill': new[0], 'mutes': new[1:]}
         return True
+
+    @staticmethod
+    def _window_lists(window, first):
+        """A bus window's seven transition lists, fill first; ValueError if it is malformed."""
+        if type(first) is not int or first < 0 or set(window) != {'from', 'fill', 'mutes'} or \
+                not isinstance(window['mutes'], list) or len(window['mutes']) != 6:
+            raise ValueError('A bus window is {from, fill, mutes}: a tick and seven lists')
+        lists = [window['fill'], *window['mutes']]
+        for transitions in lists:
+            if not isinstance(transitions, list) or not transitions or any(
+                    not isinstance(t, dict) or set(t) != {'at', 'on'} or type(t['at']) is not int or type(t['on']) is not bool
+                    for t in transitions):
+                raise ValueError('Each bus list holds {at, on} transitions')
+            ats = [t['at'] for t in transitions]
+            if ats[0] != first or ats != sorted(ats):
+                raise ValueError('Each bus list starts at the window\'s from and is sorted')
+        return lists
 
     def expire(self, wall, stamp):
         """End a lease 3 s after its sender's last request: the layer clears from ``stamp``."""
