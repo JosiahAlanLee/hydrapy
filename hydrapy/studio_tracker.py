@@ -305,8 +305,11 @@ class LaneState:
         return dict(gate=gate, since=list(self.since), note=list(self.note), vel=list(self.vel),
                     beat=beat, row=float(current % 64))
 
-    def update_v3(self, snapshot, u, moving):
-        """``update`` for a version-3 score, at elapsed tick ``u`` of the playhead ``snapshot``."""
+    def update_v3(self, snapshot, u, moving, begin=None):
+        """``update`` for a version-3 score, at elapsed tick ``u`` of the playhead ``snapshot``.
+
+        ``begin``: where a segment heard from its start begins following (default ``u``); a follower reading
+        ahead of the playhead begins at the playhead, so it doesn't skip what lies between."""
         d = snapshot['document']
         segment = (snapshot['transport_revision'], snapshot['start']['tick'])
         if segment != self.segment:
@@ -318,7 +321,7 @@ class LaneState:
             if live or self.transport is None:
                 self.__init__()
             self.transport, self.segment, self.started = snapshot['transport_revision'], segment, [None] * 6
-            self._follower.begin(-tracker_v3.TICKS if live else math.floor(u), segment)
+            self._follower.begin(-tracker_v3.TICKS if live else math.floor(u if begin is None else begin), segment)
         self.moving = moving
         beat, _, row = tracker_v3.position(d, snapshot['start']['tick'], [u])
         gate = [0.] * 6
@@ -403,6 +406,7 @@ class Tracker:
         self.lease = None           # [sender, monotonic time of its last request]
         self.trace = None           # a text file that takes JSONL trace lines, or None
         self._lanes = LaneState()
+        self._ahead = {}            # seconds -> a LaneState following that far ahead (tracker.ahead)
         if self.v3:
             self._segment(0, 0.)
 
@@ -689,6 +693,10 @@ class Tracker:
         patch.tracker_frame = self._lanes.update_v3(playhead, u, self.enabled)
         for c in self._lanes.new:
             self._trace(c)
+        for ahead in list(patch.tracker_ahead):
+            lanes = self._ahead.setdefault(ahead, LaneState())
+            lead = ahead * self.document['bpm'] / 60 * tracker_v3.TICKS if self.enabled else 0.
+            patch.tracker_ahead[ahead] = lanes.update_v3(playhead, u + lead, self.enabled, begin=u)
         if not self.enabled:
             return
         beat, entry, row = tracker_v3.position(self.document, self.start['tick'], [u])

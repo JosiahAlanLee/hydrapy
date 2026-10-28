@@ -501,6 +501,7 @@ class Patch:
         self.scene_bases: dict = {}     # output index -> the chain under that output's scenes
         self.scene_weights = None       # name -> 0..1, set by the tracker each frame; None = not driven
         self.tracker_frame = None       # the tracker's lane values this frame (scenes.TrackerSignal)
+        self.tracker_ahead: dict = {}   # seconds -> the lane values that far ahead in the score (tracker.ahead)
 
     def assign(self, output: Output, chain: Chain):
         # outputs are matched by index, so the global o0..o3 work with any patch
