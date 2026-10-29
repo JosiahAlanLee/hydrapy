@@ -98,13 +98,15 @@ class GLRenderer:
         self.media: dict[str, object] = {}
         from .nca import NCA
         self._ncas: dict = {}
-        self._nca_refs, self._sims = [], []
+        self._nca_refs, self._sims, self._keeping_up = [], [], []
         for prog in self.programs:
             for u in prog.sampler_uniforms:
                 if isinstance(u.source, NCA) and u.source not in self._nca_refs:
                     self._nca_refs.append(u.source)
                 elif hasattr(u.source, "gl_step") and u.source not in self._sims:
                     self._sims.append(u.source)
+                elif hasattr(u.source, "keep_up") and u.source not in self._keeping_up:
+                    self._keeping_up.append(u.source)      # stepped every frame, drawn only when a pass binds it
         self._blank = self.ctx.texture((1, 1), 4, data=bytes([0, 0, 0, 255]))
 
     @property
@@ -185,6 +187,7 @@ class GLRenderer:
         Changing scene then switches between compiled shaders. Returns the number compiled.
         """
         from .scenes import scene_transforms
+        self.prewarm_banks()                       # scenes are what banks hide in: upload their frames before playing
         transforms = scene_transforms(self.patch)
         if not transforms or not self.specialise:
             return 0
@@ -402,13 +405,7 @@ class GLRenderer:
                     m["version"] = ref.version
             return m["tex"]
         if hasattr(ref, "array_at"):          # Bank, Quilt: one texture per frame, bound by index
-            i = ref.index_at(self.ctx_time)
-            texs = m.setdefault("texs", {})
-            if i not in texs:
-                f = np.ascontiguousarray(ref.frame(i)[::-1])
-                rgba = f if f.shape[-1] == 4 else np.concatenate([f, np.full(f.shape[:2] + (1,), 255, np.uint8)], axis=-1)
-                texs[i] = self.ctx.texture((rgba.shape[1], rgba.shape[0]), 4, data=np.ascontiguousarray(rgba).tobytes())
-            return texs[i]
+            return self._bank_texture(ref, m, ref.index_at(self.ctx_time))
         if isinstance(ref, Video):
             f = (np.clip(ref.frame_at(self.ctx_time), 0, 1) * 255).astype(np.uint8)
             if m["tex"] is None or m["tex"].size != (f.shape[1], f.shape[0]):
@@ -423,6 +420,30 @@ class GLRenderer:
                     m["tex"] = self.ctx.texture((rgba.shape[1], rgba.shape[0]), 4)
                 m["tex"].write(np.ascontiguousarray(rgba).tobytes())
         return m["tex"] or self._blank
+
+    def _bank_texture(self, ref, m, i):
+        texs = m.setdefault("texs", {})
+        if i not in texs:
+            f = np.ascontiguousarray(ref.frame(i)[::-1])
+            rgba = f if f.shape[-1] == 4 else np.concatenate([f, np.full(f.shape[:2] + (1,), 255, np.uint8)], axis=-1)
+            texs[i] = self.ctx.texture((rgba.shape[1], rgba.shape[0]), 4, data=np.ascontiguousarray(rgba).tobytes())
+        return texs[i]
+
+    def prewarm_banks(self) -> int:
+        """Upload every frame of every Bank the patch uses, now: a bank otherwise uploads each frame the first time
+        it shows (a pre-rendered loop's first pass stutters, 10-60 ms a frame). Returns the number uploaded."""
+        count = 0
+        for prog in self.programs:
+            for u in prog.sampler_uniforms:
+                ref = u.source
+                if not (hasattr(ref, "array_at") and hasattr(ref, "count")):
+                    continue
+                m = self.media.setdefault(ref.name, {"tex": None, "ref": ref, "cap": None})
+                for i in range(ref.count):
+                    if i not in m.setdefault("texs", {}):
+                        self._bank_texture(ref, m, i)
+                        count += 1
+        return count
 
     def _bind(self, ref, current: Output):
         if isinstance(ref, DelayRef):
@@ -533,6 +554,8 @@ class GLRenderer:
             self._step_ncas(ctx)
         for sim in self._sims:
             sim.gl_step(self, ctx)
+        for source in self._keeping_up:
+            source.keep_up(ctx.time)
         values = {}
 
         def value(source):                   # each signal once per frame, shared by every pass that uses it

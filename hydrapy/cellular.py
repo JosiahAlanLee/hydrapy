@@ -173,12 +173,18 @@ class Cellular(FrameSource):
             self._atlas = np.array(atlas)
         return self._atlas
 
-    def _draw(self, t):
+    def keep_up(self, t):
+        """Step to time ``t`` without drawing. The GL renderer calls this every frame, so an automaton whose
+        scene is hidden keeps up a generation or two at a time, instead of replaying minutes of them on the
+        frame its scene comes back (0.8 s after five minutes at 27 generations a second)."""
         target = max(0, int(math.floor(t * self.rate + 1e-9)))
         if target < self._generation:
             self._reset()
         while self._generation < target:
             self._step()
+
+    def _draw(self, t):
+        self.keep_up(t)
         values = np.concatenate((self._rows[self._head:], self._rows[:self._head]))
         tone = (values.astype(np.float32) / (self.sim.num_states - 1)) ** .4
         if self.chars is None:
