@@ -1,7 +1,7 @@
 """Namagiri theta-series source: Jacobi theta_3(z,q), |q|<1.
 
 theta_3(z,q)=1+2 sum_{n>=1} q^(n*n) cos(2*n*z).
-Finite truncation, bounded to |q|<=0.9 for predictable shader cost.
+Finite truncation, bounded to |q|<=0.9 for predictable shader cost.\nThe terms parameter counts series terms including n=0, matching the GLSL path.
 """
 import numpy as np
 from .core import Op, register
@@ -13,7 +13,7 @@ def _np_thetafield(st, qreal, qimag, scale, phase, terms, env):
     q=complex(float(qreal),float(qimag))
     if abs(q)>.9: q*=.9/abs(q)
     result=np.ones(z.shape,np.complex128)
-    for n in range(1,max(1,min(int(terms),24))+1):
+    for n in range(1,max(1,min(int(terms),24))):
         result+=2*q**(n*n)*np.cos(2*n*z)
     angle=np.angle(result)
     hue=angle/(2*np.pi)
