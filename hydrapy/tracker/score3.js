@@ -11,6 +11,9 @@
 // `lanes`) are unknown metadata there; while the score is `legacy` each pattern keeps them
 // under the private key LEGACY_META, which downgrade puts back and an upgrade drops.
 export const FORMAT = 'hydrapy-tracker-3', TICKS = 1920, LANE_COUNT = 6, PATTERN_COUNT = 128;
+// Keep these format constants aligned with tracker_v3.py.
+export const ROW_TICKS = TICKS / 4, MIN_NOTE_LENGTH = .25, MAX_NOTE_LENGTH = 16;
+export const HOLD_TICKS = MAX_NOTE_LENGTH * ROW_TICKS;
 export const RATES = [.25, .5, 1, 2, 4, 8];
 const LEGACY_META = 'legacyMeta', COLLIDING = ['rate', 'bar', 'bars', 'lanes', LEGACY_META];
 const TOP_COLLIDING = ['chain', 'seed', 'lanes', 'legacy', 'legacyTop'];
@@ -284,7 +287,7 @@ function row(out, score, t, u0, u1, play, entry, p, r, rowAt, w, bar, fill) {
     for (const [s, m, dropped] of events) {
       const at = rowAt + s * w / m;
       const pattern = score.patterns[p];
-      const duration = 'len' in hit ? Math.min(hit.len * 480, rowAt + (pattern.bar * pattern.bars - r) * w - at) : w / m;
+      const duration = 'len' in hit ? Math.min(hit.len * ROW_TICKS, rowAt + (pattern.bar * pattern.bars - r) * w - at) : w / m;
       if (at < u0 || at >= u1 || at + duration <= 0) continue;
       let fires = false, why;
       if (score.mutes[laneIndex]) why = 'muted (score)';
@@ -309,7 +312,7 @@ export function evaluate(score, transport, u0, u1, line = timeline(score)) {
   const first = line.entryAt(a), from = Math.max(u0, 0);
   let cycles = Math.floor((a + from) / cycle), i = line.entryAt((a + from) % cycle);
   let play = cycles * n + i - first, playStart = cycles * cycle + starts[i] - a;
-  let r = Math.max(0, Math.floor((Math.max(u0, -7680) - playStart) / geometry(score.patterns[entries[i]]).w));
+  let r = Math.max(0, Math.floor((Math.max(u0, -HOLD_TICKS) - playStart) / geometry(score.patterns[entries[i]]).w));
   const out = [];
   while (playStart < u1) {
     const p = entries[i], g = geometry(score.patterns[p]);

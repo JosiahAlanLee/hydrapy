@@ -318,7 +318,7 @@ class LaneState:
             if live or self.transport is None:
                 self.__init__()
             self.transport, self.segment, self.started = snapshot['transport_revision'], segment, [None] * 6
-            self._follower.begin(-7680 if live else math.floor(u), segment)
+            self._follower.begin(-tracker_v3.HOLD_TICKS if live else math.floor(u), segment)
         self.moving = moving
         beat, _, row = tracker_v3.position(d, snapshot['start']['tick'], [u])
         gate = [0.] * 6

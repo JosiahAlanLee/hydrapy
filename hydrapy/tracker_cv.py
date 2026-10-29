@@ -353,7 +353,7 @@ class TrackerCV:
         if new_segment:
             # Heard as it starts, from the anchor's row; only the first playhead this
             # output ever sees is joined late, from its own tick (evaluator.md#evaluate).
-            self._follower.begin(-7680 if self._transport is not None else math.floor(u[0]), segment)
+            self._follower.begin(-tracker_v3.HOLD_TICKS if self._transport is not None else math.floor(u[0]), segment)
             self._segment = segment
         if changed or (moving and not self._moving):
             self._reset_remaining = round(self.reset_s * self.samplerate) if moving else 0

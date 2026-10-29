@@ -26,6 +26,10 @@ from .sound_controls import controls, validate_sounds
 
 FORMAT = 'hydrapy-tracker-3'
 TICKS = 1920                    # per quarter note
+ROW_TICKS = TICKS // 4           # base row, independent of pattern rate
+MIN_NOTE_LENGTH = .25
+MAX_NOTE_LENGTH = 16
+HOLD_TICKS = MAX_NOTE_LENGTH * ROW_TICKS  # longest explicit note in ticks
 LANE_COUNT = 6
 PATTERN_COUNT = 128
 RATES = (.25, .5, 1, 2, 4, 8)
@@ -122,7 +126,7 @@ def _pattern(p):
                 studio_tracker.note_midi(hit.get('note'))
                 studio_tracker.number(hit.get('vel'), 0, 127, 'Velocity')
                 if 'len' in hit:
-                    studio_tracker.number(hit['len'], .25, 16, 'Note length')
+                    studio_tracker.number(hit['len'], MIN_NOTE_LENGTH, MAX_NOTE_LENGTH, 'Note length')
                 if 'locks' in hit:
                     controls(hit['locks'], machine=True)
                 if 'cond' in hit:
@@ -392,7 +396,7 @@ def _row(out, score, layers, u0, u1, play, entry, p, row, row_at, w, bar_count, 
             at = row_at + s * step
             pattern = score['patterns'][p]
             end = row_at + (pattern['bar'] * pattern['bars'] - row) * w
-            duration = min(hit['len'] * 480, end - at) if 'len' in hit else step
+            duration = min(hit['len'] * ROW_TICKS, end - at) if 'len' in hit else step
             if not u0 <= at < u1 or (not history and at + duration <= 0):
                 continue
             if score['mutes'][lane_index]:
@@ -436,7 +440,7 @@ def evaluate(score, transport, u0, u1, *, _history=False):
     play = cycles * n + i - first
     play_start = cycles * t.cycle + t.starts[i] - a
     w = geometry(score['patterns'][t.entries[i]])[0]
-    row = max(0, (max(u0, -7680) - play_start) // w)
+    row = max(0, (max(u0, -HOLD_TICKS) - play_start) // w)
     out = []
     while play_start < u1:
         p = t.entries[i]
@@ -563,7 +567,7 @@ class Follower:
         if self._joining:
             # Include ended hits privately: a short hit before the anchor can
             # supersede a long note whose nominal span still covers the seek.
-            prior = evaluate(snapshot['document'], t, max(first, 0) - 7680,
+            prior = evaluate(snapshot['document'], t, max(first, 0) - HOLD_TICKS,
                              max(first, 0), _history=True)
             latest = {}
             for c in prior:

@@ -2,7 +2,7 @@
 // (score3.js): the editor keeps every score that way.
 import {noteMidi, canonicalNote} from './notes.js';
 import {validateLocks} from './sounds.js';
-import {condCode, emptyPattern, geometry, parseCond} from './score3.js';
+import {MIN_NOTE_LENGTH, MAX_NOTE_LENGTH, condCode, emptyPattern, geometry, parseCond} from './score3.js';
 
 export const LANES = ['z', 'roll', 'feedback'];
 const LIMITS = [[0, 1], [-45, 45], [0, .9]];
@@ -200,6 +200,6 @@ export function activity(pattern) {
 export function parseLength(text) {
   if (String(text).trim() === '') return null;
   const value = Number(text);
-  if (!Number.isFinite(value) || value < .25 || value > 16) throw new Error('Note length must be 0.25–16 rows.');
+  if (!Number.isFinite(value) || value < MIN_NOTE_LENGTH || value > MAX_NOTE_LENGTH) throw new Error(`Note length must be ${MIN_NOTE_LENGTH}–${MAX_NOTE_LENGTH} rows.`);
   return value;
 }

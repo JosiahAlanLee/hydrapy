@@ -3,7 +3,7 @@ import {api, PreviewStream} from './backend.js';
 import {noteMidi, noteFrequency, canonicalNote, breaksVoice} from './notes.js';
 import {ScoreHistory, bounds, getCell, putCell, copyBlock, readBlock, pasteBlock, clearBlock,
   transposeBlock, setBlockVelocity, parseLength, pianoNote, activity, SCENE, SCENE_NAME, kindOf, AUDIO, COLUMNS, LANES, rowsOf, keepEmptyNull} from './editor.js';
-import {TICKS, RATES, code, emptyPattern, geometry, incoming, outgoing, settleFormat, timeline, evaluate, stateAt,
+import {TICKS, RATES, MIN_NOTE_LENGTH, MAX_NOTE_LENGTH, code, emptyPattern, geometry, incoming, outgoing, settleFormat, timeline, evaluate, stateAt,
   condCode, parseCond, transformsText, parseTransforms} from './score3.js';
 const $ = id => document.getElementById(id);
 const clamp = (n,a,b) => Math.max(a,Math.min(b,n));
@@ -630,6 +630,8 @@ function updateInspector(){
     $('condInput').disabled=!hit;
     if(document.activeElement!==$('lengthInput'))$('lengthInput').value=hit?.len??'';
     $('lengthInput').disabled=!hit;
+    $('lengthInput').min=MIN_NOTE_LENGTH;
+    $('lengthInput').max=MAX_NOTE_LENGTH;
     if(document.activeElement!==$('laneName'))$('laneName').value=state.lanes[selected.col].name;
     if(document.activeElement!==$('laneLen')){$('laneLen').value=lane.len;$('laneLen').max=g.rows;}
     if(document.activeElement!==$('laneTransforms'))$('laneTransforms').value=transformsText(lane.transforms);
