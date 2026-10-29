@@ -134,6 +134,7 @@ Edit operator declarations, then regenerate this page.
 | `screen` | `amount=1` | **new** | Screen blend. |
 | `overlay` | `amount=1` | **new** | Overlay blend. |
 | `wipe` | `amount=0.5, softness=0.02, angle=0` | **new** | Spatial crossfade along a direction (amount 0..1 sweeps it). |
+| `transition` | `amount=0.5, style=0, softness=0.15, scale=6, seed=0` | **new** | Keyed crossfade, for a scene growing out of the one before it. Amount 0..1 is the scene weight and gates the op like `blend` (exactly the outgoing picture at 0, the incoming at 1). Styles: 0 blend, 1 luma (the incoming picture appears in order of its own luminance, brightest first), 2 shadow (the incoming floods in through the outgoing picture's darkest areas), 3 grain (a noise-threshold dissolve with a soft, textured front). `softness` widens the key edge, `scale` is the grain style's noise scale, `seed` fixes its pattern. The keys use the output's pixel grid, like `wipe`. |
 | `stain` | `density=1` | **new** | Shine the chain through a layer of transparent dye: rgb of the layer is what the dye lets through, alpha its thickness. Multiplicative, like ink; start from solid(1,1,1) as clear leader. |
 | `alpha` | `` | **new** | Set alpha from another chain's luminance without premultiplying (mask() premultiplies). Use it to build dye layers: solid(1,0.2,0.1).alpha(shape(4)). |
 | `bits` | `mode=0, depth=4` | **new** | Bitwise logic between two chains quantised to `depth` bits: mode 0 XOR, 1 AND, 2 OR. Two ramps XORed are the oldest video-synth texture there is. |

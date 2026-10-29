@@ -17,6 +17,16 @@ weight is 1 for the scene playing and 0 for the rest, and crossfades in between.
 so a scene costs nothing while it is not playing; Studio compiles every scene's
 shader when the patch loads, so changing scene never compiles mid-performance.
 
+``scene_transition('luma')`` (before an output's scenes are declared) swaps the
+plain blend for a keyed crossfade, so the incoming scene grows out of the one
+before it instead of a double exposure: 'luma' keys the incoming picture in
+through its own bright areas first, 'shadow' floods it in through the outgoing
+picture's darkness, and 'grain' dissolves through a soft, textured noise front
+(``scene_transition(style, output=o0, softness=..., scale=...)``; styles also
+take numbers 0-3, 0 being 'blend', the default). The transition's amount is the
+scene weight, and it is exactly the identity at 0 and the incoming scene at 1,
+so it gates out of the shader exactly like a blend.
+
 Without the tracker driving them (``hydrapy live``, ``render``, or before the
 tracker first plays), the first scene declared for each output plays, as it
 does for an output whose scenes the score never names. A change holds until the
@@ -48,6 +58,34 @@ from .core import Chain, Output, default_patch, owning_controls
 from .signals import Signal, _num
 
 NAME = re.compile(r'[A-Za-z0-9_-]{1,24}')
+
+TRANSITION_STYLES = {'blend': 0, 'luma': 1, 'shadow': 2, 'grain': 3}
+
+
+def scene_transition(style='blend', output: Output | None = None, softness=0.15, scale=6, patch=None):
+    """Choose how this output's scenes crossfade. Call before their scenes are declared.
+
+    ``style`` is 'blend', 'luma', 'shadow' or 'grain' (or 0-3); the default 'blend' is today's
+    crossfade. ``softness`` is the width of the key's edge and ``scale`` the grain style's noise
+    scale (see the ``transition`` op). Applies to every scene declared for ``output`` afterwards;
+    a later call before the scenes replaces the choice.
+    """
+    p = patch or default_patch()
+    index = (output or p.o0).index
+    if isinstance(style, str):
+        if style not in TRANSITION_STYLES:
+            raise ValueError("scene_transition style is 'blend', 'luma', 'shadow' or 'grain'")
+        style = TRANSITION_STYLES[style]
+    if isinstance(style, bool) or not isinstance(style, int) or not 0 <= style <= 3:
+        raise ValueError("scene_transition style is 'blend', 'luma', 'shadow' or 'grain' (or 0-3)")
+    if any(i == index for i, _, _ in p.scenes.values()):
+        raise ValueError(f'scene_transition must be called before o{index}\'s scenes are declared')
+    softness, scale = float(softness), float(scale)
+    if softness < 0:
+        raise ValueError('scene_transition softness must be >= 0')
+    if not 0 < scale:
+        raise ValueError('scene_transition scale must be > 0')
+    p.scene_styles[index] = (style, softness, scale)
 
 
 class SceneWeight(Signal):
@@ -97,7 +135,12 @@ def scene(name, output: Output | None = None, *, patch=None):
             from . import solid
             p.scene_bases[index] = p.outputs[index].chain or solid(0, 0, 0, 1)
         composed = p.outputs[index].chain if any(i == index for i, _, _ in scenes.values()) else p.scene_bases[index]
-        composed = composed.blend(chain, SceneWeight(name, p))
+        style = p.scene_styles.get(index)
+        if style and style[0] != 0:
+            composed = composed.transition(chain, SceneWeight(name, p), style=style[0],
+                                           softness=style[1], scale=style[2])
+        else:
+            composed = composed.blend(chain, SceneWeight(name, p))
         scenes[name] = (index, chain, composed.transforms[-1])
         p.outputs[index].chain = composed
         return fn
@@ -119,7 +162,8 @@ def check_scenes(patch):
 
 
 def scene_transforms(patch):
-    """name -> the blend transform that draws it (its gate in the GL renderer)."""
+    """name -> the transform that draws it (its gate in the GL renderer): a blend, or a
+    transition when the output's scenes were declared after ``scene_transition``."""
     return {name: transform for name, (_, _, transform) in patch.scenes.items()}
 
 

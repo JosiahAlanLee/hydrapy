@@ -159,7 +159,7 @@ def function_source(op: Op) -> str:
 # input sits there (``gates`` + ``compile_output(skip=...)``), so a layer that is faded out, or a
 # section of a piece that isn't playing, costs nothing on the GPU.  User ops can set ``Op.identity``.
 IDENTITY_AT = {name: ("amount", 0.0) for name in ("blend", "add", "sub", "mult", "lighten", "darken", "screen", "overlay",
-                                                   "modulate", "displace", "invert", "brightness", "swirl", "tine")}
+                                                   "modulate", "displace", "invert", "brightness", "swirl", "tine", "transition")}
 IDENTITY_AT["ripple"] = ("amplitude", 0.0)
 
 

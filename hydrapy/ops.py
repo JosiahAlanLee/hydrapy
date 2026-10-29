@@ -893,6 +893,64 @@ register(Op("wipe", "combine", [Input("tex", "chain"), F("amount", 0.5), F("soft
   return mix(_c0, _c1, m);"""))
 
 
+def _np_transition(c0, c1, amount, style, softness, scale, seed, env):
+    am = _amt(amount)
+    k = int(style)
+    if k not in (1, 2, 3):
+        return c0 * (1.0 - am) + c1 * am          # style 0: bit-identical to blend
+    # The threshold centre sweeps 1+softness -> -softness, so the softness-wide edge clears the
+    # full key range by each end: amount 0 is exactly c0 and amount 1 exactly c1.
+    s = bc(np.maximum(np.asarray(softness, dtype=np.float32), np.float32(1e-4)), c0)
+    th = bc(np.float32(1.0) + s, c0) * (np.float32(1.0) - am) - s * am
+    if k == 1:
+        l = np.clip(lum(c1[..., :3]), 0.0, 1.0)   # incoming's own luminance: brightest first
+    elif k == 2:
+        l = np.clip(lum(c0[..., :3]), 0.0, 1.0)   # outgoing's luminance: darkest areas first
+        l = np.float32(1.0) - l
+    else:
+        p = env.base_st * bc(scale, c0)[..., None] + np.stack([bc(seed, c0) * np.float32(12.9898),
+                                                               bc(seed, c0) * np.float32(78.233)], axis=-1)
+        i = np.floor(p)
+        f = p - i
+        f = f * f * (np.float32(3.0) - np.float32(2.0) * f)
+        l = mix(mix(h21(i), h21(i + (1, 0)), f[..., 0]),
+                mix(h21(i + (0, 1)), h21(i + (1, 1)), f[..., 0]), f[..., 1])
+    m = smoothstep(th - s, th + s, l)
+    return mix(c0, c1, m[..., None])
+
+
+register(Op("transition", "combine",
+            [Input("tex", "chain"), F("amount", 0.5), I("style", 0), F("softness", 0.15), F("scale", 6), F("seed", 0)],
+            np=_np_transition,
+            doc="Keyed crossfade, for a scene growing out of the one before it. Amount 0..1 is the scene "
+                "weight and gates the op like `blend` (exactly the outgoing picture at 0, the incoming at 1). "
+                "Styles: 0 blend, 1 luma (the incoming picture appears in order of its own luminance, "
+                "brightest first), 2 shadow (the incoming floods in through the outgoing picture's darkest "
+                "areas), 3 grain (a noise-threshold dissolve with a soft, textured front). `softness` widens "
+                "the key edge, `scale` is the grain style's noise scale, `seed` fixes its pattern. The keys "
+                "use the output's pixel grid, like `wipe`.",
+            glsl="""float s = max(softness, 0.0001);
+  float th = mix(1.0 + s, -s, amount);
+  if (style == 1) {
+    float l = clamp(_luminance(_c1.rgb), 0.0, 1.0);
+    return mix(_c0, _c1, smoothstep(th - s, th + s, l));
+  }
+  if (style == 2) {
+    float l = clamp(_luminance(_c0.rgb), 0.0, 1.0);
+    return mix(_c0, _c1, smoothstep(th - s, th + s, 1.0 - l));
+  }
+  if (style == 3) {
+    vec2 p = gl_FragCoord.xy/resolution*scale + vec2(seed*12.9898, seed*78.233);
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f*f*(3.0 - 2.0*f);
+    float n = mix(mix(_h21(i), _h21(i + vec2(1.0, 0.0)), f.x),
+                  mix(_h21(i + vec2(0.0, 1.0)), _h21(i + vec2(1.0, 1.0)), f.x), f.y);
+    return mix(_c0, _c1, smoothstep(th - s, th + s, n));
+  }
+  return _c0*(1.0-amount)+_c1*amount;"""))
+
+
 # =============================================================================
 # MODULATE (combineCoord) OPS
 # =============================================================================
