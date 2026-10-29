@@ -231,3 +231,17 @@ def test_flora_schema_projection_and_detail(tmp_path):
     assert np.allclose(H.flora_lines(model, azimuth=90, elevation=0)[0], [[0, 0], [-2, 3]])
     with pytest.raises(ValueError, match="wisconsin-flora-1"):
         H.flora_lines({})
+
+
+def test_prewarm_banks_uploads_every_frame_before_it_shows():
+    frames = [np.full((8, 12, 3), k * 20, np.uint8) for k in range(6)]
+    bank = H.Bank(frames, rate=6)
+    p = H.Patch(size=(12, 8))
+    H.src(bank).out(p.o0, patch=p)
+    r = GLRenderer(p, size=(12, 8), ctx=_create_context(), fps=6)
+    assert r.prewarm_banks() == 6 and r.prewarm_banks() == 0          # all six now, none twice
+    texs = r.media[bank.name]['texs']
+    for k in range(6):                                                  # playing them uploads nothing new
+        r.step(k / 6)
+        assert len(texs) == 6
+    assert r.prewarm_scenes() == 0 and len(texs) == 6                   # prewarm_scenes warms banks too (none left)
