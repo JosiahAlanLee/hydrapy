@@ -154,7 +154,9 @@ class Lines(Texture):
 
     ``source``: a list of polylines ``[[(x, y), ...], ...]`` in 0..1 coordinates (y up), or a
     path to an SVG, or SVG text.  SVGs are flattened (paths, polylines, polygons, lines, rects,
-    circles, ellipses, with transforms) and fitted into the canvas with ``margin``.
+    circles, ellipses, with transforms) and fitted into the canvas with ``margin``; with
+    ``fit=False`` an SVG's own frame (its viewBox, else width and height) is the canvas, so a
+    layout drawn for that frame keeps its place.
     ``stroke`` is in canvas pixels.  rgb = ``color``, alpha = ink.
     """
 
@@ -177,6 +179,12 @@ class Lines(Texture):
                 text = open(src, encoding="utf-8").read() if os.path.isfile(src) else src
                 polys = parse_svg(text)
                 flip = True if self.flip_y is None else self.flip_y      # SVG y runs down
+                frame = None if self.fit else svg_frame(text)
+                if frame:                                                # its frame becomes 0..1
+                    vx, vy, vw, vh = frame
+                    polys = [[((x - vx) / vw, (1 - (y - vy) / vh) if flip else (y - vy) / vh) for x, y in p]
+                             for p in polys]
+                    flip = False
             else:
                 polys = [list(map(tuple, p)) for p in src]
                 flip = False if self.flip_y is None else self.flip_y
@@ -430,6 +438,22 @@ def parse_path(d: str) -> list[Polyline]:
     if cur:
         polys.append(cur)
     return polys
+
+
+def svg_frame(text: str):
+    """An SVG document's frame as (x, y, width, height) in user units: its viewBox, else its width and
+    height (unitless or px), else None."""
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(text)
+    box = [float(v) for v in _NUM.findall(root.get("viewBox") or "")]
+    if len(box) == 4 and box[2] > 0 and box[3] > 0:
+        return tuple(box)
+    size = [root.get("width", ""), root.get("height", "")]
+    if all(re.fullmatch(r"\s*[-+0-9.eE]+\s*(px)?\s*", v) for v in size):
+        w, h = (float(re.sub(r"px", "", v)) for v in size)
+        if w > 0 and h > 0:
+            return (0.0, 0.0, w, h)
+    return None
 
 
 def parse_svg(text: str) -> list[Polyline]:
