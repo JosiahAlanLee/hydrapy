@@ -142,6 +142,19 @@ def glctx():
     ctx.release()
 
 
+def test_prewarm_scenes_draws_text_and_lines_before_their_scene_shows(glctx):
+    from hydrapy.drawing import Lines, Text
+    p = H.Patch(size=(32, 18))
+    words, strokes = Text('FAULT', size=.4), Lines([[(0, 0), (1, 1)]], stroke=2)
+    H.scene('words', patch=p)(lambda: H.src(words))
+    H.scene('strokes', patch=p)(lambda: H.src(strokes))
+    r = GLRenderer(p, size=(32, 18), ctx=glctx, fps=30)
+    assert words.name not in r.media and strokes.name not in r.media
+    r.prewarm_scenes()
+    assert r.media[words.name]['tex'] is not None and r.media[strokes.name]['tex'] is not None
+    assert r.prewarm_media() == 0                                        # none twice
+
+
 def test_frame_source_cpu_gl_orientation_alpha_resize_and_bounded_texture(glctx):
     def draw(t):
         h = 4 if t < 3 else 6

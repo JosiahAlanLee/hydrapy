@@ -188,6 +188,7 @@ class GLRenderer:
         """
         from .scenes import scene_transforms
         self.prewarm_banks()                       # scenes are what banks hide in: upload their frames before playing
+        self.prewarm_media()                       # and their Text and Lines: drawn on the CPU when first bound
         transforms = scene_transforms(self.patch)
         if not transforms or not self.specialise:
             return 0
@@ -443,6 +444,21 @@ class GLRenderer:
                     if i not in m.setdefault("texs", {}):
                         self._bank_texture(ref, m, i)
                         count += 1
+        return count
+
+    def prewarm_media(self) -> int:
+        """Draw and upload every static media texture the patch uses (Image, Text, Lines), now. Otherwise each is
+        drawn on the CPU the first time its scene shows: 20-60 ms a texture, and a live set's audio thread waits on
+        the GIL meanwhile. Returns the number uploaded."""
+        count = 0
+        for prog in self.programs:
+            for u in prog.sampler_uniforms:
+                ref = u.source
+                static = isinstance(ref, Image) or (hasattr(ref, "array") and not hasattr(ref, "array_at"))
+                if not static or hasattr(ref, "dynamic_array") or ref.name in self.media:
+                    continue
+                self._media_texture(ref)
+                count += 1
         return count
 
     def _bind(self, ref, current: Output):
