@@ -305,6 +305,22 @@ def test_plotter_svg_and_fields(tmp_path):
     assert Paths.svg('<svg xmlns="http://www.w3.org/2000/svg"><line x1="0" y1="0" x2="10" y2="10"/></svg>').at(0)[0].shape == (2, 2)
 
 
+
+def test_unfitted_svg_keeps_its_place_in_its_own_frame():
+    from hydrapy.drawing import Lines, svg_frame
+    svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 560">'
+           '<line x1="40" y1="95" x2="960" y2="95"/><circle cx="840" cy="210" r="65"/></svg>')
+    assert svg_frame(svg) == (0.0, 0.0, 1000.0, 560.0)
+    assert svg_frame('<svg xmlns="http://www.w3.org/2000/svg" width="200px" height="100"/>') == (0.0, 0.0, 200.0, 100.0)
+    assert svg_frame('<svg xmlns="http://www.w3.org/2000/svg" width="297mm" height="210mm"/>') is None
+    a = Lines(svg, stroke=3, fit=False, canvas=(1000, 560), supersample=1).render()[..., 3]
+    rows = np.flatnonzero(a[:, 500])
+    assert rows.min() >= 92 and rows.max() <= 98                   # the rule stays at y=95 (it drew nothing before)
+    cols = np.flatnonzero(a[95])
+    assert cols.min() <= 42 and cols.max() >= 958
+    assert a[210, 840 + 65 - 1:840 + 65 + 2].any() and not a[210, 840]  # the circle's rim, where the layout put it
+
+
 # --- marbling ------------------------------------------------------------------------------
 
 def test_marbling_moves_are_exactly_invertible_and_compose():
