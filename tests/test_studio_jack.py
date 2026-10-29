@@ -140,3 +140,56 @@ def test_encoded_es40_and_direct_cv_use_separate_bit_preserving_jack_ports(expan
         cv.close()
         receiver.deactivate()
         receiver.close()
+
+
+def test_live_input_port_feeds_audio_analysers():
+    import jack
+    from hydrapy import Audio, Patch
+    patch = Patch()
+    bands = Audio(jack='mix', patch=patch)
+    audio = StudioAudio()
+    audio.attach(patch)
+    sender = jack.Client('gorgon_input_test', no_start_server=True)
+    out = sender.outports.register('mix_out')
+    @sender.set_process_callback
+    def send(frames):
+        out.get_array()[:] = .25
+    try:
+        sender.activate()
+        audio.configure(dict(enabled=True))
+        assert audio.describe()['inputs'][0]['port'] == 'HydraPy:mix'
+        connect_ports(sender, [out], [audio.inports['mix']])
+        time.sleep(.3)
+        assert audio.rings['mix'].written > 0 and bands.sr == sender.samplerate
+        np.testing.assert_allclose(bands._ring.latest(256), .25)
+        assert bands.vol.value(SimpleNamespace(time=0.)) >= 0
+    finally:
+        audio.close()
+        sender.deactivate()
+        sender.close()
+
+
+def test_client_survives_holding_the_gil_past_the_jack_timeout_and_keeps_its_connections():
+    """sum(range(...)) holds the GIL in C for over a second, as a shader compile does; JACK's default client
+    timeout is 500 ms. Held, the client is deactivated meanwhile, comes back and is reconnected."""
+    import jack
+    audio = StudioAudio()
+    receiver = jack.Client('gorgon_hold_test', no_start_server=True)
+    sink = receiver.inports.register('in')
+    try:
+        receiver.activate()
+        audio.configure(dict(enabled=True))
+        connect_ports(receiver, [audio.ports[0]], [sink])
+        started = time.monotonic()
+        with audio.held('a test') as suspended:
+            sum(range(10 ** 8))
+        assert suspended and time.monotonic() - started > .5
+        time.sleep(.3)
+        anchor = audio.anchor
+        assert anchor is not None and anchor[1] > started   # the process callback runs again
+        assert audio.describe()['active'] and not audio.error, audio.describe()
+        assert [p.name for p in receiver.get_all_connections(sink)] == [audio.ports[0].name]
+    finally:
+        audio.close()
+        receiver.deactivate()
+        receiver.close()

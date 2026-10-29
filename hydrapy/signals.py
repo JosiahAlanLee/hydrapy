@@ -13,6 +13,7 @@ Arithmetic works on signals: ``Lfo(1) * 2 + 0.5``, ``Fft(a, 0) ** 2``.
 from __future__ import annotations
 
 import math
+import re
 from typing import Any, Callable, Optional, Sequence
 
 _EASINGS = {
@@ -459,10 +460,57 @@ class Fft(Signal):
 # Audio analysis (offline from a file; live input via sounddevice if present)
 # ---------------------------------------------------------------------------
 
+class LiveRing:
+    """A fixed ring of the newest live samples: written by an audio callback, read by the renderer.
+
+    ``write`` only copies into preallocated memory (no allocation, no locks), so it is safe in a JACK
+    process callback; ``latest`` copies the newest samples out on the reader's thread. The ring holds
+    many callback blocks more than an analysis window, so a read never meets the block being written.
+    """
+
+    def __init__(self, size: int = 16384):
+        import numpy as np
+        self.size = int(size)
+        self.data = np.zeros(self.size, dtype=np.float32)
+        self.written = 0              # samples written since it was made
+
+    def write(self, block):
+        n = len(block)
+        if n > self.size:
+            block, skipped = block[n - self.size:], n - self.size
+            self.written += skipped
+            n = self.size
+        i = self.written % self.size
+        first = min(n, self.size - i)
+        self.data[i:i + first] = block[:first]
+        if first < n:
+            self.data[:n - first] = block[first:]
+        self.written += n
+
+    def latest(self, n: int):
+        """The newest ``n`` samples, oldest first; zeros before anything was written."""
+        import numpy as np
+        n = int(n)
+        out = np.zeros(n, dtype=np.float32)
+        end = self.written
+        take = min(n, self.size, end)
+        if take:
+            idx = np.arange(end - take, end) % self.size
+            out[n - take:] = self.data[idx]
+        return out
+
+
+_JACK_INPUT = re.compile(r"[A-Za-z0-9_-]{1,32}")
+
+
 class Audio:
     """Audio-reactive signals.
 
     ``a = Audio.from_file('track.wav'); osc(10, 0.1, a.fft[0]).out()``
+
+    ``Audio(jack='mix')`` (or ``Audio.live('mix')``) analyses live audio from Studio's JACK client: Studio
+    registers an input port ``HydraPy:mix`` and feeds every analyser that names it; connect Rack's mix (or
+    anything) to it. Outside Studio, or with Studio's JACK audio off, such an analyser hears silence.
 
     Bands follow Hydra's pipeline loosely: Bark-scale specific loudness
     (power ** 0.23), averaged into ``bins`` bands, then
@@ -471,7 +519,13 @@ class Audio:
     """
 
     def __init__(self, samples=None, sr: int = 44100, bins: int = 4, smooth: float = 0.4,
-                 scale: float = 10.0, cutoff: float = 2.0, path: Optional[str] = None):
+                 scale: float = 10.0, cutoff: float = 2.0, path: Optional[str] = None,
+                 jack: Optional[str] = None, patch=None):
+        if jack is not None:
+            if samples is not None or path is not None:
+                raise ValueError("Audio(jack=...) is live input: give it no samples or path")
+            if not isinstance(jack, str) or not _JACK_INPUT.fullmatch(jack):
+                raise ValueError("Audio(jack=...) names a port: 1-32 letters, digits, '_' or '-'")
         self.samples = samples
         self.sr = int(sr)
         self.bins = int(bins)
@@ -490,6 +544,16 @@ class Audio:
         self.flux = Fft(self, 0, "flux")
         self._bark_edges = None
         self._live = None   # ring of the latest samples when fed live (CvIn.audio, a stream)
+        self.jack = jack
+        self._ring = None   # a LiveRing Studio fills from its JACK input port named ``jack``
+        if jack is not None:
+            from .core import default_patch
+            (patch or default_patch()).audio_inputs.append(self)
+
+    @classmethod
+    def live(cls, port: str = "mix", **kw) -> "Audio":
+        """Live audio from Studio's JACK input port ``port`` (``HydraPy:<port>``): ``Audio(jack=port)``."""
+        return cls(jack=port, sr=kw.pop("sr", 48000), **kw)
 
     def feed(self, block):
         """Live mode: push the newest samples (any length); analysis uses the last fft_size of them."""
@@ -530,9 +594,12 @@ class Audio:
         import numpy as np
         n = self.fft_size
         if self.samples is None:
-            if self._live is None:
+            if self._ring is not None:
+                seg = self._ring.latest(n)
+            elif self._live is None:
                 return [0.0] * 24
-            seg = self._live.copy()
+            else:
+                seg = self._live.copy()
         else:
             centre = int(t * self.sr)
             start = centre - n // 2
