@@ -12,9 +12,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from hydrapy import (NCA, XY, Contours, Ctx, Harmonograph, Lissajous, NCAModel, Patch, Paths, Renderer, Rose,  # noqa: E402
                      chain_contours, noise, shape, solid, src, streamlines, to_plotter_svg)
-from hydrapy.live import CvOut, clear_hooks  # noqa: E402
+from hydrapy.live import CvOut, LiveValue, clear_hooks  # noqa: E402
 from hydrapy.nca import CLAMP, step_np, visible  # noqa: E402
-from hydrapy.vector import order_paths, resample, simplify, travel  # noqa: E402
+from hydrapy.vector import XYVoice, order_paths, resample, simplify, travel  # noqa: E402
 
 MODELS = os.path.join(os.path.dirname(__file__), "..", "patches", "models")
 
@@ -167,6 +167,78 @@ def test_xy_beam_draws_the_curve_at_its_rate():
     assert xy.stereo().shape == (96000, 2)
     assert xy.dynamic_array()[..., 1].max() > 0.5                                      # the phosphor preview lit up
     xy.close(); clear_hooks()
+
+
+@pytest.mark.parametrize('hz', [440.0, 659.255, 880.0, 1174.66])
+def test_xy_pitch_is_exact_between_whole_sample_periods(hz):
+    clear_hooks()
+    xy = XY(Lissajous(1, 1, speed=0), rate=hz, sr=48000, fps=60, gain=0.5, jump=0)
+    _run_xy(xy, 2.0, fps=60)
+    x = xy.x.samples
+    up = np.flatnonzero((x[:-1] < 0) & (x[1:] >= 0))                            # one rising crossing a cycle
+    measured = (len(up) - 1) / ((up[-1] - up[0]) / 48000)
+    assert abs(1200 * np.log2(measured / hz)) < 1                                # cents; whole-sample periods were ~16 at 880
+    xy.close(); clear_hooks()
+
+
+def test_xy_gain_ramps_across_each_frame():
+    clear_hooks()
+    level = LiveValue('env', 0.0)
+    xy = XY(Lissajous(1, 1, speed=0), rate=100, sr=48000, fps=24, gain=level, jump=0)
+    p = Patch(size=(16, 9))
+    solid(0, 0, 0).out(p.o0, patch=p)
+    r = Renderer(p, size=(16, 9), fps=24)
+    for i in range(24):
+        level.set(0.5 if i >= 12 else 0.0)
+        r.step(i / 24)
+    x = xy.x.samples
+    assert np.abs(np.diff(x)).max() < 0.02                                       # no step where the envelope opens
+    assert np.abs(x[-2000:]).max() > 0.44                                         # size .9 x gain .5
+    xy.close(); clear_hooks()
+
+
+def test_xy_voice_stays_continuous_however_frames_arrive():
+    clear_hooks()
+    hz = 440.0
+    xy = XY(Lissajous(1, 2, phase=1.5708, speed=0), rate=hz, sr=48000, fps=60, gain=0.5, jump=0)
+    p = Patch(size=(16, 9))
+    solid(0, 0, 0).out(p.o0, patch=p)
+    r = Renderer(p, size=(16, 9), fps=60)
+    left, right = xy.x.live_source(48000), xy.y.live_source(48000)
+    assert left.voice is right.voice
+    frame, xs, ys = 0, [], []
+    for frames, blocks in [(1, 1), (3, 1), (0, 4), (5, 2), (1, 6), (2, 1)] * 4:   # bursts and stalls
+        for _ in range(frames):
+            r.step(frame / 60); frame += 1
+        for _ in range(blocks):
+            xs.append(left.pull(1024)); ys.append(right.pull(1024))
+    x, y = np.concatenate(xs), np.concatenate(ys)
+    assert len(x) == len(y) == 1024 * 60
+    whole = XYVoice(xy, 48000).channels[0].pull(len(x))                              # the same beam, never interrupted
+    np.testing.assert_allclose(x, whole, atol=1e-4)                                   # so never a phase jump
+    up = np.flatnonzero((x[:-1] < 0) & (x[1:] >= 0))
+    assert abs(1200 * np.log2((len(up) - 1) / ((up[-1] - up[0]) / 48000) / hz)) < 1
+    assert abs(_peak(y, 48000) - 2 * hz) < 2                                         # y an octave up, in step
+    xy.close(); clear_hooks()
+
+
+def test_xy_phosphor_draws_an_audio_rate_beam_as_a_line_not_dots():
+    clear_hooks()
+    xy = XY(Lissajous(1, 1, phase=1.5708, speed=0), rate=880, sr=48000, fps=60, gain=.9, jump=0, preview=(240, 240))
+    _run_xy(xy, 1 / 60, fps=60)
+    lit = int((xy.phosphor > 1e-3).sum())
+    circumference = 2 * np.pi * .9 * (240 - 1) / 2
+    assert lit > .9 * circumference                    # every pixel of the circle; four fixed steps lit about half
+    xy.close(); clear_hooks()
+
+
+def test_xy_joins_and_leaves_the_patch_audio_streams():
+    clear_hooks()
+    p = Patch(size=(16, 9))
+    xy = XY(Lissajous(3, 2), patch=p)
+    assert p.audio_streams == [xy.x, xy.y] and xy.x.label.endswith(' x')
+    xy.close(); clear_hooks()
+    assert p.audio_streams == []
 
 
 def test_xy_routes_to_cvout_file(tmp_path):
