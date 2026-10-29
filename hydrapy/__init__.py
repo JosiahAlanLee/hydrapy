@@ -41,6 +41,7 @@ from . import ops_inversion as _ops_inversion  # noqa: F401  (circle inversion)
 from . import ops_newton as _ops_newton  # noqa: F401  (Newton basin fractals)
 from . import ops_namagiri as _ops_namagiri  # noqa: F401  (Rogers-Ramanujan continued fraction)
 from . import ops_quasicrystal as _ops_quasicrystal  # noqa: F401
+from . import ops_schottky as _ops_schottky  # noqa: F401
 from . import ops_coxeter as _ops_coxeter  # noqa: F401  (Euclidean reflection groups)
 from . import ops_hyperbolic as _ops_hyperbolic  # noqa: F401  (hyperkaleid/mobius/hyperfade: the Poincaré disk and band)
 from .ops_automata import CA_MODES, CA_RULES
