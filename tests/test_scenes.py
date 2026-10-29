@@ -454,3 +454,32 @@ def test_cpu_gated_combines_match_the_ungated_result(patch, amount):
     a = render_chain(osc(6).blend(voronoi(5), amount).modulate(noise(3), amount), t=.3, size=(24, 12))
     b = render_chain(osc(6).blend(voronoi(5), solid(amount)).modulate(noise(3), solid(amount)), t=.3, size=(24, 12))
     assert np.array_equal(a, b)
+
+
+def test_a_scenes_controls_belong_to_its_own_patch():
+    """GPT's friction note 1: Params made inside scene(..., patch=p) registered on the default patch."""
+    import hydrapy as h
+    default = h.reset_patch(size=(32, 18))
+    target = h.Patch(size=(32, 18))
+
+    def build():
+        amount = h.Param('owned: amount', .5)
+        return h.solid(amount, amount, amount)
+    h.scene('owned', patch=target)(build)
+    assert 'owned: amount' in target.controls and 'owned: amount' not in default.controls
+    assert h.Param('after: amount', .2) and 'after: amount' in default.controls   # the context ends with the scene
+
+
+def test_a_live_control_scales_a_picture_like_a_number():
+    """GPT's friction note 2: pattern * .5 worked, pattern * Param(...) raised TypeError."""
+    import numpy as np
+    import hydrapy as h
+    h.reset_patch(size=(32, 18))
+    pattern = h.sdfBox(.8, .4).sdfMask()
+    amount = h.Param('scale-probe: amount', .5)
+    a = (pattern * .5).render(0, size=(32, 18))
+    b = (pattern * amount).render(0, size=(32, 18))
+    c = (pattern * (amount * 1)).render(0, size=(32, 18))
+    assert np.allclose(a, b) and np.allclose(a, c)
+    with pytest.raises(TypeError, match='scalar signal'):
+        pattern * 'grey'

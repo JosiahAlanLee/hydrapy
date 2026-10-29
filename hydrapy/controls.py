@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 from .signals import Signal, Lfo, Clock, Env, _num
-from .core import default_patch
+from .core import control_patch
 
 
 class Param(Signal):
@@ -27,7 +27,7 @@ class Param(Signal):
         self.base, self.modulation, self.depth = self.default, None, 0.
         self.mod_kind, self.mod_rate = 'none', .1
         self._bound = None                # (signal, depth) from bind(): what "Declared in patch" restores
-        p = patch or default_patch()
+        p = patch or control_patch()          # the scene's own patch while scene(..., patch=) builds
         if self.name in p.controls:
             raise ValueError(f'duplicate control name: {self.name}')
         p.controls[self.name] = self

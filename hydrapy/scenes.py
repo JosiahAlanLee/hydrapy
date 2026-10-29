@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import re
 
-from .core import Chain, Output, default_patch
+from .core import Chain, Output, default_patch, owning_controls
 from .signals import Signal, _num
 
 NAME = re.compile(r'[A-Za-z0-9_-]{1,24}')
@@ -89,7 +89,8 @@ def scene(name, output: Output | None = None, *, patch=None):
     index = (output or p.o0).index
 
     def decorate(fn):
-        chain = fn()
+        with owning_controls(p):         # Params made while building belong to this scene's patch
+            chain = fn()
         if not isinstance(chain, Chain):
             raise TypeError(f'Scene {name!r} must return a chain, not {type(chain).__name__}')
         if index not in p.scene_bases:
