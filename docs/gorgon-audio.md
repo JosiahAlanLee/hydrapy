@@ -44,10 +44,25 @@ the four ports are connected again in the patchbay.
 
 ## What produces the sound
 
-**Optical** reads the first two `Soundtrack` probes declared in the running
-patch. The first feeds L and the second R; one is duplicated to both channels;
-no Soundtrack produces silence. Soundtracks retain their existing image-based
-waveform and held-picture behavior. A patch's main displayed output alone does
+**Optical** reads the first two audio streams in the running patch:
+`Soundtrack` probes first, then each `XY`'s x and y. The first feeds L and the
+second R; one is duplicated to both channels; none produces silence.
+Soundtracks retain their existing image-based waveform and held-picture
+behavior. An `XY` is played by Studio's audio thread as an oscillator: the beam
+continues from the latest frame's figure, pitch (`rate`, exact) and gain, so
+its phase never breaks however unevenly frames arrive. That makes the picture
+an instrument Rack can filter. For example, a lead whose figure is its sound:
+
+```python
+lead = tracker.ahead(.066)                 # its notes early by its latency into Rack
+xy = XY(Harmonograph(1, 2), rate=440 * 2 ** ((lead.note(4) - 69) / 12), gain=.9, record=False)
+src(xy).out(o1)                            # what you see is what Rack hears on OPT L/R
+```
+
+Audio from the picture reaches Rack later than Gorgon's gates do (Studio's
+buffer lead, the JACK hop, then a frame and a block of quantization). Read its
+lane signals early with `tracker.ahead(seconds)` by that much; measure it as
+the time from a lane's gate to the pitch change at OPT L. A patch's main displayed output alone does
 not automatically become audio. For example, add `Soundtrack(o0)` to a patch
 that draws a waveform; a uniform image with AC removal produces no sustained
 tone. Optical audio continues with rendering when tracker automation is off.

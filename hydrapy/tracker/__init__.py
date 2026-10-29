@@ -8,5 +8,6 @@ from ..scenes import _Tracker as _Lanes
 
 _lanes = _Lanes()
 gate, hit, note, vel, beat, row = _lanes.gate, _lanes.hit, _lanes.note, _lanes.vel, _lanes.beat, _lanes.row
+ahead = _lanes.ahead
 
-__all__ = ['gate', 'hit', 'note', 'vel', 'beat', 'row']
+__all__ = ['gate', 'hit', 'note', 'vel', 'beat', 'row', 'ahead']

@@ -344,3 +344,28 @@ def test_seek_after_short_replacement_does_not_restore_superseded_long_note(live
     d['patterns'][0]['lanes'][0]['cells'][2] = hit()
     _, volts = render(v3(d, tick=4 * 480), .125, {0: 'gate1'}, live=live)
     assert not volts.any()
+
+
+def test_lane_signals_ahead_read_the_score_early():
+    from hydrapy import Patch
+    from hydrapy.scenes import TrackerSignal, _Tracker
+    p = pattern()
+    p['lanes'][3]['cells'][0] = hit(note='D-4')
+    p['lanes'][3]['cells'][4] = hit(note='A-4')        # row 4: 0.5 s at 120 BPM
+    t = Tracker(validate(blank(bpm=120, patterns=[p] + [None] * 127)))
+    t.enabled = True
+    patch = Patch()
+    now, early = TrackerSignal('note', 3, patch=patch), TrackerSignal('note', 3, patch=patch, ahead=.1)
+    early_hit = TrackerSignal('hit', 3, .2, patch=patch, ahead=.1)
+    assert set(patch.tracker_ahead) == {.1}
+    seen = []
+    for k in range(70):                                # 60 fps
+        t.apply(patch, k / 60)
+        seen.append((k / 60, now(None), early(None), early_hit(None)))
+    assert seen[0][1:3] == (62., 62.)                  # row 0 heard by both from the start, none skipped
+    first = lambda i: next(s for s, *v in seen if v[i] == 69.)
+    assert first(0) == pytest.approx(.5, abs=1 / 60) and first(1) == pytest.approx(.4, abs=1 / 60)
+    assert max(h for s, _, _, h in seen if .4 <= s < .42) > .9   # the early hit lands with the early note
+    with pytest.raises(ValueError):
+        _Tracker().ahead(0)
+    assert repr(_Tracker().ahead(.03).note(4)) == 'tracker.ahead(0.03).note(4)'

@@ -32,6 +32,7 @@ playhead, per frame, as signals::
 ``note(n)``  the last hit's MIDI note on lane n, key-transposed as the CV is (held)
 ``vel(n)``   the last hit's velocity on lane n, 0..1 (held)
 ``beat()``   the tracker's beat, 0..64;  ``row()`` the sixteenth row, 0..63
+``ahead(s)``  the same lanes ``s`` seconds ahead in a version-3 score (a late instrument's notes, early)
 
 Lanes are 1-6; 5 and 6 play only in a version-3 score, where ``beat()`` is the
 beat within the cycle and ``row()`` the playing pattern's row.
@@ -126,12 +127,14 @@ class TrackerSignal(Signal):
 
     DEFAULTS = {'gate': 0., 'hit': 0., 'note': 60., 'vel': 0., 'beat': 0., 'row': 0.}
 
-    def __init__(self, kind, lane=None, decay=.25, patch=None):
-        self.kind, self.lane, self.decay = kind, lane, float(decay)
+    def __init__(self, kind, lane=None, decay=.25, patch=None, ahead=0.):
+        self.kind, self.lane, self.decay, self.ahead = kind, lane, float(decay), float(ahead)
         self.patch = patch or default_patch()
+        if self.ahead:
+            self.patch.tracker_ahead.setdefault(self.ahead, None)   # asks the tracker for lane values this far ahead
 
     def value(self, ctx):
-        frame = self.patch.tracker_frame
+        frame = self.patch.tracker_ahead.get(self.ahead) if self.ahead else self.patch.tracker_frame
         if frame is None:
             return self.DEFAULTS[self.kind]
         if self.kind in ('beat', 'row'):
@@ -145,11 +148,15 @@ class TrackerSignal(Signal):
         return _num(self(None))
 
     def __repr__(self):
-        return f"tracker.{self.kind}({'' if self.lane is None else self.lane + 1})"
+        where = f"ahead({self.ahead:g})." if self.ahead else ""
+        return f"tracker.{where}{self.kind}({'' if self.lane is None else self.lane + 1})"
 
 
 class _Tracker:
     """``tracker.gate(1)`` etc.: lanes are numbered 1-6, as in the tracker; 5 and 6 need a version-3 score."""
+
+    def __init__(self, ahead=0.):
+        self._ahead = float(ahead)
 
     @staticmethod
     def _lane(n):
@@ -158,22 +165,31 @@ class _Tracker:
         return n - 1
 
     def gate(self, lane):
-        return TrackerSignal('gate', self._lane(lane))
+        return TrackerSignal('gate', self._lane(lane), ahead=self._ahead)
 
     def hit(self, lane, decay=.25):
         if not 0 < float(decay) <= 30:
             raise ValueError('decay must be between 0 and 30 seconds')
-        return TrackerSignal('hit', self._lane(lane), decay)
+        return TrackerSignal('hit', self._lane(lane), decay, ahead=self._ahead)
 
     def note(self, lane):
-        return TrackerSignal('note', self._lane(lane))
+        return TrackerSignal('note', self._lane(lane), ahead=self._ahead)
 
     def vel(self, lane):
-        return TrackerSignal('vel', self._lane(lane))
+        return TrackerSignal('vel', self._lane(lane), ahead=self._ahead)
 
     def beat(self):
         return TrackerSignal('beat')
 
     def row(self):
         return TrackerSignal('row')
+
+    def ahead(self, seconds):
+        """The lanes ``seconds`` ahead in the score (version 3): ``tracker.ahead(.03).note(4)``.
+
+        For a sound the picture makes that reaches its instrument late, an XY played into Rack, say: read
+        its notes early by that latency and it lands with the drums. The picture shows them early by as much."""
+        if not 0 < float(seconds) <= 1:
+            raise ValueError('ahead takes 0 to 1 seconds')
+        return _Tracker(seconds)
 
