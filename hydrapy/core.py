@@ -495,11 +495,13 @@ class Patch:
         self.controls: dict = {}        # explicitly exposed Param signals
         self.scales: dict = {}          # output index -> render scale (Chain.out(scale=...)); absent = 1
         self.probes: list = []          # live.Probe instances, updated after every frame
+        self.audio_streams: list = []   # audio-rate streams besides Soundtrack probes (XY's x and y) for Studio's ports
         self.transport = None           # live.Transport (Link, MidiClock) for `hydrapy live`; None = wall clock
         self.scenes: dict = {}          # name -> (output index, chain, blend transform); see scenes.py
         self.scene_bases: dict = {}     # output index -> the chain under that output's scenes
         self.scene_weights = None       # name -> 0..1, set by the tracker each frame; None = not driven
         self.tracker_frame = None       # the tracker's lane values this frame (scenes.TrackerSignal)
+        self.tracker_ahead: dict = {}   # seconds -> the lane values that far ahead in the score (tracker.ahead)
 
     def assign(self, output: Output, chain: Chain):
         # outputs are matched by index, so the global o0..o3 work with any patch

@@ -23,6 +23,7 @@ turn any hydrapy field into line work for it.
 from __future__ import annotations
 
 import math
+import threading
 from typing import Callable, Optional, Sequence
 
 import numpy as np
@@ -258,11 +259,89 @@ class Contours(Curve):
 # XY out
 # -----------------------------------------------------------------------------
 
+def _trace(trav, phase, step, n, start, gain):
+    """``n`` samples of the beam over a traversal table from ``phase``, ``step`` traversals a sample (the exact
+    pitch), the gain ramping from ``start`` to reach ``gain`` at the end: (xy (n, 2), z (n,), the phase after)."""
+    per = len(trav)
+    pos = (phase + np.arange(n) * step) % 1.0
+    fi = pos * per
+    i0 = np.floor(fi).astype(int) % per
+    i1 = (i0 + 1) % per
+    f = (fi - np.floor(fi))[:, None]
+    s = trav[i0] * (1 - f) + trav[i1] * f
+    ramp = start + (gain - start) * np.arange(1, n + 1) / n
+    xy = np.clip(s[:, :2] * ramp[:, None], -1.0, 1.0).astype(np.float32)
+    return xy, (s[:, 2] >= 0.5).astype(np.float32), float((phase + n * step) % 1.0)
+
+
+class XYVoice:
+    """An XY played by the audio thread, as an instrument: each pull continues the beam from the latest frame's
+    traversal, pitch and gain, so its phase never breaks however unevenly frames arrive (a frame-pushed
+    AudioQueue has to repeat or drop whole chunks, which clicks on a pure tone).  Pitch and gain move at the
+    pull's block boundaries.  ``channels`` are x and y; pulling one generates both, kept for the other."""
+
+    def __init__(self, xy, samplerate):
+        self.xy, self.samplerate = xy, int(samplerate)
+        self._lock = threading.Lock()
+        self.channels = [_VoiceChannel(self, 0), _VoiceChannel(self, 1)]
+        self._reset()
+
+    def _reset(self):
+        self.phase, self._gain = 0.0, None
+        self._buffers = [np.zeros(0, np.float32), np.zeros(0, np.float32)]
+
+    def _pull(self, k, n):
+        if len(self._buffers[k]) < n:
+            m = n - len(self._buffers[k])
+            live = self.xy.live
+            if live is None:
+                block = np.zeros((m, 2), np.float32)
+            else:
+                trav, rate, gain = live
+                start = gain if self._gain is None else self._gain
+                self._gain = gain
+                block, _, self.phase = _trace(trav, self.phase, rate / self.samplerate, m, start, gain)
+            for c in range(2):          # a channel nobody pulls keeps at most a second
+                self._buffers[c] = np.concatenate([self._buffers[c], block[:, c]])[-max(self.samplerate, n):]
+        out, self._buffers[k] = self._buffers[k][:n], self._buffers[k][n:]
+        return out
+
+
+class _VoiceChannel:
+    """One side of an XYVoice, with the AudioQueue interface Studio's audio producer pulls from."""
+
+    def __init__(self, voice, k):
+        self.voice, self.k = voice, k
+
+    @property
+    def samplerate(self):
+        return self.voice.samplerate
+
+    @samplerate.setter
+    def samplerate(self, value):
+        self.voice.samplerate = int(value)
+
+    @property
+    def _lock(self):
+        return self.voice._lock
+
+    def _reset(self):
+        self.voice._reset()
+
+    def pull(self, n: int) -> np.ndarray:
+        with self.voice._lock:
+            return self.voice._pull(self.k, n)
+
+    def close(self):
+        pass
+
+
 class _Channel:
     """One audio-rate channel of an XY stream, routable with ``CvOut.send``."""
 
     def __init__(self, parent, k):
         self.parent, self.k = parent, k
+        self.label = f"{parent.name} {'xyz'[k]}"
         self.listeners: list[Callable] = []
         self.chunks: list[np.ndarray] = []
         self._generation = 0          # bumped on clear(): an AudioQueue drops what it had queued
@@ -279,32 +358,54 @@ class _Channel:
     def samples(self) -> np.ndarray:
         return np.concatenate(self.chunks) if self.chunks else np.zeros(0, np.float32)
 
+    def live_source(self, samplerate):
+        """For Studio's audio producer: this channel of the XY's voice (x or y), pulled by the audio thread."""
+        if self.k > 1:
+            return None
+        voice = self.parent._voice
+        if voice is None or voice.samplerate != int(samplerate):
+            voice = self.parent._voice = XYVoice(self.parent, samplerate)
+        return voice.channels[self.k]
+
 
 class XY(Texture):
     """A frame of paths as an audio-rate beam: ``x``, ``y`` and ``z`` (1 drawing, 0 blanked).
 
     ``rate``: traversals of the whole frame per second (the refresh of the scope, and the pitch
-    you hear; under ~40 it flickers).  ``gain``: ±full scale (±10 V out of an ES-3 at 1.0; 0.5 is
-    ±5 V).  ``jump``: fraction of each traversal spent on blanked travel between paths.
+    you hear; under ~40 it flickers).  The beam advances by exactly ``rate`` traversals a second,
+    so the pitch is exact even when a period isn't a whole number of samples.  ``gain``: ±full
+    scale (±10 V out of an ES-3 at 1.0; 0.5 is ±5 V), ramped across each frame's samples so an
+    envelope doesn't step.  ``jump``: fraction of each traversal spent on blanked travel between
+    paths.
+
+    ``x`` and ``y`` join the patch's audio streams, so Studio plays them on its optical ports
+    (x left, y right): the picture as an oscillator another instrument can filter.
     """
 
     _counter = 0
 
     def __init__(self, source, rate=80.0, sr: int = 48000, fps: float = 60.0, gain=0.5, jump: float = 0.03,
-                 record: bool = True, keep: float = 1200.0, preview=(320, 180), persistence: float = 0.6):
+                 record: bool = True, keep: float = 1200.0, preview=(320, 180), persistence: float = 0.6,
+                 patch=None):
+        from .core import default_patch
         from .live import register_hook
         self.source = source if callable(source) else Paths(source)
         self.rate, self.gain = as_signal(rate), as_signal(gain)
         self.sr, self.fps, self.jump = int(sr), float(fps), float(jump)
         self.record, self.keep = bool(record), float(keep)
+        XY._counter += 1
+        self.name = f"xy{XY._counter}"
         self.x, self.y, self.z = _Channel(self, 0), _Channel(self, 1), _Channel(self, 2)
         self.phase = 0.0
         self._carry = 0.0
         self._last_t = None
+        self._gain = None
+        self.live = None              # (traversal, rate, gain) of the latest frame
+        self._voice = None
         self.preview_size, self.persistence = tuple(preview), float(persistence)
         self.phosphor = np.zeros((self.preview_size[1], self.preview_size[0]), np.float32)
-        XY._counter += 1
-        self.name = f"xy{XY._counter}"
+        self.patch = patch or default_patch()
+        self.patch.audio_streams += [self.x, self.y]
         register_hook(self.tick)
         from .live import _RESOURCES
         _RESOURCES.append(self)
@@ -351,17 +452,12 @@ class XY(Texture):
             return
         rate = max(float(self.rate(ctx)), 1e-3)
         gain = float(self.gain(ctx))
-        per = max(int(round(self.sr / rate)), 8)                          # samples per traversal
+        start = gain if self._gain is None else self._gain
+        self._gain = gain
+        per = max(int(round(self.sr / rate)), 8)                          # points in the traversal table
         trav = self.traversal(self.source(ctx), per)
-        pos = (self.phase + np.arange(n) / per) % 1.0                       # where the beam is, continuing from last frame
-        self.phase = float((self.phase + n / per) % 1.0)
-        fi = pos * per
-        i0 = np.floor(fi).astype(int) % per
-        i1 = (i0 + 1) % per
-        f = (fi - np.floor(fi))[:, None]
-        s = trav[i0] * (1 - f) + trav[i1] * f
-        xy = np.clip(s[:, :2] * gain, -1.0, 1.0).astype(np.float32)
-        z = (s[:, 2] >= 0.5).astype(np.float32)
+        self.live = (trav, rate, gain)                                     # what an XYVoice plays from now on
+        xy, z, self.phase = _trace(trav, self.phase, rate / self.sr, n, start, gain)
         for ch, data in ((self.x, xy[:, 0]), (self.y, xy[:, 1]), (self.z, z)):
             if self.record:
                 ch.chunks.append(data)
@@ -379,15 +475,17 @@ class XY(Texture):
         if not on.any():
             return
         p = xy[on]
-        # subdivide so fast segments stay continuous; brightness falls with beam speed, like phosphor
+        # subdivide so fast segments stay continuous (a step per pixel of the longest segment, so an audio-rate beam
+        # draws a line, not dots); brightness falls with beam speed, like phosphor, whatever the subdivision
         a, b = p[:-1], p[1:]
         if len(a) == 0:
             return
-        sub = 4
+        sc = (min(W, H) - 1) / 2.0                     # the scope's square screen, centred, in proportion
+        seg = np.sqrt(((b - a) ** 2).sum(-1))
+        sub = int(np.clip(np.ceil(seg.max() * sc), 4, 64))
         u = (np.arange(sub) / sub)[None, :, None]
         pts = (a[:, None, :] * (1 - u) + b[:, None, :] * u).reshape(-1, 2)
-        speed = np.repeat(np.sqrt(((b - a) ** 2).sum(-1)), sub) + 1e-3
-        sc = (min(W, H) - 1) / 2.0                     # the scope's square screen, centred, in proportion
+        speed = np.repeat(seg, sub) * (sub / 4) + 1e-3   # the same deposit per segment as 4 steps gave
         px = (pts[:, 0] * sc + (W - 1) / 2).round().astype(int)
         py = (pts[:, 1] * sc + (H - 1) / 2).round().astype(int)
         ok = (px >= 0) & (px < W) & (py >= 0) & (py < H)
@@ -418,13 +516,14 @@ class XY(Texture):
         for ch in (self.x, self.y, self.z):
             ch.chunks = []
             ch._generation += 1
-        self.phase, self._carry, self._last_t = 0.0, 0.0, None
+        self.phase, self._carry, self._last_t, self._gain = 0.0, 0.0, None, None
         self.phosphor[:] = 0.0
 
     def close(self):
         from .live import _HOOKS
         if self.tick in _HOOKS:
             _HOOKS.remove(self.tick)
+        self.patch.audio_streams[:] = [s for s in self.patch.audio_streams if s not in (self.x, self.y)]
 
 
 # -----------------------------------------------------------------------------

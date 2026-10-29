@@ -367,6 +367,7 @@ class Session:
                         kept = {n: w for n, w in old.patch.scene_weights.items() if n in patch.scenes}
                         patch.scene_weights = kept or None
                     patch.tracker_frame = old.patch.tracker_frame
+                    patch.tracker_ahead.update({k: v for k, v in old.patch.tracker_ahead.items() if k in patch.tracker_ahead})
                 new = self._make_renderer(patch)
                 if hasattr(new, '_compile'):
                     new._compile()
