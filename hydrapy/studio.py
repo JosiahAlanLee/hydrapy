@@ -25,7 +25,7 @@ from .inspect import catalog, capabilities
 from .studio_preview import Preview
 from .scenes import check_scenes
 from .studio_tracker import Tracker, cycle_beats, number, scene_fades
-from .studio_audio import StudioAudio, settings as audio_settings
+from .studio_audio import StudioAudio, check_inputs, settings as audio_settings
 
 
 def digest(text):
@@ -80,11 +80,30 @@ def atomic_text(path, text):
         temp.unlink(missing_ok=True)
 
 
+TIMESTAMPS_FORMAT = 'hydrapy-recording-timestamps-1'
+
+
+def timestamps_path(video):
+    """The sidecar of a Studio recording: ``take.mp4`` -> ``take.timestamps.json``."""
+    return Path(video).with_suffix('.timestamps.json')
+
+
 class Recorder:
-    """Record wall-clock time even when preview rendering drops frames."""
-    def __init__(self, path, fps):
+    """Record wall-clock time even when preview rendering drops frames.
+
+    Every encoded frame is also stamped, in a sidecar written when the recording stops
+    (``timestamps_path``): the ``time.monotonic()`` it was presented (the native output's
+    flip, else when it was read back), the time it was rendered for, and, while Studio's
+    JACK client runs, the JACK frame time at its present. ``hydrapy.recording`` muxes
+    audio against it exactly.
+    """
+    def __init__(self, path, fps, jack=None):
+        """``jack``: the StudioAudio whose clock stamps each frame (``jack_frame_at``), or None."""
         self.path, self.fps, self.start = path, fps, time.monotonic()
         self.frames, self.error = 0, ''
+        self.jack = jack
+        self.present, self.rendered, self.jack_frames = [], [], []
+        self.samplerate = None
         self.q = queue.Queue(180)
         self.thread = threading.Thread(target=self._write, daemon=True)
         self.thread.start()
@@ -102,8 +121,10 @@ class Recorder:
         except Exception as e:
             self.error = str(e)
 
-    def push(self, frame, at=None):
+    def push(self, frame, at=None, rendered=None):
         """Queue ``frame`` for every recording slot up to ``at`` (default: now).
+
+        ``rendered``: the monotonic time the frame was rendered for (default ``at``).
 
         Slots are aligned to the first frame, whose time is the middle of slot 0. The native
         output delivers frames at exactly the recording rate (its refresh), timed by their
@@ -118,17 +139,47 @@ class Recorder:
         if self.frames == 0:
             self.start = at - .5 / self.fps
         target = int((at - self.start) * self.fps) + 1
+        stamp = None
+        if target > self.frames and self.jack is not None:
+            stamp = self.jack.jack_frame_at(at)
+            if stamp is not None and self.samplerate is None:
+                self.samplerate = self.jack.samplerate
         for _ in range(target - self.frames):
             try:
                 self.q.put_nowait(frame)
             except queue.Full:
                 raise RuntimeError('Recording encoder fell behind. Stop recording and use offline export.')
             self.frames += 1
+            self.present.append(round(at, 6))
+            self.rendered.append(round(at if rendered is None else rendered, 6))
+            self.jack_frames.append(stamp)
+
+    def timestamps(self):
+        """The sidecar's content: one entry per encoded frame (a repeated frame repeats its stamps)."""
+        jack = self.jack
+        # Slot k holds what was presented within half a frame of origin + k / fps: video time v is
+        # monotonic time origin + v, origin being the first frame's present.
+        return dict(format=TIMESTAMPS_FORMAT, video=self.path.name, fps=self.fps, frames=self.frames,
+                    clock='time.monotonic', origin=round(self.start + .5 / self.fps, 6) if self.frames else None,
+                    present=self.present, rendered=self.rendered,
+                    jack=None if self.samplerate is None else dict(
+                        samplerate=self.samplerate, client=getattr(getattr(jack, 'client', None), 'name', 'HydraPy'),
+                        frame_time=self.jack_frames))
+
+    def write_timestamps(self):
+        path = timestamps_path(self.path)
+        atomic_text(path, json.dumps(self.timestamps()))
+        return path
 
     def close(self):
         if self.thread.is_alive():
             self.q.put(None, timeout=10)
             self.thread.join(timeout=30)
+        if self.frames and self.path is not None:
+            try:
+                self.write_timestamps()
+            except OSError as exc:
+                self.error = self.error or f'Recording timestamps were not written: {exc}'
         if self.thread.is_alive():
             raise RuntimeError('Recording is still finishing')
         if self.error:
@@ -154,18 +205,23 @@ class _Finishing:
             self.session.call('_recording_finished', error=error)
             raise ValueError(error) from None
         self.session.call('_recording_finished', error='')
-        return dict(file=str(self.recorder.path.relative_to(self.session.root)))
+        result = dict(file=str(self.recorder.path.relative_to(self.session.root)))
+        stamps = timestamps_path(self.recorder.path)
+        if stamps.is_file():
+            result['timestamps'] = str(stamps.relative_to(self.session.root))
+        return result
 
 
 class Session:
     def __init__(self, root, patch=None, backend='auto', size=(640, 360), fps=30., cv=None, native=None,
-                 edit_delay_ms=None, trace=None):
+                 edit_delay_ms=None, trace=None, restore_audio=True):
         """``native``: None renders as always (no window). ``'available'`` renders in a hidden
         window's context so the tracker's Display menu can show Program fullscreen (Linux, X
         display, glfw; otherwise the menu says why not). A monitor name or index, or
         ``'window'``, also shows it there at start; ``size=None`` then renders at its size.
         ``edit_delay_ms``: how long the tracker editor gathers edits before sending them
-        (default 120, or 0 while the native output is showing)."""
+        (default 120, or 0 while the native output is showing).
+        ``restore_audio``: False leaves the saved JACK audio for ``restore_audio()``, after a load."""
         self.native_mode, self.native, self.native_note = native, None, None
         self.native_start = native if native not in (None, 'available') else None
         self.native_restore_size = None
@@ -206,6 +262,12 @@ class Session:
             self.tracker.trace = open(trace, 'a', buffering=1, encoding='utf-8')
         self.tracker_state = {}
         self.bridge_state = {}
+        # What GET /api/status reports: the patch load's progress (see _set_load).
+        self.load_status = dict(state='idle', path=None, error='', started=None, seconds=None,
+                                compiled_variants=0, prewarmed_scenes=0, banks=0, prewarmed_banks=0, bank_frames=0)
+        self.patch_display = None        # the output the loaded patch renders (render(oN)), before any score route
+        self.route_notice = ''           # the score's Program route disagrees with the patch's display
+        self.score_loaded = False
         self.tracker_blackout = False
         # Optional tracker CV output (a TrackerCV); opened by the caller so a
         # device error is reported before Studio starts.
@@ -236,6 +298,7 @@ class Session:
         self.render_metrics, self.preview_error = {}, ''
         self.preview_dirty, self.preview_taken = True, 0.
         self.recorder, self.record_path, self.last_frame = None, None, None
+        self._frame_wall = None
         self.jobs, self.job_processes = {}, {}
         self.recent = []
         self.thread = threading.Thread(target=self._run, daemon=True, name='hydrapy-render')
@@ -260,6 +323,11 @@ class Session:
             except Exception:
                 self.close()
                 raise
+        if restore_audio:
+            self.restore_audio()
+
+    def restore_audio(self):
+        """Start JACK audio as it was saved in .hydrapy/outputs.json (it needs a loaded patch)."""
         saved_audio = self.output_settings.get('audio')
         if isinstance(saved_audio, dict):
             try:
@@ -332,8 +400,11 @@ class Session:
                     r = GLRenderer(patch, size=self.size, fps=self.fps, ctx=ctx)
                     r.settle = LIVE_SETTLE
                     # Every scene's shader now, so a scene change never compiles mid-set.
+                    self._set_load(state='prewarming', compiled_variants=len(getattr(r, '_variants', ())))
                     try:
-                        r.prewarm_scenes(scene_fades(self.tracker.document, patch.scenes))
+                        fades = scene_fades(self.tracker.document, patch.scenes)
+                        self._set_load(prewarmed_scenes=r.prewarm_scenes(fades))
+                        r.warmed_fades = set(fades)   # what this renderer has compiled crossfades for
                     except Exception as exc:
                         r.release()
                         raise ValueError(f'Scene shaders failed to compile: {exc}') from exc
@@ -341,7 +412,58 @@ class Session:
         from .backend_np import Renderer
         return Renderer(patch, size=self.size, fps=self.fps)
 
+    def _set_load(self, **values):
+        with self.lock:
+            self.load_status = dict(self.load_status, **values)
+
+    def status(self):
+        """GET /api/status: is a patch loaded and ready, and what a load is doing now."""
+        with self.lock:
+            load = dict(self.load_status)
+            state = self.state
+        if load['state'] not in ('idle', 'ready', 'error') and load['started'] is not None:
+            load['seconds'] = time.monotonic() - load['started']
+        return dict(load, ready=load['state'] == 'ready', patch=state.get('path'),
+                    playing=state.get('playing'), recording=state.get('recording', False),
+                    route_notice=self.route_notice, audio=self.audio.describe(), server_now=time.monotonic())
+
+    def _load_counts(self, renderer):
+        """Compiled shader variants, and the patch's Banks with every frame uploaded already."""
+        banks = prewarmed = frames = 0
+        seen = set()
+        for prog in getattr(renderer, 'programs', ()):
+            for u in getattr(prog, 'sampler_uniforms', ()):
+                ref = u.source
+                if not (hasattr(ref, 'array_at') and hasattr(ref, 'count')) or id(ref) in seen:
+                    continue
+                seen.add(id(ref))
+                uploaded = len(getattr(renderer, 'media', {}).get(ref.name, {}).get('texs', ()))
+                banks += 1
+                frames += uploaded
+                prewarmed += uploaded >= ref.count
+        return dict(compiled_variants=len(getattr(renderer, '_variants', ())), banks=banks,
+                    prewarmed_banks=prewarmed, bank_frames=frames)
+
     def _load(self, name, *, preserve=True, armed=None):
+        """Load a patch, reporting its progress in ``load_status``, with Studio's JACK client
+        deactivated meanwhile: running a patch and compiling its shaders hold the GIL for
+        seconds, longer than JACK lets a client's process callback take."""
+        started = time.monotonic()
+        self._set_load(state='loading', path=str(name), error='', started=started, seconds=None,
+                       compiled_variants=0, prewarmed_scenes=0, banks=0, prewarmed_banks=0, bank_frames=0)
+        try:
+            with self.audio.held('the patch load'):
+                result = self._load_patch(name, preserve=preserve, armed=armed)
+        except Exception as exc:
+            self._set_load(state='error', error=''.join(traceback.format_exception_only(type(exc), exc)).strip(),
+                           seconds=time.monotonic() - started)
+            raise
+        self._set_load(state='ready', seconds=time.monotonic() - started, **self._load_counts(self.renderer))
+        if self.audio.error and 'resume' in self.audio.error:
+            self.notice = self.audio.error
+        return result
+
+    def _load_patch(self, name, *, preserve=True, armed=None):
         if self.recorder:
             raise ValueError('Stop recording before loading or reconnecting a patch.')
         from .cli import load_patch
@@ -358,6 +480,7 @@ class Session:
             with ResourceStage() as stage:
                 patch = load_patch(str(path), strict=False)
                 check_scenes(patch)
+                check_inputs(patch)
                 if self.tracker.enabled and requested_arm and patch.transport:
                     raise ValueError('Disable tracker automation before enabling an external clock')
                 if same and old:
@@ -367,6 +490,7 @@ class Session:
                         kept = {n: w for n, w in old.patch.scene_weights.items() if n in patch.scenes}
                         patch.scene_weights = kept or None
                     patch.tracker_frame = old.patch.tracker_frame
+                self._set_load(state='compiling')
                 new = self._make_renderer(patch)
                 if hasattr(new, '_compile'):
                     new._compile()
@@ -391,6 +515,16 @@ class Session:
         self.renderer, self.path, self.source, self.armed = new, path, source, requested_arm
         self.audio.attach(patch)
         # A patch's declared display remains authoritative when it is loaded.
+        declared = getattr(patch, 'declared_display', None)
+        self.patch_display = patch.display.name if declared is None else patch.outputs[declared].name
+        routed = self.tracker.document['modes']['program']
+        previous, self.route_notice, warned = self.route_notice, '', False
+        if self.score_loaded and routed != patch.display.name:
+            warned = True
+            self.route_notice = (f'The score routed Program to {routed}, but this patch renders {patch.display.name}: '
+                                 f'Program now shows {patch.display.name}.')
+        elif same and routed != self.patch_display:
+            self.route_notice = previous   # a reload keeps the route shown, and its warning
         self.tracker.sync_program(patch.display.name, self.clock_time)
         self.gpu_query = None
         self.preview.reset(patch.display.name)
@@ -407,9 +541,17 @@ class Session:
             self.tracker.seek(0., self.clock_time)
         self.last_wall = time.monotonic()
         self.error, self.notice = '', 'Loaded. Connections enabled.' if requested_arm else 'Loaded. Connections are disconnected.'
+        if patch.audio_inputs and self.audio.client is None:
+            ports = ', '.join(dict.fromkeys(a.jack for a in patch.audio_inputs))
+            self.notice += f' This patch listens on JACK ({ports}): enable JACK audio to feed it.'
+        if warned:
+            self.notice = self.route_notice
         relative = str(path.relative_to(self.root))
         self.recent = [relative] + [p for p in self.recent if p != relative][:9]
-        return dict(path=relative, source=source, version=digest(source))
+        result = dict(path=relative, source=source, version=digest(source))
+        if warned:
+            result['notice'] = self.route_notice
+        return result
 
     def _handle(self, action, data):
         from .live import resource_status
@@ -461,14 +603,23 @@ class Session:
             raise ValueError('Load a patch first')
         patch = self.renderer.patch
         if action == 'tracker_score':
+            before = self.tracker.document['modes']['program']
+            first = not self.score_loaded
             self.tracker.replace(data['document'], self.clock_time, data['revision'])
+            self.score_loaded = True
             if patch.scenes and hasattr(self.renderer, 'prewarm_scenes'):
                 # A new crossfade compiles now, at the edit, not when its row plays. The edit is
                 # already accepted, so a failure here is reported, not returned as a rejection.
+                # New crossfades can compile for seconds: JACK audio pauses for them, as for a load.
+                fades = scene_fades(self.tracker.document, patch.scenes)
+                warmed = getattr(self.renderer, 'warmed_fades', set())
                 try:
-                    self.renderer.prewarm_scenes(scene_fades(self.tracker.document, patch.scenes))
+                    with self.audio.held('crossfade compiles') if not set(fades) <= warmed else nullcontext():
+                        self.renderer.prewarm_scenes(fades)
+                    self.renderer.warmed_fades = warmed | set(fades)
                 except Exception as exc:
                     self.preview_error = f'Scene crossfade compile failed: {exc}'
+                self._set_load(compiled_variants=len(getattr(self.renderer, '_variants', ())))
             modes = self.tracker.document['modes']
             if patch.display.name != modes['program']:
                 patch.render(patch.outputs[int(modes['program'][1])])
@@ -476,7 +627,21 @@ class Session:
                 self.preview_dirty = True
             if self.aux_preview.output != modes['aux']:
                 self.aux_preview.reset(modes['aux'])
-            return self.tracker.snapshot(self.clock_time, not self.paused)
+            routed, drawn = modes['program'], self.patch_display
+            warned = False
+            if drawn is None or routed == drawn:
+                self.route_notice = ''
+            elif first or routed != before:
+                warned = True
+                # Warn when the score sets the route (it loads, or its route changes), not on every edit after.
+                self.route_notice = (f'The score routes Program to {routed}, but the patch renders {drawn} '
+                                     f'(render({drawn})): Program shows {routed}, not the patch\'s composite. '
+                                     f'Set modes.program to {drawn} to show it.')
+                self.notice = self.route_notice
+            result = self.tracker.snapshot(self.clock_time, not self.paused)
+            if warned:
+                result['notice'] = self.route_notice
+            return result
         elif action == 'tracker_transport':
             if {'segment', 'sender', 'bus'} & set(data):
                 # A Rack module's window of the bus layer (Gorgon bus-io.md): never a seek.
@@ -573,6 +738,7 @@ class Session:
                 raise ValueError('output must be 0–3')
             patch.render(patch.outputs[index])
             self.tracker.sync_program(patch.display.name, self.clock_time)
+            self.route_notice = ''   # chosen in Studio: deliberate
             self.preview.reset(patch.display.name)
             self.preview_dirty = True
             self._pictures(force=True)
@@ -628,6 +794,7 @@ class Session:
                 return _Finishing(self, recorder)
             self.record_path = self._new_output('mp4')
             self.recorder = Recorder(self.record_path, self.fps)
+            self.recorder.jack = self.audio   # stamps each frame with the JACK clock
             self.notice = 'Recording video at wall-clock speed.'
         elif action == 'export':
             return self._export(data)
@@ -842,7 +1009,8 @@ class Session:
                      recording=self.recorder is not None, jobs=jobs, recent=self.recent,
                      thumbnails=preview.pop('thumbnails'), preview=preview,
                      preview_generation=self.preview.generation, preview_profile=self.preview_profile,
-                     preview_error=self.preview_error)
+                     preview_error=self.preview_error, route_notice=self.route_notice,
+                     load=dict(self.load_status))
         state['tracker_enabled'] = self.tracker.enabled
         state['aux_preview'] = self.aux_preview.snapshot()
         with self.lock:
@@ -878,7 +1046,8 @@ class Session:
                                       scenes=[dict(name=name, output=f'o{value[0]}') for name, value in self.renderer.patch.scenes.items()]
                                       if self.renderer else [],
                                       cv=None if self.cv is None else self.cv.describe(), audio=self.audio.describe(),
-                                      edit_delay_ms=self.edit_delay_ms, native=self._native_info())
+                                      edit_delay_ms=self.edit_delay_ms, native=self._native_info(),
+                                      route_notice=self.route_notice, load_state=self.load_status['state'])
 
     def _command(self, item):
         action, data, result, received, mark = item
@@ -927,6 +1096,7 @@ class Session:
         if self.paused:
             return query, False
         self.clock_time += now - self.last_wall
+        self._frame_wall = now
         try:
             transport = self.renderer.patch.transport if self.armed else None
             if transport:
@@ -964,7 +1134,7 @@ class Session:
                 read_started = time.monotonic()
                 self.last_frame = self._read_frame()
                 recorded = (self.last_frame, (time.monotonic() - read_started) * 1000)
-                self.recorder.push(self.last_frame, shown)
+                self.recorder.push(self.last_frame, shown, self._frame_wall)
             except Exception as exc:
                 self.error = str(exc)
                 recording_failed = True
@@ -1318,6 +1488,8 @@ def make_server(session, port=8765):
                     with session.lock:
                         state = dict(session.state)
                     return self._send(200, state)
+                if parsed.path == '/api/status':
+                    return self._send(200, session.status())
                 if parsed.path == '/api/catalog':
                     return self._send(200, {'patches': catalog(session.root)})
                 if parsed.path == '/api/latency':
@@ -1413,26 +1585,36 @@ def serve(root='.', patch=None, backend='auto', size=(640, 360), fps=30, port=87
     # Match CLI patch execution: relative asset paths belong to the project.
     os.chdir(root)
     try:
-        session = Session(root, patch, backend, size, fps, cv=cv, native=native, edit_delay_ms=edit_delay_ms, trace=trace)
+        # The patch loads after the server is up, so GET /api/status can follow a long load.
+        session = Session(root, None, backend, size, fps, cv=cv, native=native, edit_delay_ms=edit_delay_ms, trace=trace,
+                          restore_audio=False)
     except BaseException:
         if cv is not None:
             cv.close()
         raise
-    server = advertised = None
+    server = advertised = thread = None
     try:
         server, token = make_server(session, port)
+        thread = threading.Thread(target=server.serve_forever, daemon=True, name='hydrapy-http')
+        thread.start()
         advertised = advertise(server.server_port, token, root)
         url = f'http://127.0.0.1:{server.server_port}/' + ('tracker/' if tracker else '') + f'#{token}'
         print(f'HydraPy Studio: {url}', flush=True)
+        if patch:
+            session.call('load', path=patch)   # a startup patch that fails still stops Studio
+            session.restore_audio()
         if open_browser:
             import webbrowser
             webbrowser.open(url)
-        server.serve_forever()
+        while thread.is_alive():
+            thread.join(.5)
     except KeyboardInterrupt:
         pass
     finally:
         if advertised:
             withdraw(advertised, token)
         if server:
+            if thread is not None and thread.is_alive():
+                server.shutdown()
             server.server_close()
         session.close()

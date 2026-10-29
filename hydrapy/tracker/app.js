@@ -205,6 +205,7 @@ async function flushScore(){
     if (pendingScore && pendingScore.modes.program === document.modes.program) pendingScore.modes.program = program;
     if (program !== document.modes.program) updateControls();
     $('savedState').textContent = 'Score applied · not saved';
+    if (result.notice) toast(result.notice);   // the score's Program route disagrees with the patch
   }).catch(error => {
     pendingScore=pendingScore||outgoing(state);failedDocument=document;
     conflicted=!!error.status&&error.status<500;scoreFailed=true;
@@ -381,6 +382,7 @@ async function pollRemote(){
       $('sceneName').textContent=result.path?.split('/').pop()||'Choose a patch';
     }
     $('connectionStatus').textContent=result.playing?'Transport running':'Transport paused';
+    if(!outputType){$('routeNotice').textContent=result.route_notice||'';$('routeNotice').hidden=!result.route_notice;}
     const native=result.native?.active?` · ${result.native.where==='window'?'native window':'fullscreen '+result.native.where} ${Math.round(result.native.refresh)} Hz`:'';
     $('backendStatus').textContent=result.error||(result.path?`${result.backend} · ${result.fps.toFixed(1)} render fps${native} · ${result.path}`:'Load a patch to begin');
     // While Program shows fullscreen, this monitor is a small confidence preview of it.

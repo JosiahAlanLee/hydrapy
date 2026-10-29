@@ -797,3 +797,15 @@ def test_banks_chain_pattern_shape_fill_and_seed(workspace):
     page.locator('#seedInput').fill('1234'); page.locator('#seedInput').press('Tab')
     page.wait_for_timeout(300)
     assert session.tracker.document['seed'] == 1234
+
+
+def test_program_route_away_from_the_patch_output_shows_a_notice(workspace):
+    session, page, context, root = workspace
+    page.locator('#programMode').select_option('o2')
+    page.wait_for_function("document.getElementById('toast').textContent.includes('routes Program to o2')")
+    page.wait_for_function("!document.getElementById('routeNotice').hidden")
+    assert 'render(o0)' in page.locator('#routeNotice').text_content()
+    assert session.route_notice and published_output(session) in ('o0', 'o2')
+    page.locator('#programMode').select_option('o0')
+    page.wait_for_function("document.getElementById('routeNotice').hidden")
+    assert session.route_notice == ''

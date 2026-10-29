@@ -495,6 +495,7 @@ class Patch:
         self.controls: dict = {}        # explicitly exposed Param signals
         self.scales: dict = {}          # output index -> render scale (Chain.out(scale=...)); absent = 1
         self.probes: list = []          # live.Probe instances, updated after every frame
+        self.audio_inputs: list = []    # Audio(jack=...) analysers Studio feeds from its JACK input ports
         self.transport = None           # live.Transport (Link, MidiClock) for `hydrapy live`; None = wall clock
         self.scenes: dict = {}          # name -> (output index, chain, blend transform); see scenes.py
         self.scene_bases: dict = {}     # output index -> the chain under that output's scenes

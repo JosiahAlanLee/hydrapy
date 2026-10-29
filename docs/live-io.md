@@ -24,6 +24,10 @@ cv.audio(2).fft[1]             # an audio-rate channel through the same Bark ana
 multichannel recording, sampled at each frame's time: record the CV in your DAW alongside the audio,
 then `hydrapy render` at any resolution with no dropouts and the envelopes landing on the gates.
 
+**Audio over JACK, in Studio.** `Audio.live("mix")` (or `Audio(jack="mix")`) is an analyser fed by
+Studio's JACK client, from an input port `HydraPy:mix`: connect Rack's mix to it and its `fft`, `vol` and
+`flux` follow the live sound. See [Gorgon audio routing](gorgon-audio.md#live-input-for-audio-analysis).
+
 **Control voltage out (ES-3).** Values become voltages, ramped across each audio block:
 
 ```python

@@ -134,6 +134,30 @@ unique recording destinations to avoid overwriting previous takes. Studio's sepa
 
 **Record video** captures the running preview at wall-clock speed, repeating held frames
 when rendering falls behind. It records video only. Stop to finish and download the MP4.
+
+Each recording also gets a sidecar, `take.timestamps.json` beside `take.mp4`, written when
+it stops (the `record` response names it as `timestamps`). For every encoded frame it holds
+the `time.monotonic()` the frame was presented (the native output's flip, otherwise its
+readback) in `present`, and the time it was rendered for in `rendered`. A repeated frame
+repeats its stamps. `origin` is the monotonic time of video time 0: video time `v` is
+monotonic time `origin + v`. While Studio's JACK audio runs, `jack` adds the samplerate and,
+in `frame_time`, the 32-bit JACK frame time at each present (what `client.frame_time` reads
+then), taken from the process callback's last cycle.
+
+To put audio captured elsewhere (Rack's mix, say) under the video exactly, note when the
+capture's first sample happened: its JACK frame time (a JACK recorder reads
+`client.last_frame_time` in the process callback that writes its first block) or its
+`time.monotonic()`. Then:
+
+```sh
+python -m hydrapy.recording take.mp4 --audio-start-frame 123456              # print the offset
+python -m hydrapy.recording take.mp4 capture.wav take-av.mp4 --audio-start-frame 123456
+```
+
+The helper fits a line through the (present, JACK frame time) pairs, reads the JACK frame
+time at video time 0 from it, and trims or delays the audio by the difference. The video is
+copied unchanged. It also reports `drift_ppm`, how much faster the JACK clock ran than the
+monotonic clock. `hydrapy.recording.offset()` returns the same number for your own mux.
 For a finished piece with music, use an offline MP4 export and specify an audio file
 inside the project, for example `media/track.flac`. The rendered video duration
 controls the export: shorter audio is padded with silence and longer audio is cut
@@ -161,6 +185,28 @@ hydrapy ops --kind texture
 `check` stages managed devices without opening them. Arbitrary patch code still runs.
 MP4 encoding tries available hardware before software; `--gpu`/GL rendering and video
 encoding are independent choices. The inspector reports the encoder actually used.
+
+## Status and the Program route
+
+`GET /api/status` (with the session token, like the other API calls) says whether a patch
+is ready. `state` is `idle` before any load, then `loading` (the patch file runs),
+`compiling` (its shaders), `prewarming` (every scene's variant and the score's crossfades),
+and `ready` or `error`. `error` holds the failure, `seconds` the load's duration so far,
+`compiled_variants` the shader variants compiled, `banks` the patch's Banks, and
+`prewarmed_banks` and `bank_frames` how many of them, and of their frames, are already on
+the GPU. `ready`, `patch`, `playing`, `recording`, `route_notice` and `audio` (the JACK
+panel's state) complete it. `hydrapy studio PATCH` serves the API before it loads the
+patch, so a script can poll `/api/status` from launch until `ready`. A startup patch that
+fails still stops Studio. A reload that fails leaves the previous patch running, with
+`state` `error`.
+
+A patch's `render(oN)` names the output it composites onto. The score's Program route
+(`modes.program`) chooses what Program shows. When they disagree, Studio says so. A score
+that routes Program to another output (when it is sent, or its route changes) returns a
+`notice` with the `tracker_score` response. The notice also shows under **Output routing**
+in the tracker and in Studio's notice line. When a different patch loads over such a score,
+the patch's output wins, and the `load` response says so. Choosing an output in Studio is
+deliberate and clears the notice.
 
 ## Example metadata
 

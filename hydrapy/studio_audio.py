@@ -1,6 +1,8 @@
 """Four named audio ports on native JACK or PipeWire's JACK implementation.
 
-Only a bounded packet copy runs in the process callback. A producer evaluates
+Only a bounded packet copy runs in the process callback, and live inputs
+(``Audio(jack=...)``) are copied into fixed rings there and analysed on the
+render thread. A producer evaluates
 audio against JACK sample positions ahead of that callback; late packets are
 discarded by timestamp. This is Python soft realtime, not a hard-RT guarantee.
 The encoded ES-40 stream never passes through these listening-audio ports.
@@ -8,6 +10,7 @@ The encoded ES-40 stream never passes through these listening-audio ports.
 from __future__ import annotations
 
 from collections import deque
+from contextlib import contextmanager
 import math
 import threading
 import time
@@ -15,6 +18,7 @@ import time
 import numpy as np
 
 from .live import AudioQueue, Soundtrack
+from .signals import LiveRing
 from . import tracker_v3
 from .studio_tracker import note_midi
 from .tracker_cv import TrackerCV, snapshot as playhead
@@ -36,6 +40,13 @@ def settings(values):
     if type(result['lead_blocks']) is not int or not 2 <= result['lead_blocks'] <= 8:
         raise ValueError('Audio buffer lead must be 2–8 JACK periods')
     return result
+
+
+def check_inputs(patch):
+    """Refuse a patch whose ``Audio(jack=...)`` port name would clash with Studio's outputs."""
+    for analyser in getattr(patch, 'audio_inputs', ()):
+        if analyser.jack in PORTS:
+            raise ValueError(f'Audio(jack={analyser.jack!r}) clashes with Studio\'s output port of that name')
 
 
 def drum(note):
@@ -176,6 +187,12 @@ class StudioAudio:
         self.running = False
         self.synth = BreaksSynth()
         self._patch = None
+        self.analysers = []           # Audio(jack=...) of the attached patch
+        self.rings = {}               # input port name -> LiveRing, kept across reloads
+        self.inports = {}             # input port name -> registered JACK port
+        self.inputs = ()              # (port, ring) pairs the process callback copies
+        self.suspended = False
+        self.suspensions = 0
         self._raw_frame = 0
         self._wrap = 0
         self._first_frame = None
@@ -189,6 +206,105 @@ class StudioAudio:
         self.source_names = [getattr(getattr(t, 'output', None), 'name', 'Optical source') for t in tracks]
         for source in old:
             source.close()
+        self.analysers = list(getattr(patch, 'audio_inputs', ()))
+        names = list(dict.fromkeys(a.jack for a in self.analysers))
+        for name in names:
+            self.rings.setdefault(name, LiveRing())
+        for analyser in self.analysers:
+            analyser._ring = self.rings[analyser.jack]
+            if self.client is not None and analyser.sr != self.samplerate:
+                analyser.sr, analyser._bark_edges = self.samplerate, None
+        self._register_inputs(names)
+
+    def _register_inputs(self, names):
+        """Input ports for ``names``: a port that stays keeps its connections; others come and go."""
+        client = self.client
+        if client is None:
+            self.inports, self.inputs = {}, ()
+            return
+        self.inputs = ()              # the callback stops copying before any port goes away
+        for name in [n for n in self.inports if n not in names]:
+            port = self.inports.pop(name)
+            try:
+                port.unregister()
+            except Exception as exc:
+                self.error = self.error or f'Input {name} was not removed: {exc}'
+        for name in names:
+            if name not in self.inports:
+                self.inports[name] = client.inports.register(name)
+        self.inputs = tuple((self.inports[n], self.rings[n]) for n in names)
+
+    def jack_frame_at(self, t):
+        """The JACK frame time (32-bit, as ``client.frame_time``) at monotonic time ``t``, or None when inactive.
+
+        From the last process cycle's anchor: its ``last_frame_time`` and the monotonic time it began."""
+        anchor = self.anchor
+        if anchor is None or self.client is None or not self.running or self.suspended or not self.samplerate:
+            return None
+        at, wall, _, _ = anchor
+        return int(round(at + (t - wall) * self.samplerate)) % 2**32
+
+    @contextmanager
+    def held(self, reason='a patch load'):
+        """Deactivate the JACK client around work that holds the GIL for seconds, then reactivate it.
+
+        Compiling shaders and running a patch hold the GIL; the Python process callback then misses
+        JACK's client timeout (500 ms by default) and the server drops the client. Deactivated, the
+        server simply leaves it out of the graph. Its connections are restored when it comes back.
+        Yields whether the client was suspended.
+        """
+        client = self.client
+        if client is None or not self.running or self.suspended:
+            yield False
+            return
+        saved = self._connections()
+        try:
+            client.deactivate()
+        except Exception as exc:
+            self.error = f'JACK audio could not pause for {reason}: {exc}'
+            yield False
+            return
+        self.suspended = True
+        self.suspensions += 1
+        self.epoch += 1               # packets made for the old timeline are late when it resumes
+        self.anchor = None
+        self._first_frame = None
+        try:
+            yield True
+        finally:
+            self.suspended = False
+            if self.client is client and self.running:
+                try:
+                    client.activate()
+                except Exception as exc:
+                    self.error = f'JACK audio did not resume after {reason}: {exc}'
+                else:
+                    self._reconnect(saved)
+
+    def _connections(self):
+        """(source, destination) names of every connection to Studio's ports."""
+        pairs = []
+        client = self.client
+        get = getattr(client, 'get_all_connections', None)
+        if get is None:
+            return pairs
+        for port, output in [(p, True) for p in self.ports] + [(p, False) for p in self.inports.values()]:
+            try:
+                for other in get(port):
+                    pairs.append((port.name, other.name) if output else (other.name, port.name))
+            except Exception:
+                pass
+        return pairs
+
+    def _reconnect(self, pairs):
+        mine = {p.name for p in self.ports} | {p.name for p in self.inports.values()}
+        for source, destination in pairs:
+            if source not in mine and destination not in mine:
+                continue
+            try:
+                self.client.connect(source, destination)
+            except Exception:
+                pass                  # the other side went away, or a removed input port
 
     def publish(self, tracker, clock_time, wall, playing):
         self.snapshot = playhead(tracker, clock_time, wall, playing)
@@ -235,6 +351,7 @@ class StudioAudio:
             client.set_blocksize_callback(self._block_size)
             client.set_xrun_callback(self._xrun)
             client.set_shutdown_callback(self._shutdown)
+            self.inports, self.inputs = {}, ()
             if self._patch is not None:
                 self.attach(self._patch)
             self.running = True
@@ -249,6 +366,8 @@ class StudioAudio:
 
     def _sample_rate(self, samplerate):
         self.samplerate = int(samplerate)
+        for analyser in self.analysers:
+            analyser.sr, analyser._bark_edges = self.samplerate, None
         self.epoch += 1
         self.anchor = None
 
@@ -266,6 +385,8 @@ class StudioAudio:
 
     def _process(self, frames):
         """No synthesis, rendering, network I/O or waiting for the producer here."""
+        for port, ring in self.inputs:
+            ring.write(port.get_array())
         arrays = [p.get_array() for p in self.ports]
         for out in arrays:
             out.fill(0)
@@ -383,6 +504,10 @@ class StudioAudio:
         self.packets.clear()
         self.pending = self.anchor = None
         self.ports = []
+        self.inports, self.inputs = {}, ()
+        for ring in self.rings.values():
+            ring.data.fill(0)         # analysers fall silent rather than freeze on the last sound
+        self.suspended = False
         self._raw_frame = self._wrap = 0
         self._first_frame = None
 
@@ -398,4 +523,8 @@ class StudioAudio:
                     samplerate=self.samplerate, blocksize=self.blocksize, xruns=self.xruns,
                     underruns=self.underruns, late_packets=self.late_packets,
                     buffer_lead_ms=1000 * self.config['lead_blocks'] * self.blocksize / max(1, self.samplerate),
-                    sources=list(self.source_names), rhythm='Synthesized Breaks kit (not sample playback)')
+                    sources=list(self.source_names), suspended=self.suspended, suspensions=self.suspensions,
+                    inputs=[dict(port=getattr(self.inports.get(n), 'name', n), name=n, frames=self.rings[n].written,
+                                 analysers=sum(a.jack == n for a in self.analysers))
+                            for n in dict.fromkeys(a.jack for a in self.analysers)],
+                    rhythm='Synthesized Breaks kit (not sample playback)')
