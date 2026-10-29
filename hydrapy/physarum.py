@@ -14,6 +14,11 @@ re-route — the transport networks of *Physarum polycephalum*, and the look Sag
 ``sensor_angle``, ``sensor_distance``, ``turn``, ``step``, ``deposit``, ``decay`` take signals, so a
 modular can retune the network live (small sensor angles: long straight veins; large: fine mesh).
 Runs on the NumPy and GL backends and in the HTML export (WebGL2).
+
+Left alone, a network coarsens: within 15-30 s, whatever the rates, it thins into one or two tubes (faster
+at high deposit and speed). ``regrow`` regrows it from fresh agents whenever a signal crosses a whole
+number, each time from a new seed: ``Physarum(..., regrow=ctx.beat / 16)`` grows a new network every four
+bars. Desktop only (NumPy and GL); the HTML export ignores it.
 """
 from __future__ import annotations
 
@@ -34,7 +39,8 @@ class Physarum(Texture):
 
     def __init__(self, size=(320, 180), agents=(256, 128), sensor_angle=0.6, sensor_distance=20.0, turn=0.4,
                  step=1.0, deposit=0.04, decay=0.93, diffuse=0.6, food: Optional[Output] = None, food_weight=1.0,
-                 exposure=0.5, colour=(1.0, 0.85, 0.55), speed: float = 60.0, max_steps: int = 4, seed: float = 0.0):
+                 exposure=0.5, colour=(1.0, 0.85, 0.55), speed: float = 60.0, max_steps: int = 4, seed: float = 0.0,
+                 regrow=None):
         self.size = (int(size[0]), int(size[1]))
         self.agents = (int(agents[0]), int(agents[1]))
         vals = dict(sensor_angle=sensor_angle, sensor_distance=sensor_distance, turn=turn, step=step, deposit=deposit,
@@ -42,6 +48,7 @@ class Physarum(Texture):
         self.params = {k: as_signal(v) for k, v in vals.items()}
         self.food, self.colour = food, tuple(float(c) for c in colour)
         self.speed, self.max_steps, self.seed = float(speed), int(max_steps), float(seed)
+        self.base_seed, self.regrow, self.generation = self.seed, None if regrow is None else as_signal(regrow), None
         Physarum._counter += 1
         self.name = f"physarum{Physarum._counter}"
         self.reset()
@@ -80,6 +87,21 @@ class Physarum(Texture):
         self._target = target
         return n
 
+    def check_regrow(self, ctx):
+        """Regrow from fresh agents (a new seed) when ``regrow`` has crossed a whole number since the last frame."""
+        if self.regrow is None:
+            return
+        v = float(self.regrow(ctx))
+        if not math.isfinite(v):
+            return
+        g = math.floor(v)
+        if self.generation is not None and g != self.generation:
+            target = self._target
+            self.seed = self.base_seed + 17.0 * g
+            self.reset()
+            self._target = target            # keep the step clock: regrowing isn't a seek
+        self.generation = g
+
     def values(self, ctx) -> dict:
         return {k: float(s(ctx)) for k, s in self.params.items()}
 
@@ -117,6 +139,7 @@ class Physarum(Texture):
         self.step_index += 1
 
     def advance_np(self, env, t: float) -> np.ndarray:
+        self.check_regrow(env.ctx)
         n = self.steps_due(t)
         if n:
             p = self.values(env.ctx)
@@ -267,6 +290,7 @@ void main() { OUT_VAR = vec4(amount, 0.0, 0.0, 0.0); }
 
     def gl_step(self, r, ctx):
         g = self.gl_resources(r)
+        self.check_regrow(ctx)
         n = self.steps_due(ctx.time)
         gl = r.ctx
         if self.gpu_reset:

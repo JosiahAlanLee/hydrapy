@@ -373,6 +373,28 @@ def test_physarum_food_attracts():
     assert (x < 16).mean() > 0.4                                              # well over the 1/6 a uniform crowd would put there
 
 
+
+def test_physarum_regrows_from_a_new_seed_when_its_signal_crosses_a_whole_number():
+    from hydrapy import Physarum
+    from hydrapy.signals import Fn
+    phase = [0.2]
+    m = Physarum(size=(96, 64), agents=(64, 32), seed=1, regrow=Fn(lambda c: phase[0]))
+    fresh = m.initial_state()
+    ctx = Ctx()
+    m.check_regrow(ctx)
+    p = m.values(ctx)
+    for _ in range(60):
+        m.step_np(p)
+    grown = m.trail.copy()
+    phase[0] = 0.9
+    m.check_regrow(ctx)
+    assert np.array_equal(m.trail, grown) and m.seed == 1                  # no whole number crossed: untouched
+    phase[0] = 1.1
+    m.check_regrow(ctx)
+    assert not m.trail.any() and m.state is None and m.seed == 1 + 17.0     # regrown from fresh agents
+    assert not np.allclose(m.initial_state(), fresh)                       # a new seed: a different network
+    assert Physarum(size=(96, 64), agents=(64, 32), seed=1).regrow is None  # off by default
+
 @pytest.mark.skipif(not GL, reason="no GL context")
 def test_physarum_gpu_matches_numpy_statistics():
     from hydrapy import Physarum
