@@ -693,10 +693,11 @@ class Tracker:
         patch.tracker_frame = self._lanes.update_v3(playhead, u, self.enabled)
         for c in self._lanes.new:
             self._trace(c)
-        for ahead in list(patch.tracker_ahead):
+        aheads = getattr(patch, 'tracker_ahead', None)      # absent on patches that never asked (and duck-typed ones)
+        for ahead in list(aheads or ()):
             lanes = self._ahead.setdefault(ahead, LaneState())
             lead = ahead * self.document['bpm'] / 60 * tracker_v3.TICKS if self.enabled else 0.
-            patch.tracker_ahead[ahead] = lanes.update_v3(playhead, u + lead, self.enabled, begin=u)
+            aheads[ahead] = lanes.update_v3(playhead, u + lead, self.enabled, begin=u)
         if not self.enabled:
             return
         beat, entry, row = tracker_v3.position(self.document, self.start['tick'], [u])
