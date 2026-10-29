@@ -66,7 +66,7 @@ def test_cellular_animation_is_fps_independent_and_replayable():
     assert not np.array_equal(sources[2].frame_at(2.04), expected)
 
 
-def test_hidden_cellular_keeps_up_so_its_scene_returns_without_a_stall():
+def test_hidden_cellular_keeps_up_so_its_scene_returns_without_a_stall(glctx):
     import time
     p = H.Patch(size=(64, 36))
     cells = H.Cellular(width=320, height=180, rate=120, seed=3)
@@ -74,7 +74,7 @@ def test_hidden_cellular_keeps_up_so_its_scene_returns_without_a_stall():
     H.scene('plain', patch=p)(lambda: H.solid(.2, .2, .2))
     H.scene('cells', patch=p)(lambda: H.src(cells))
     p.scene_weights = {'plain': 1.0, 'cells': 0.0}
-    r = GLRenderer(p, size=(64, 36), ctx=_create_context(), fps=30)
+    r = GLRenderer(p, size=(64, 36), ctx=glctx, fps=30)
     for k in range(30 * 20):                     # twenty seconds with the automaton's scene hidden
         r.step(k / 30)
     assert cells._generation == 599 * 4           # kept up while hidden: 120 generations a second
@@ -233,12 +233,12 @@ def test_flora_schema_projection_and_detail(tmp_path):
         H.flora_lines({})
 
 
-def test_prewarm_banks_uploads_every_frame_before_it_shows():
+def test_prewarm_banks_uploads_every_frame_before_it_shows(glctx):
     frames = [np.full((8, 12, 3), k * 20, np.uint8) for k in range(6)]
     bank = H.Bank(frames, rate=6)
     p = H.Patch(size=(12, 8))
     H.src(bank).out(p.o0, patch=p)
-    r = GLRenderer(p, size=(12, 8), ctx=_create_context(), fps=6)
+    r = GLRenderer(p, size=(12, 8), ctx=glctx, fps=6)
     assert r.prewarm_banks() == 6 and r.prewarm_banks() == 0          # all six now, none twice
     texs = r.media[bank.name]['texs']
     for k in range(6):                                                  # playing them uploads nothing new
