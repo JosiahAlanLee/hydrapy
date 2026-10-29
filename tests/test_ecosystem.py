@@ -222,6 +222,16 @@ def test_xy_voice_stays_continuous_however_frames_arrive():
     xy.close(); clear_hooks()
 
 
+def test_xy_phosphor_draws_an_audio_rate_beam_as_a_line_not_dots():
+    clear_hooks()
+    xy = XY(Lissajous(1, 1, phase=1.5708, speed=0), rate=880, sr=48000, fps=60, gain=.9, jump=0, preview=(240, 240))
+    _run_xy(xy, 1 / 60, fps=60)
+    lit = int((xy.phosphor > 1e-3).sum())
+    circumference = 2 * np.pi * .9 * (240 - 1) / 2
+    assert lit > .9 * circumference                    # every pixel of the circle; four fixed steps lit about half
+    xy.close(); clear_hooks()
+
+
 def test_xy_joins_and_leaves_the_patch_audio_streams():
     clear_hooks()
     p = Patch(size=(16, 9))

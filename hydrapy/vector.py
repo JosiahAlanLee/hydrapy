@@ -475,15 +475,17 @@ class XY(Texture):
         if not on.any():
             return
         p = xy[on]
-        # subdivide so fast segments stay continuous; brightness falls with beam speed, like phosphor
+        # subdivide so fast segments stay continuous (a step per pixel of the longest segment, so an audio-rate beam
+        # draws a line, not dots); brightness falls with beam speed, like phosphor, whatever the subdivision
         a, b = p[:-1], p[1:]
         if len(a) == 0:
             return
-        sub = 4
+        sc = (min(W, H) - 1) / 2.0                     # the scope's square screen, centred, in proportion
+        seg = np.sqrt(((b - a) ** 2).sum(-1))
+        sub = int(np.clip(np.ceil(seg.max() * sc), 4, 64))
         u = (np.arange(sub) / sub)[None, :, None]
         pts = (a[:, None, :] * (1 - u) + b[:, None, :] * u).reshape(-1, 2)
-        speed = np.repeat(np.sqrt(((b - a) ** 2).sum(-1)), sub) + 1e-3
-        sc = (min(W, H) - 1) / 2.0                     # the scope's square screen, centred, in proportion
+        speed = np.repeat(seg, sub) * (sub / 4) + 1e-3   # the same deposit per segment as 4 steps gave
         px = (pts[:, 0] * sc + (W - 1) / 2).round().astype(int)
         py = (pts[:, 1] * sc + (H - 1) / 2).round().astype(int)
         ok = (px >= 0) & (px < W) & (py >= 0) & (py < H)
