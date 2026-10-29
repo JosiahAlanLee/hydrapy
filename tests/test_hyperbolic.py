@@ -104,10 +104,39 @@ def test_mobius_translations_along_one_geodesic_undo_each_other():
 def test_hyperfade_is_one_in_the_middle_and_zero_past_the_boundary():
     a = hyperfade(0.2).render(0, size=(96, 54))
     assert a[27, 48, 3] == pytest.approx(1.0) and a[27, 48, :3].min() == 1.0
+    assert np.allclose(a[..., :3], a[..., 3:4])                    # grey: the fade is in RGB as well as alpha
     assert a[0, 0, 3] == 0.0 and a[27, 0, 3] == 0.0                 # the corners and the sides are outside the disk
     assert 0.0 < a[0, 48, 3] < 0.5 < a[2, 48, 3]                    # the top edge fades, over about .2 of 1 - |z|^2
     band = hyperfade(0.2, 1).render(0, size=(96, 54))
     assert band[27, 2, 3] == pytest.approx(1.0) and band[0, 48, 3] < 0.3 < band[3, 48, 3]   # the band's sides stay, its edges fade
+
+
+def test_mult_hyperfade_fades_a_hyperkaleid_picture_to_black_at_the_rim(gl_context):
+    pic = osc(20, 0.1, 1).hyperkaleid(4, 5)
+    h = 160
+    size = (h, h)
+    plain = pic.render(0.0, size=size)
+    faded = pic.mult(hyperfade(0.15)).render(0.0, size=size)
+    rad = np.hypot((np.arange(h)[None, :] + 0.5) / h - 0.5, (np.arange(h)[:, None] + 0.5) / h - 0.5) * 2
+    middle, rim, outside = rad < 0.4, (rad > 0.95) & (rad < 1.0), rad > 1.0
+    assert np.allclose(plain[middle, :3], faded[middle, :3])        # the middle is untouched
+    assert plain[rim, :3].mean() > 0.1 and faded[rim, :3].mean() < 0.4 * plain[rim, :3].mean()   # the rim fades
+    assert faded[outside, :3].max() == 0.0                          # and outside the disk is black
+    if gl_context is None:
+        return
+    from hydrapy.backend_gl import GLRenderer
+    p = Patch(size=size)
+    pic.mult(hyperfade(0.15)).out(p.o0, patch=p)
+    r = GLRenderer(p, size=size, fps=10, ctx=gl_context)
+    try:
+        r.step(0.0)
+        b = r.read_rgba().astype(np.float32)
+        if b.max() > 1.0:
+            b = b / 255.0
+    finally:
+        r.release()
+    assert b[rim, :3].mean() < 0.4 * plain[rim, :3].mean()          # the GPU fades the rim too
+    assert b[outside, :3].max() < 1e-3
 
 
 def test_a_hyperkaleid_picture_has_the_symmetry_of_its_group():

@@ -3,9 +3,10 @@
 ``hyperkaleid(p, q, ...)`` folds the frame into the fundamental triangle of the (2, p, q) triangle group, so
 whatever the chain draws there tiles the hyperbolic plane the way Escher's *Circle Limit* prints do, with the
 tiles shrinking towards the boundary. ``mobius(shift, direction, turn)`` is an isometry of the disk, the way to
-scroll or turn such a picture without breaking it. ``hyperfade(fade, model)`` is a source whose alpha is 1 in the
-middle and 0 at the boundary, for masking the sub-pixel tiles near the edge (they shimmer under motion, which is
-a photosensitivity problem on a screen, not only an aliasing one).
+scroll or turn such a picture without breaking it. ``hyperfade(fade, model)`` is a grey source, 1 in the middle
+and 0 at the boundary: multiplied into a picture it fades it to black at the edge, which hides the sub-pixel tiles
+near the boundary (they shimmer under motion, which is a photosensitivity problem on a screen, not only an
+aliasing one).
 
 Two models of the plane, chosen with ``model``:
 
@@ -174,8 +175,8 @@ register(Op("hyperkaleid", "coord",
                 "like a Circle Limit print; hyperbolic when (p-2)(q-2) > 4, and q >= 100 puts the corners on "
                 "the boundary (p=3 is the modular group). `shift`/`direction`/`turn` move the tiling by an "
                 "isometry, so it flows without a seam. Outside the disk the tiling is inverted; `.mult(hyperfade())` "
-                "masks it. The triangle read is the wedge from the centre to the top edge between angles 0 "
-                "and 180/p degrees.",
+                "fades the picture to black at the boundary. The triangle read is the wedge from the centre to the top "
+                "edge between angles 0 and 180/p degrees.",
             glsl=ASP + _TRIANGLE + """
   vec2 z = _hyp_mobius(_hyp_to_disk(_st, model, asp), shift, direction, turn);
   float rr = dot(z, z);
@@ -224,17 +225,18 @@ def _np_hyperfade(st, fade, model, env):
     s = np.clip(1.0 - (x * x + y * y), 0.0, 1.0) / np.maximum(bc(fade, st), 1e-6)
     s = np.clip(s, 0.0, 1.0)
     a = (s * s * (3.0 - 2.0 * s)).astype(np.float32)
-    one = np.ones_like(a)
-    return np.stack([one, one, one, a], axis=-1)
+    return np.stack([a, a, a, a], axis=-1)
 
 
 register(Op("hyperfade", "src",
             [F("fade", 0.2, doc="width of the fade, in 1 - |z|^2"), F("model", 0, scalar=True, doc="0 disk, 1 band")],
             np=_np_hyperfade, glsl_helpers=_HELPERS,
-            doc="White, with alpha 1 in the middle of the disk (or band) falling to 0 at its boundary over `fade`, "
-                "measured as 1 - |z|^2, which is how fast the tiles shrink there. `.mult()` a hyperbolic picture by it "
-                "(or `.alpha(hyperfade().a())`) so the sub-pixel tiles at the edge don't shimmer; alpha is 0 outside the disk.",
+            doc="Grey: both RGB and alpha are 1 in the middle of the disk (or band) falling to 0 at its boundary "
+                "over `fade`, measured as 1 - |z|^2, which is how fast the tiles shrink there. `.mult()` a hyperbolic "
+                "picture by it so the sub-pixel tiles at the edge fade to black instead of shimmering. For a fade over "
+                "another picture, `ground.layer(pic.mask(hyperfade()))`; it is 0 outside the disk.",
             glsl=ASP + """
   vec2 z = _hyp_to_disk(_st, model, asp);
   float s = clamp((1.0 - dot(z, z)) / max(fade, 1e-6), 0.0, 1.0);
-  return vec4(1.0, 1.0, 1.0, s * s * (3.0 - 2.0 * s));"""))
+  float a = s * s * (3.0 - 2.0 * s);
+  return vec4(a, a, a, a);"""))
