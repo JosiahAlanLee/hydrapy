@@ -9,7 +9,7 @@ Coords:   rotate scale pixelate repeat repeatX repeatY kaleid scroll scrollX scr
           +  polar unpolar twist fisheye mirror wobble glitch
 Colour:   posterize shift invert contrast brightness luma thresh color saturate hue
           colorama sum r g b a  +  fold gamma levels dither palette grain vignette
-Combine:  add sub layer blend mult diff mask  +  lighten darken screen overlay wipe
+Combine:  add sub layer blend mult diff mask  +  lighten darken screen overlay wipe transition
 Modulate: modulate modulateRepeat modulateRepeatX modulateRepeatY modulateKaleid
           modulateScrollX modulateScrollY modulateScale modulatePixelate modulateRotate
           modulateHue  +  displace
@@ -58,7 +58,7 @@ from .mint import Mint, switch
 from .signals import SH, Audio, Clock, Const, Decay, Drift, EntropyLock, Env, Expr, Fft, Fn, Fx, Lfo, Mouse, Seq, Signal, Time, as_signal
 
 from .controls import Param
-from .scenes import scene
+from .scenes import scene, scene_transition
 from . import tracker
 
 __version__ = "0.1.0"
@@ -203,7 +203,7 @@ __all__ = (
         "FrameSource", "Cellular", "CARule", "CA_MODES", "CA_RULES", "MultiCA1D", "WOLFRAM3", "WOLFRAM5", "subdivide", "fuzzy_paths", "flora_lines",
         "catmull_rom", "lathe_wire", "project_wire", "sweep_wire", "Track", "Timeline",
         "SDF3", "raymarch",
-        "Param", "scene", "tracker", "VideoOut", "close_resources", "CvIn", "CvOut", "Link", "LiveValue", "Midi", "MidiClock", "OscIn", "OscOut", "Probe", "Soundtrack", "Transport", "TrigPhase", "audio_devices", "register_hook", "Ctx", "reset_patch", "default_patch",
+        "Param", "scene", "scene_transition", "tracker", "VideoOut", "close_resources", "CvIn", "CvOut", "Link", "LiveValue", "Midi", "MidiClock", "OscIn", "OscOut", "Probe", "Soundtrack", "Transport", "TrigPhase", "audio_devices", "register_hook", "Ctx", "reset_patch", "default_patch",
         "Signal", "Lfo", "Seq", "Clock", "Env", "SH", "Decay", "Drift", "Mouse", "Time", "Fn", "Fx", "EntropyLock", "Mint", "switch", "Fft", "Audio", "Const", "Expr", "External", "as_signal",
         "Renderer", "iter_frames", "render_chain", "render_frames", "save_gif", "save_mp4", "save_png", "to_image", "to_ansi",
         "VideoEncoder", "video_encoders",

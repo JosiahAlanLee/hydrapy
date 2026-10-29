@@ -504,8 +504,9 @@ class Patch:
         self.audio_inputs: list = []    # Audio(jack=...) analysers Studio feeds from its JACK input ports
         self.audio_streams: list = []   # audio-rate streams besides Soundtrack probes (XY's x and y) for Studio's ports
         self.transport = None           # live.Transport (Link, MidiClock) for `hydrapy live`; None = wall clock
-        self.scenes: dict = {}          # name -> (output index, chain, blend transform); see scenes.py
+        self.scenes: dict = {}          # name -> (output index, chain, blend/transition transform); see scenes.py
         self.scene_bases: dict = {}     # output index -> the chain under that output's scenes
+        self.scene_styles: dict = {}    # output index -> (transition style, softness, scale); see scenes.scene_transition
         self.scene_weights = None       # name -> 0..1, set by the tracker each frame; None = not driven
         self.tracker_frame = None       # the tracker's lane values this frame (scenes.TrackerSignal)
         self.tracker_ahead: dict = {}   # seconds -> the lane values that far ahead in the score (tracker.ahead)
@@ -527,6 +528,7 @@ class Patch:
         self.scales.clear()
         self.scenes.clear()
         self.scene_bases.clear()
+        self.scene_styles.clear()
 
     def output_size(self, output, size) -> tuple:
         """The pixel size ``output`` (an Output, an index or a name like 'o1') renders at in a ``size`` frame."""
