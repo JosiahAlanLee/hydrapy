@@ -222,3 +222,20 @@ test('an edit that leaves an empty pattern empty writes nothing and keeps the ol
   assert.equal(edit('interpolation',()=>{d.patterns[0].easing.z='smooth';}),true);
   assert.deepEqual(d.patterns[0],emptyPattern(0));
 });
+
+test('explicit cell lengths survive editing, clipboard, transpose and history', () => {
+  const d=score(), p=d.patterns[0], h=new ScoreHistory(), selection={r0:0,r1:0,c0:0,c1:0};
+  h.change(d,'length',()=>{putCell(p,0,0,{note:'C-4',vel:90,len:2.375});settleFormat(d);},{});
+  h.undo(d);assert.equal(d.legacy,'hydrapy-tracker-1');
+  h.redo(d);assert.equal(d.patterns[0].lanes[0].cells[0].len,2.375);
+  const restored=d.patterns[0];
+  const block=readBlock(JSON.stringify(copyBlock(restored,selection)));
+  pasteBlock(restored,{row:1,col:1},block);
+  transposeBlock(restored,{r0:1,r1:1,c0:1,c1:1},1);
+  assert.equal(restored.lanes[1].cells[1].len,2.375);
+  assert.equal(d.legacy,undefined);
+  for(const len of [null,true,'2',0,.24,17]) {
+    const bad=structuredClone(block);bad.rows[0][0].len=len;
+    assert.throws(()=>readBlock(JSON.stringify(bad)));
+  }
+});

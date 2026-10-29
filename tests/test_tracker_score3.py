@@ -20,6 +20,12 @@ def test_the_browser_evaluator_matches_hydrapy(tmp_path):
     cases = []
     for _ in range(60):
         score = random_score(rng)
+        for pattern in score['patterns']:
+            if pattern is not None:
+                for lane in pattern['lanes']:
+                    for cell in lane['cells']:
+                        if cell is not None and rng.random() < .3:
+                            cell['len'] = rng.choice([.25, .333, 1, 2.375, 16])
         cycle = Timeline(score).cycle
         transport = {'tick': rng.randrange(cycle), 'fill': random_transitions(rng, 2 * cycle)}
         if rng.random() < .7:

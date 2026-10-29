@@ -2,7 +2,7 @@ import {SOUND_KEYS} from './sounds.js';
 import {api, PreviewStream} from './backend.js';
 import {noteMidi, noteFrequency, canonicalNote, breaksVoice} from './notes.js';
 import {ScoreHistory, bounds, getCell, putCell, copyBlock, readBlock, pasteBlock, clearBlock,
-  transposeBlock, setBlockVelocity, pianoNote, activity, SCENE, SCENE_NAME, kindOf, AUDIO, COLUMNS, LANES, rowsOf, keepEmptyNull} from './editor.js';
+  transposeBlock, setBlockVelocity, parseLength, pianoNote, activity, SCENE, SCENE_NAME, kindOf, AUDIO, COLUMNS, LANES, rowsOf, keepEmptyNull} from './editor.js';
 import {TICKS, RATES, code, emptyPattern, geometry, incoming, outgoing, settleFormat, timeline, evaluate, stateAt,
   condCode, parseCond, transformsText, parseTransforms} from './score3.js';
 const $ = id => document.getElementById(id);
@@ -534,9 +534,9 @@ function renderRows(){
       const repeat=audio&&r>=p.lanes[c].len;
       const inBlock=r>=box.r0&&r<=box.r1&&c>=box.c0&&c<=box.c1;
       const cond=audio&&key?.cond?condCode(key.cond):'';
-      const content=key?(t.scene?sceneLabel(key):t.visual?formatValue(t.id,key.v):`${escapeHTML(key.note)}${Object.keys(key.locks??{}).length?'<i class=lock-mark title="Sound locks">●</i>':''}<span class="velocity">${hex(key.vel)}</span>${cond?`<span class="cond">${escapeHTML(cond)}</span>`:''}`):'···';
+      const content=key?(t.scene?sceneLabel(key):t.visual?formatValue(t.id,key.v):`${escapeHTML(key.note)}${Object.keys(key.locks??{}).length?'<i class=lock-mark title="Sound locks">●</i>':''}<span class="velocity">${hex(key.vel)}</span>${key.len !== undefined?`<span class="cond" title="Note length in rows">L${key.len}</span>`:''}${cond?`<span class="cond">${escapeHTML(cond)}</span>`:''}`):'···';
       const missing=t.scene&&key&&remote&&!patchScenes.some(x=>x.name===key.name);
-      html+=`<button role="gridcell" aria-colindex="${index+2}" tabindex="${isSelected?'0':'-1'}" class="cell ${t.visual?'visual':''} ${t.scene?'scene':''} ${missing?'missing':''} ${!key?'empty':''} ${repeat?'repeat':''} ${isSelected?'selected':''} ${inBlock?'in-selection':''} ${audio&&state.mutes[c]?'muted':''}" data-row="${r}" data-col="${c}" aria-label="${name}, row ${hex(r)}${repeat?`, repeats row ${hex(r%p.lanes[c].len)}`:''}, ${key?(t.scene?escapeHTML(key.name)+(missing?' (not in this patch)':''):t.visual?formatValue(t.id,key.v):escapeHTML(key.note)+(Object.keys(key.locks??{}).length?', sound locks':'')+(cond?', condition '+escapeHTML(cond):'')):'empty'}" aria-selected="${inBlock}">${content}</button>`;
+      html+=`<button role="gridcell" aria-colindex="${index+2}" tabindex="${isSelected?'0':'-1'}" class="cell ${t.visual?'visual':''} ${t.scene?'scene':''} ${missing?'missing':''} ${!key?'empty':''} ${repeat?'repeat':''} ${isSelected?'selected':''} ${inBlock?'in-selection':''} ${audio&&state.mutes[c]?'muted':''}" data-row="${r}" data-col="${c}" aria-label="${name}, row ${hex(r)}${repeat?`, repeats row ${hex(r%p.lanes[c].len)}`:''}, ${key?(t.scene?escapeHTML(key.name)+(missing?' (not in this patch)':''):t.visual?formatValue(t.id,key.v):escapeHTML(key.note)+(Object.keys(key.locks??{}).length?', sound locks':'')+(key.len !== undefined?', length '+key.len+' rows':'')+(cond?', condition '+escapeHTML(cond):'')):'empty'}" aria-selected="${inBlock}">${content}</button>`;
     });html+='</div>';
   }
   grid.innerHTML=html;lastStep=-1;
@@ -628,6 +628,8 @@ function updateInspector(){
     const lane=p.lanes[selected.col];
     if(document.activeElement!==$('condInput'))$('condInput').value=condCode(hit?.cond);
     $('condInput').disabled=!hit;
+    if(document.activeElement!==$('lengthInput'))$('lengthInput').value=hit?.len??'';
+    $('lengthInput').disabled=!hit;
     if(document.activeElement!==$('laneName'))$('laneName').value=state.lanes[selected.col].name;
     if(document.activeElement!==$('laneLen')){$('laneLen').value=lane.len;$('laneLen').max=g.rows;}
     if(document.activeElement!==$('laneTransforms'))$('laneTransforms').value=transformsText(lane.transforms);
@@ -791,6 +793,13 @@ if(outputType){
   $('laneTransforms').onchange=()=>{
     try{const transforms=parseTransforms($('laneTransforms').value);changeScore('lane transforms',()=>{editable().lanes[selected.col].transforms=transforms;});}
     catch(error){toast(error.message);}
+  };
+  $('lengthInput').onchange=()=>{
+    try {
+      const length=parseLength($('lengthInput').value);
+      if(!getCell(pat(),selected.row,selected.col))return;
+      changeScore('note length',()=>{const p=editable(),{len:_,...rest}=getCell(p,selected.row,selected.col);putCell(p,selected.row,selected.col,length===null?rest:{...rest,len:length});});
+    }catch(error){toast(error.message);updateInspector();}
   };
   $('condInput').onchange=()=>{
     try{
@@ -1079,6 +1088,7 @@ if(outputType){
     if(e.key==='Escape'){
       selectionAnchor=null;updateSelection();openMenus().forEach(d=>{d.open=false;});return;
     }
+    if(inGrid&&e.altKey&&e.key.toLowerCase()==='l'&&selected.col<AUDIO){e.preventDefault();$('lengthInput').focus();$('lengthInput').select();return;}
     if(inGrid&&pianoEntry&&selected.col<AUDIO&&!e.altKey){
       const note=pianoNote(e.code,Number($('octaveInput').value));
       if(note){

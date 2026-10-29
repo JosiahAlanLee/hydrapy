@@ -353,7 +353,7 @@ class TrackerCV:
         if new_segment:
             # Heard as it starts, from the anchor's row; only the first playhead this
             # output ever sees is joined late, from its own tick (evaluator.md#evaluate).
-            self._follower.begin(-tracker_v3.TICKS if self._transport is not None else math.floor(u[0]), segment)
+            self._follower.begin(-7680 if self._transport is not None else math.floor(u[0]), segment)
             self._segment = segment
         if changed or (moving and not self._moving):
             self._reset_remaining = round(self.reset_s * self.samplerate) if moving else 0
@@ -380,16 +380,25 @@ class TrackerCV:
         for lane in range(6):
             gate = np.zeros(frames, bool)
             velocity, pitch = np.full(frames, np.nan), np.full(frames, np.nan)
+            previous = None
+            explicit_lane = any(c['lane'] == lane and 'len' in c for c in self._follower.candidates)
+            gap = .001 * d['bpm'] / 60 * tracker_v3.TICKS
             for c in self._follower.candidates:
-                if c['lane'] == lane and c['fires'] and c['at'] <= u[-1] and c['at'] + c['duration'] > u[0]:
-                    gate |= (u >= c['at']) & (u < c['at'] + self.gate * c['duration'])
-                    span = (u >= c['at']) & (u < c['at'] + c['duration'])
+                if c['lane'] == lane and c['fires'] and c['at'] <= u[-1]:
+                    start = c['at'] + (gap if tracker_v3.retriggers(previous, c) else 0)
+                    active = u >= c['at']
+                    gate[active] = (u[active] >= start) & (u[active] < c['at'] + tracker_v3.gate_duration(c, self.gate))
+                    previous = c
+                    span = active if explicit_lane else (active & (u < c['at'] + c['duration']))
                     midi = note_midi(c['note'])
                     velocity[span] = c['vel']
                     pitch[span] = np.nan if midi is None else (midi + d['key'] - 2 - self.pitch_zero) / 12
             if self._landing_lanes[lane]:
                 low, high = self._landing_span[lane]
                 landing = (np.arange(frames) < self._landing_lanes[lane]) & (u >= low) & (u < high)
+                for c in self._follower.candidates:
+                    if c['lane'] == lane and c['fires'] and c['at'] > low:
+                        landing &= u < c['at']
                 # Leaving the landing candidate's span ends it for good.
                 self._landing_lanes[lane] = self._landing_lanes[lane] - frames if landing[-1] else 0
                 gate |= landing
@@ -402,7 +411,7 @@ class TrackerCV:
                 memory[lane] = held[-1]
                 target[lane] = held
         self._retrigger = np.maximum(0, self._retrigger - frames)
-        self._follower.forget(u[0])
+        self._follower.forget(u[0] - gap)
         for column, (channel, name) in enumerate(self.mapping.items()):
             if name == 'clock':
                 # Elapsed beats from the segment's start tick, never wrapped at the cycle, so the
@@ -442,6 +451,8 @@ class TrackerCV:
         """
         for c in self._follower.candidates:
             end = c['at'] + c['duration']
+            if 'len' in c:
+                continue  # explicit lengths resume their remaining span directly
             if c['fires'] and c['at'] <= landing < end and c['at'] <= now < end:
                 phase = (landing - c['at']) / c['duration']
                 if phase < self.gate:

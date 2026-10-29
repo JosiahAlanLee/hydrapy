@@ -60,7 +60,7 @@ export function fits(score, format) {
     if (p.rate !== 1 || p.bar !== 16 || p.bars !== 4) return false;
     for (const [n, lane] of p.lanes.entries())
       if (lane.len !== 64 || lane.transforms.length || Object.keys(lane).length !== 3 ||
-          lane.cells.some(c => c && (n >= 4 || 'cond' in c))) return false;
+          lane.cells.some(c => c && (n >= 4 || 'cond' in c || 'len' in c))) return false;
   }
   if (format === 'hydrapy-tracker-1')
     return score.sounds.every(s => same(s, quiet())) && !score.patterns.some(p => p?.lanes.some(l => l.cells.some(c => c?.locks)));
@@ -282,7 +282,9 @@ function row(out, score, t, u0, u1, play, entry, p, r, rowAt, w, bar, fill) {
     const [holds, condWhy] = cond ? judge(cond, score.seed, p, laneIndex, r, bar, fill) : [true, null];
     const via = active.map(([, , pointer]) => pointer);
     for (const [s, m, dropped] of events) {
-      const duration = w / m, at = rowAt + s * duration;
+      const at = rowAt + s * w / m;
+      const pattern = score.patterns[p];
+      const duration = 'len' in hit ? Math.min(hit.len * 480, rowAt + (pattern.bar * pattern.bars - r) * w - at) : w / m;
       if (at < u0 || at >= u1 || at + duration <= 0) continue;
       let fires = false, why;
       if (score.mutes[laneIndex]) why = 'muted (score)';
@@ -290,7 +292,7 @@ function row(out, score, t, u0, u1, play, entry, p, r, rowAt, w, bar, fill) {
       else if (!holds) why = condWhy;
       else if (dropped) why = dropped;
       else { fires = true; why = condWhy; }
-      out.push({id: `${play}.${laneIndex}.${r}` + (m > 1 ? `.${s}` : ''), at, lane: laneIndex, duration,
+      out.push({id: `${play}.${laneIndex}.${r}` + (m > 1 ? `.${s}` : ''), at, lane: laneIndex, duration, ...('len' in hit ? {len: hit.len} : {}),
                 note: hit.note, vel: hit.vel, locks: hit.locks ? clone(hit.locks) : null, fires, why,
                 origin: {play, entry, pattern: p, row: r, lane_row: laneRow, cell, sub: s, of: m, bar,
                          cond: cond ? condCode(cond) : null, via: [...via]}});
@@ -307,7 +309,7 @@ export function evaluate(score, transport, u0, u1, line = timeline(score)) {
   const first = line.entryAt(a), from = Math.max(u0, 0);
   let cycles = Math.floor((a + from) / cycle), i = line.entryAt((a + from) % cycle);
   let play = cycles * n + i - first, playStart = cycles * cycle + starts[i] - a;
-  let r = Math.floor((from - playStart) / geometry(score.patterns[entries[i]]).w);
+  let r = Math.max(0, Math.floor((Math.max(u0, -7680) - playStart) / geometry(score.patterns[entries[i]]).w));
   const out = [];
   while (playStart < u1) {
     const p = entries[i], g = geometry(score.patterns[p]);

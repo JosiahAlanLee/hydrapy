@@ -121,6 +121,8 @@ def _pattern(p):
                     raise ValueError('Expected a note and velocity')
                 studio_tracker.note_midi(hit.get('note'))
                 studio_tracker.number(hit.get('vel'), 0, 127, 'Velocity')
+                if 'len' in hit:
+                    studio_tracker.number(hit['len'], .25, 16, 'Note length')
                 if 'locks' in hit:
                     controls(hit['locks'], machine=True)
                 if 'cond' in hit:
@@ -354,7 +356,7 @@ def _leaves(transforms, bar_count):
     return leaves
 
 
-def _row(out, score, layers, u0, u1, play, entry, p, row, row_at, w, bar_count, fill):
+def _row(out, score, layers, u0, u1, play, entry, p, row, row_at, w, bar_count, fill, history=False):
     """Append the candidates of one pattern row that start in ``[u0, u1)`` and end after the anchor."""
     for lane_index, lane in enumerate(score['patterns'][p]['lanes']):
         leaves = _leaves(lane['transforms'], bar_count)
@@ -386,9 +388,12 @@ def _row(out, score, layers, u0, u1, play, entry, p, row, row_at, w, bar_count, 
         holds, cond_why = _judge(cond, score['seed'], p, lane_index, row, bar_count, fill) if cond else (True, None)
         via = [pointer for _, _, pointer in leaves]
         for s, m, dropped in events:
-            duration = w // m
-            at = row_at + s * duration
-            if not u0 <= at < u1 or at + duration <= 0:
+            step = w // m
+            at = row_at + s * step
+            pattern = score['patterns'][p]
+            end = row_at + (pattern['bar'] * pattern['bars'] - row) * w
+            duration = min(hit['len'] * 480, end - at) if 'len' in hit else step
+            if not u0 <= at < u1 or (not history and at + duration <= 0):
                 continue
             if score['mutes'][lane_index]:
                 fires, why = False, 'muted (score)'
@@ -401,20 +406,21 @@ def _row(out, score, layers, u0, u1, play, entry, p, row, row_at, w, bar_count, 
             else:
                 fires, why = True, cond_why
             out.append({'id': f'{play}.{lane_index}.{row}' + (f'.{s}' if m > 1 else ''), 'at': at,
-                        'lane': lane_index, 'duration': duration, 'note': hit['note'], 'vel': hit['vel'],
+                        'lane': lane_index, 'duration': duration, **({'len': hit['len']} if 'len' in hit else {}),
+                        'note': hit['note'], 'vel': hit['vel'],
                         'locks': copy.deepcopy(hit['locks']) if 'locks' in hit else None, 'fires': fires, 'why': why,
                         'origin': {'play': play, 'entry': entry, 'pattern': p, 'row': row, 'lane_row': lane_row,
                                    'cell': cell, 'sub': s, 'of': m, 'bar': bar_count,
                                    'cond': condition_code(cond) if cond else None, 'via': list(via)}})
 
 
-def evaluate(score, transport, u0, u1):
+def evaluate(score, transport, u0, u1, *, _history=False):
     """Every candidate with ``u0 ≤ at < u1`` that ends after the anchor, sorted by ``at``, then lane.
 
     ``transport`` is ``{tick, fill, bus: {fill, mutes}}``: the anchor's cycle
     tick, Studio's FILL transitions and the bus layer. Missing lists are off.
-    The anchor's row comes back with a negative ``at`` when the anchor is
-    inside it; earlier rows never do.
+    Held explicit lengths can come back with a negative ``at`` from earlier
+    rows of the anchor pattern. Legacy cells only return the anchor's row.
     """
     t = timeline(score)
     a = transport['tick']
@@ -424,13 +430,13 @@ def evaluate(score, transport, u0, u1):
         raise ValueError('Evaluate whole ticks')
     layers = _Layers(transport)
     n, first = len(t.entries), t.entry(a)
-    # Start at the row holding tick max(u0, 0): earlier rows end before u0 or at the anchor.
+    # Negative queries can recover held lengths from earlier rows of this entry.
     cycles, position = divmod(a + max(u0, 0), t.cycle)
     i = t.entry(position)
     play = cycles * n + i - first
     play_start = cycles * t.cycle + t.starts[i] - a
     w = geometry(score['patterns'][t.entries[i]])[0]
-    row = (max(u0, 0) - play_start) // w
+    row = max(0, (max(u0, -7680) - play_start) // w)
     out = []
     while play_start < u1:
         p = t.entries[i]
@@ -442,7 +448,7 @@ def evaluate(score, transport, u0, u1):
                 break
             if score['patterns'][p] is not None:
                 _row(out, score, layers, u0, u1, play, None if t.loop else i, p, row, row_at, w,
-                     visit * bars + row // bar, layers.fill_on(row_at))
+                     visit * bars + row // bar, layers.fill_on(row_at), _history)
         play += 1
         i += 1
         if i == n:
@@ -529,6 +535,7 @@ class Follower:
         """Start ``segment``, evaluating from ``tick``: at or before the anchor's row when the
         follower hears of the segment as it starts, its own current tick when it joins late."""
         self.frontier, self.segment, self.candidates = tick, segment, []
+        self._joining = True
 
     def evaluated(self, segment):
         """The first tick of ``segment`` not yet evaluated, or None for another segment."""
@@ -553,10 +560,40 @@ class Follower:
         else:
             first, self.frontier = self.frontier, top
         new = evaluate(snapshot['document'], t, first, top)
+        if self._joining:
+            # Include ended hits privately: a short hit before the anchor can
+            # supersede a long note whose nominal span still covers the seek.
+            prior = evaluate(snapshot['document'], t, max(first, 0) - 7680,
+                             max(first, 0), _history=True)
+            latest = {}
+            for c in prior:
+                if c['fires']:
+                    latest[c['lane']] = c
+            new = [c for c in new if not ('len' in c and c['at'] < 0
+                   and c['at'] < latest.get(c['lane'], c)['at'])]
+            if first >= 0:
+                new = [c for c in latest.values() if 'len' in c and c['at'] + c['duration'] > first] + new
+            new.sort(key=lambda c: (c['at'], c['lane']))
+            self._joining = False
         self.candidates += new
         return new
 
     def forget(self, u):
-        """Drop candidates that ended at or before tick ``u``."""
-        self.candidates = [c for c in self.candidates if c['at'] + c['duration'] > u]
+        """Drop ended or superseded candidates; each lane is monophonic."""
+        latest = {}
+        for c in self.candidates:
+            if c['fires'] and c['at'] <= u:
+                latest[c['lane']] = c['at']
+        self.candidates = [c for c in self.candidates if c['at'] + c['duration'] > u
+                           and (not c['fires'] or c['at'] >= latest.get(c['lane'], c['at']))]
 
+
+def gate_duration(candidate, fraction):
+    """Explicit lengths bypass the legacy Gate length fraction."""
+    return candidate['duration'] * (1 if 'len' in candidate else fraction)
+
+
+def retriggers(previous, candidate):
+    """A new explicit/held hit gets a 1 ms low edge, including at a shared end."""
+    return (previous is not None and ('len' in previous or 'len' in candidate)
+            and previous['at'] + previous['duration'] >= candidate['at'])

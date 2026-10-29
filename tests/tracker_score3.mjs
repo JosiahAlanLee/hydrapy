@@ -159,3 +159,14 @@ test('top-level legacy metadata survives saving, upgrading and undo', async () =
   assert.equal(s.legacyTop, undefined);
   assert.equal(outgoing(s).seed, 9);
 });
+
+test('explicit lengths use 480 ticks, clip at pattern end, and seek from earlier rows', () => {
+  const d=upgrade(demo());d.pattern=0;d.loop=true;
+  const p=emptyPattern(0);d.patterns[0]=p;
+  p.lanes[0].cells[0]={note:'C-4',vel:90,len:12};
+  assert.equal(evaluate(d,{tick:4800},-7680,1)[0].duration,5760);
+  p.rate=2;p.lanes[0].cells[0].len=2.375;
+  assert.equal(evaluate(d,{tick:0},0,1)[0].duration,1140);
+  p.lanes[0].cells[63]={note:'D-4',vel:90,len:16};
+  assert.equal(evaluate(d,{tick:0},63*240,64*240)[0].duration,240);
+});
