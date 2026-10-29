@@ -229,6 +229,10 @@ the [Bullfrog demo](bullfrog-demo.md).
 
 ## Measure preview performance
 
+For long renders with concurrent audio, see [stress-test diagnostics](studio-diagnostics.md):
+`--diagnostics FILE` retains bounded timing summaries, scene markers and upstream
+audio counters without changing the audio callback.
+
 The browser retains the latest 300 measurements in `window.hydrapyPreview.samples`.
 The authenticated `/api/frame?output=o0&after=SEQUENCE` endpoint waits at most one
 second for a newer selected frame, returning a JPEG with `X-Preview-Sequence`,

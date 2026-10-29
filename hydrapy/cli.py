@@ -196,6 +196,9 @@ def main(argv=None):
     studio.add_argument("--tracker-trace", metavar="FILE",
                         help="append a version-3 score's event trace to FILE, one JSON line per event "
                              "(Gorgon's evaluator.md)")
+    studio.add_argument("--diagnostics", metavar="FILE",
+                        help="write bounded stress-test diagnostics to a NEW JSONL file (relative to --root); "
+                             "background writer, one-second summaries and incident history")
     studio.add_argument("--port", type=int, default=8765)
     studio.add_argument("--no-browser", action="store_true")
     studio.add_argument("--tracker", action="store_true", help="open the Gorgon tracker workspace")
@@ -275,7 +278,7 @@ def main(argv=None):
         size = a.size or (None if a.native_output else (640, 360))
         native = None if a.no_native_output else a.native_output or 'available'
         serve(a.root, a.patch, a.backend, size, a.fps, a.port, not a.no_browser, tracker=a.tracker, cv=cv,
-              native=native, edit_delay_ms=a.edit_delay_ms, trace=a.tracker_trace)
+              native=native, edit_delay_ms=a.edit_delay_ms, trace=a.tracker_trace, diagnostics=a.diagnostics)
         return
 
     if a.cmd == "check":
