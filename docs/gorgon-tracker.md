@@ -154,6 +154,7 @@ the scene plays again.
 | `tracker.note(n)` | the last hit's MIDI note, key-transposed as the CV is (held; 60 to start) |
 | `tracker.vel(n)` | the last hit's velocity, 0–1 (held) |
 | `tracker.beat()`, `tracker.row()` | the playhead: beat 0–64, sixteenth row 0–63 |
+| `tracker.ahead(s).note(n)` etc. | the same lane signals `s` seconds ahead in a version-3 score (0 < s ≤ 1): for a sound the picture makes that reaches its instrument late |
 
 Lanes are numbered 1–4 as in the tracker. A hit fires when the playhead crosses
 its row, so it fires once per pass and isn't missed at a low frame rate. Muted
