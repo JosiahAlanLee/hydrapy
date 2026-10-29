@@ -321,7 +321,7 @@ class LaneState:
             if live or self.transport is None:
                 self.__init__()
             self.transport, self.segment, self.started = snapshot['transport_revision'], segment, [None] * 6
-            self._follower.begin(-tracker_v3.TICKS if live else math.floor(u if begin is None else begin), segment)
+            self._follower.begin(-tracker_v3.HOLD_TICKS if live else math.floor(u if begin is None else begin), segment)
         self.moving = moving
         beat, _, row = tracker_v3.position(d, snapshot['start']['tick'], [u])
         gate = [0.] * 6
@@ -336,10 +336,15 @@ class LaneState:
                 if midi is not None:
                     self.note[c['lane']] = float(midi + d['key'] - 2)
                 self.vel[c['lane']], self.started[c['lane']] = c['vel'] / 127, c['at']
+        gap = .001 * d['bpm'] / 60 * tracker_v3.TICKS
+        previous = [None] * 6
         for c in self._follower.candidates:
-            if c['fires'] and c['at'] <= u < c['at'] + self.GATE * c['duration']:
-                gate[c['lane']] = 1.
-        self._follower.forget(u)
+            if c['fires'] and c['at'] <= u:
+                lane = c['lane']
+                start = c['at'] + (gap if tracker_v3.retriggers(previous[lane], c) else 0)
+                gate[lane] = float(start <= u < c['at'] + tracker_v3.gate_duration(c, self.GATE))
+                previous[lane] = c
+        self._follower.forget(u - gap)
         seconds = 60 / d['bpm'] / tracker_v3.TICKS
         self.since = [None if at is None else (u - at) * seconds for at in self.started]
         return dict(gate=gate, since=list(self.since), note=list(self.note), vel=list(self.vel),

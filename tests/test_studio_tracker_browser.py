@@ -799,6 +799,31 @@ def test_banks_chain_pattern_shape_fill_and_seed(workspace):
     assert session.tracker.document['seed'] == 1234
 
 
+def test_cell_length_keyboard_edit_display_and_clear(workspace):
+    session, page, context, root = workspace
+    cell = page.locator('[data-row="1"][data-col="1"]')
+    cell.click()
+    page.locator('#noteInput').fill('E4')
+    page.locator('#noteInput').press('Tab')
+    cell.click()
+    cell.press('Alt+l')
+    length = page.locator('#lengthInput')
+    assert length.evaluate('el => el === document.activeElement')
+    length.fill('2.375')
+    length.press('Tab')
+    page.wait_for_function("document.querySelector('[data-row=\"1\"][data-col=\"1\"]').textContent.includes('L2.375')")
+    assert 'length 2.375 rows' in cell.get_attribute('aria-label')
+    cell.click()
+    cell.press('Control+z')
+    assert 'L2.375' not in cell.inner_text()
+    cell.press('Control+Shift+z')
+    assert 'L2.375' in cell.inner_text()
+    cell.press('Alt+l')
+    length.fill('')
+    length.press('Tab')
+    assert 'L2.375' not in cell.inner_text()
+
+
 def test_program_route_away_from_the_patch_output_shows_a_notice(workspace):
     session, page, context, root = workspace
     page.locator('#programMode').select_option('o2')

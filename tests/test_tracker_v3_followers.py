@@ -264,6 +264,88 @@ def test_publish_hands_the_callback_a_whole_snapshot(monkeypatch):
     assert seen == [True] and 'cells' in cv.snapshot and cv.snapshot is not before
 
 
+def length_score(length=3, next_row=None):
+    p = pattern()
+    p['lanes'][0]['cells'][0] = dict(hit(), len=length)
+    if next_row is not None:
+        p['lanes'][0]['cells'][next_row] = dict(hit(note='D-4'), len=1)
+    return blank(bpm=120, patterns=[p] + [None] * 127)
+
+
+def test_explicit_cv_length_crosses_rows_ignores_gate_setting_and_ends():
+    _, volts = render(v3(length_score()), .5, {0: 'gate1'}, gate=.1)
+    assert np.all(volts[:3 * ROW, 0] == 5)
+    assert not volts[3 * ROW:, 0].any()
+
+
+@pytest.mark.parametrize('chunk', [1, 511, ROW, 3 * ROW, 4 * ROW])
+def test_explicit_cv_retrigger_at_shared_end_survives_callback_boundaries(chunk):
+    tracker = v3(length_score(next_row=3))
+    cv, _ = render(tracker, 0, {0: 'gate1'})
+    output = np.concatenate([cv.render(min(chunk, 4 * ROW - at), 100 + at / SR)
+                             for at in range(0, 4 * ROW, chunk)])[:, 0]
+    assert np.all(output[:3 * ROW] == 5)
+    assert not output[3 * ROW:3 * ROW + 48].any()
+    assert np.all(output[3 * ROW + 49:] == 5)
+
+
+def test_cv_seek_into_held_explicit_note_and_pattern_clip():
+    cv, volts = render(v3(length_score(12), tick=10 * 480), .375, {0: 'gate1'}, gate=.1)
+    assert np.all(volts[:2 * ROW, 0] == 5)
+    assert not volts[2 * ROW:, 0].any()
+    # Seeking while open preserves the transport retrigger.
+    _, volts = render(v3(length_score(12), tick=8 * 480, revision=1), .05, {0: 'gate1'}, cv=cv)
+    # The previous callback finished low; resume immediately without a spurious gap.
+    assert np.all(volts[:, 0] == 5)
+    _, volts = render(v3(length_score(12), tick=9 * 480, revision=2), .05, {0: 'gate1'}, cv=cv)
+    assert not volts[:48, 0].any() and np.all(volts[49:, 0] == 5)
+    p = pattern()
+    p['lanes'][0]['cells'][15] = dict(hit(), len=16)
+    _, volts = render(v3(blank(bpm=120, patterns=[p] + [None] * 127)), 2.125, {0: 'gate1'})
+    assert np.all(volts[15 * ROW:16 * ROW, 0] == 5) and not volts[16 * ROW:, 0].any()
+
+
+def test_lane_state_explicit_gate_and_retrigger():
+    snapshot = dict(vars(v3(length_score(next_row=3))), playing=True)
+    lanes = LaneState()
+    for u in [0, 480, 1000, 1439]:
+        assert lanes.update_v3(snapshot, u, True)['gate'][0] == 1
+    assert lanes.update_v3(snapshot, 1440, True)['gate'][0] == 0
+    assert lanes.update_v3(snapshot, 1441, True)['gate'][0] == 0
+    assert lanes.update_v3(snapshot, 1444, True)['gate'][0] == 1
+    assert lanes.update_v3(snapshot, 1920, True)['gate'][0] == 0
+    lanes.update_v3(dict(snapshot, transport_revision=1, start={'tick': 960, 'entry': None}), 0, True)
+    assert lanes.update_v3(dict(snapshot, transport_revision=1, start={'tick': 960, 'entry': None}), 100, True)['gate'][0] == 1
+
+
+def test_short_hit_supersedes_long_gate_without_resurrecting_it():
+    d = length_score(12)
+    d['patterns'][0]['lanes'][0]['cells'][2] = hit()
+    tracker = v3(d)
+    cv, _ = render(tracker, 0, {0: 'gate1'})
+    chunks = [cv.render(ROW, 100 + k * ROW / SR) for k in range(8)]
+    assert np.all(chunks[0] == 5) and np.all(chunks[1] == 5)
+    assert not np.concatenate(chunks[3:]).any()
+    snapshot = dict(vars(tracker), playing=True)
+    lanes = LaneState()
+    for u in [0, 480, 960, 1440, 1920, 2400]:
+        frame = lanes.update_v3(snapshot, u, True)
+    assert frame['gate'][0] == 0
+
+
+def test_first_playhead_attachment_restores_explicit_held_note():
+    _, volts = render(v3(length_score(12), tick=8 * 480), .25, {0: 'gate1'}, live=False)
+    assert np.all(volts[:, 0] == 5)
+
+
+@pytest.mark.parametrize('live', [True, False])
+def test_seek_after_short_replacement_does_not_restore_superseded_long_note(live):
+    d = length_score(12)
+    d['patterns'][0]['lanes'][0]['cells'][2] = hit()
+    _, volts = render(v3(d, tick=4 * 480), .125, {0: 'gate1'}, live=live)
+    assert not volts.any()
+
+
 def test_lane_signals_ahead_read_the_score_early():
     from hydrapy import Patch
     from hydrapy.scenes import TrackerSignal, _Tracker

@@ -2,7 +2,7 @@
 // (score3.js): the editor keeps every score that way.
 import {noteMidi, canonicalNote} from './notes.js';
 import {validateLocks} from './sounds.js';
-import {condCode, emptyPattern, geometry, parseCond} from './score3.js';
+import {MIN_NOTE_LENGTH, MAX_NOTE_LENGTH, condCode, emptyPattern, geometry, parseCond} from './score3.js';
 
 export const LANES = ['z', 'roll', 'feedback'];
 const LIMITS = [[0, 1], [-45, 45], [0, .9]];
@@ -86,6 +86,7 @@ export function putCell(pattern, row, col, value) {
   } else if (col < AUDIO) {
     const lane = pattern.lanes[col];
     lane.cells[row % lane.len] = value ? {note: value.note, vel: value.vel,
+      ...('len' in value ? {len: parseLength(value.len)} : {}),
       ...('locks' in value ? {locks: clone(validateLocks(value.locks))} : {}),
       ...(value.cond ? {cond: parseCond(condCode(value.cond))} : {})} : null;
   } else {
@@ -117,6 +118,7 @@ export function readBlock(text) {
       if (!value || typeof value !== 'object') throw new Error('Invalid clipboard cell.');
       if (block.columns[c] === 'audio') {
         value.note = canonicalNote(value.note);
+        if ('len' in value && (typeof value.len !== 'number' || parseLength(value.len) === null)) throw new Error('Invalid clipboard length.');
         if ('locks' in value) validateLocks(value.locks);
         if ('cond' in value) try { value.cond = parseCond(condCode(value.cond)); } catch { throw new Error('Invalid clipboard condition.'); }
         if (!Number.isInteger(value.vel) || value.vel < 0 || value.vel > 127) throw new Error('Invalid clipboard velocity.');
@@ -192,4 +194,12 @@ export function activity(pattern) {
     keys: LANES.reduce((n, lane) => n + (pattern.keys[lane].some(k => k.r === r) ? 1 : 0), 0) +
           ((pattern.scenes ?? []).some(k => k.r === r) ? 1 : 0),
   }));
+}
+
+// Blank restores the legacy gate fraction; numeric lengths use base rows (480 ticks).
+export function parseLength(text) {
+  if (String(text).trim() === '') return null;
+  const value = Number(text);
+  if (!Number.isFinite(value) || value < MIN_NOTE_LENGTH || value > MAX_NOTE_LENGTH) throw new Error(`Note length must be ${MIN_NOTE_LENGTH}–${MAX_NOTE_LENGTH} rows.`);
+  return value;
 }

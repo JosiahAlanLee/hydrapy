@@ -550,3 +550,36 @@ def test_versions_1_and_2_map_onto_the_same_song(fmt):
                       for row, h in enumerate(cells) if h is not None and h['vel'] > 0)
     got = evaluate(new, {'tick': 0}, 0, 64 * TICKS)
     assert [(c['at'], c['lane'], c['note'], c['fires'], c['locks']) for c in got] == expected
+
+@pytest.mark.parametrize('length', [.25, .333, 1, 2.5, 16])
+def test_cell_lengths_validate_and_set_tick_duration(length):
+    p = pattern()
+    p['lanes'][0]['cells'][0] = dict(hit(), len=length)
+    d = blank(patterns=[p] + [None] * 127)
+    assert run(d, {'tick': 0}, 0, 1)[0]['duration'] == length * 480
+
+
+@pytest.mark.parametrize('length', [True, False, None, '2', 0, .249, 16.01, float('nan'), float('inf')])
+def test_invalid_cell_lengths(length):
+    p = pattern()
+    p['lanes'][0]['cells'][0] = dict(hit(), len=length)
+    with pytest.raises(ValueError):
+        validate(blank(patterns=[p] + [None] * 127))
+
+
+def test_explicit_lengths_are_base_rows_unsplit_by_ply_and_clip_to_pattern():
+    p = pattern(rate=2)
+    p['lanes'][0]['cells'][14] = dict(hit(), len=2.5)
+    p['lanes'][0]['transforms'] = [{'kind': 'ply', 'n': 2}]
+    candidates = run(blank(patterns=[p] + [None] * 127), {'tick': 0}, 14 * 240, 16 * 240)
+    assert [(c['at'], c['duration']) for c in candidates] == [(3360, 480), (3480, 360)]
+
+
+def test_seek_recovers_a_long_note_from_more_than_four_rows_back():
+    p = pattern()
+    p['lanes'][0]['cells'][0] = dict(hit(), len=12)
+    d = blank(patterns=[p] + [None] * 127)
+    candidates = run(d, {'tick': 10 * 480}, -7680, 1)
+    assert [(c['at'], c['duration']) for c in candidates] == [(-4800, 5760)]
+    # No tie survives a pattern boundary, even when the same pattern loops.
+    assert evaluate(d, {'tick': 0}, -7680, 0) == []

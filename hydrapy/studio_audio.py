@@ -97,7 +97,7 @@ class BreaksSynth:
             # start from the current tick, so no hit already heard sounds again.
             u = tracker_v3.elapsed(snapshot, times[:1])[0]
             self.segment = (snapshot['transport_revision'], snapshot['start']['tick'])
-            self.follower.begin(-tracker_v3.TICKS if live else math.floor(u), self.segment)
+            self.follower.begin(-tracker_v3.HOLD_TICKS if live else math.floor(u), self.segment)
         self.transport, self.moving = transport, moving
         if not moving:
             return out

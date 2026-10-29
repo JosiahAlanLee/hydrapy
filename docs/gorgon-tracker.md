@@ -149,7 +149,7 @@ the scene plays again.
 
 | Signal | Value |
 | --- | --- |
-| `tracker.gate(n)` | 1 while lane n's gate is open (half a row per hit), else 0 |
+| `tracker.gate(n)` | 1 while lane n's gate is open (half a row by default; explicit cell length supported), else 0 |
 | `tracker.hit(n, decay=.25)` | 1 at each hit, falling to 0 over `decay` seconds |
 | `tracker.note(n)` | the last hit's MIDI note, key-transposed as the CV is (held; 60 to start) |
 | `tracker.vel(n)` | the last hit's velocity, 0–1 (held) |
@@ -224,7 +224,7 @@ Channel numbers count from 0, as `CvOut` does. Choose signals explicitly with
 | `clock` | 5 V pulses, `--cv-ppqn` per quarter note (default 4: sixteenths), 50% duty; in a version-3 score it counts elapsed beats from the transport's start tick, so it runs steadily through cycle wraps |
 | `reset` | 5 ms, 5 V on start/resume/seek and at the score or pattern-loop boundary |
 | `run` | 5 V while the tracker is playing |
-| `gate1`–`gate6` | 5 V for half a row on each audio-lane hit; muted lanes send nothing |
+| `gate1`–`gate6` | 5 V for half a row by default, or the explicit cell length; muted lanes send nothing |
 | `pitch1`–`pitch6` | held 1 V/oct pitch; C4 = 0 V by default, follows the key selector |
 | `vel1`–`vel6` | last hit's velocity on that lane, 0–5 V, held until the next hit |
 | `z`, `feedback` | lane minimum to maximum as 0–5 V |
@@ -451,3 +451,7 @@ Older Gorgon/HydraPy versions reject this format. Untouched legacy scores keep
 through Gorgon's sound link. Browser audition, direct physical CV and visual
 lanes retain their existing behavior. P1–P8 labels and machine availability are
 instrument-specific; the tracker does not guess a pitch parameter from note names.
+
+See [per-cell note length](note-length.md) for score-v3 `len`, keyboard editing,
+held-note seeks, retrigger gaps and pattern-end clipping. Rack support requires
+the corresponding Gorgon update.
