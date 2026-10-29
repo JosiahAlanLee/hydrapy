@@ -101,6 +101,7 @@ class Recorder:
         """``jack``: the StudioAudio whose clock stamps each frame (``jack_frame_at``), or None."""
         self.path, self.fps, self.start = path, fps, time.monotonic()
         self.frames, self.error = 0, ''
+        self.repeated_frames = 0
         self.jack = jack
         self.present, self.rendered, self.jack_frames = [], [], []
         self.samplerate = None
@@ -144,12 +145,13 @@ class Recorder:
             stamp = self.jack.jack_frame_at(at)
             if stamp is not None and self.samplerate is None:
                 self.samplerate = self.jack.samplerate
-        for _ in range(target - self.frames):
+        for repeat in range(target - self.frames):
             try:
                 self.q.put_nowait(frame)
             except queue.Full:
                 raise RuntimeError('Recording encoder fell behind. Stop recording and use offline export.')
             self.frames += 1
+            self.repeated_frames += repeat > 0
             self.present.append(round(at, 6))
             self.rendered.append(round(at if rendered is None else rendered, 6))
             self.jack_frames.append(stamp)
@@ -214,7 +216,7 @@ class _Finishing:
 
 class Session:
     def __init__(self, root, patch=None, backend='auto', size=(640, 360), fps=30., cv=None, native=None,
-                 edit_delay_ms=None, trace=None, restore_audio=True):
+                 edit_delay_ms=None, trace=None, restore_audio=True, diagnostics=None):
         """``native``: None renders as always (no window). ``'available'`` renders in a hidden
         window's context so the tracker's Display menu can show Program fullscreen (Linux, X
         display, glfw; otherwise the menu says why not). A monitor name or index, or
@@ -301,6 +303,22 @@ class Session:
         self._frame_wall = None
         self.jobs, self.job_processes = {}, {}
         self.recent = []
+        self.diagnostics = None
+        self._diagnostic_state = None
+        self._diagnostic_scenes = None
+        self._diagnostic_revision = None
+        self._diagnostic_readback_ms = 0.
+        if diagnostics is not None:
+            from .studio_diagnostics import Diagnostics
+            try:
+                self.diagnostics = Diagnostics(self.root / diagnostics, dict(
+                    backend_requested=backend, size=self.size, target_fps=fps, native=native), audio=self.audio)
+            except Exception:
+                self.preview.close()
+                self.aux_preview.close()
+                if self.tracker.trace is not None:
+                    self.tracker.trace.close()
+                raise
         self.thread = threading.Thread(target=self._run, daemon=True, name='hydrapy-render')
         self.thread.start()
         if native is not None:
@@ -415,6 +433,8 @@ class Session:
     def _set_load(self, **values):
         with self.lock:
             self.load_status = dict(self.load_status, **values)
+        if self.diagnostics is not None:
+            self.diagnostics.event('load', **values, audio_suspended=self.audio.suspended)
 
     def status(self):
         """GET /api/status: is a patch loaded and ready, and what a load is doing now."""
@@ -453,12 +473,27 @@ class Session:
                        compiled_variants=0, prewarmed_scenes=0, banks=0, prewarmed_banks=0, bank_frames=0)
         try:
             with self.audio.held('the patch load'):
+                if self.diagnostics is not None:
+                    self.diagnostics.event('audio_hold', reason='patch_load', suspended=self.audio.suspended,
+                                           suspensions=self.audio.suspensions)
                 result = self._load_patch(name, preserve=preserve, armed=armed)
         except Exception as exc:
             self._set_load(state='error', error=''.join(traceback.format_exception_only(type(exc), exc)).strip(),
                            seconds=time.monotonic() - started)
             raise
+        finally:
+            if self.diagnostics is not None:
+                self.diagnostics.event('audio_resume', reason='patch_load', suspended=self.audio.suspended,
+                                       suspensions=self.audio.suspensions, error=self.audio.error)
         self._set_load(state='ready', seconds=time.monotonic() - started, **self._load_counts(self.renderer))
+        if self.diagnostics is not None:
+            ctx = getattr(self.renderer, 'ctx', None)
+            info = ctx.info if ctx is not None else {}
+            self.diagnostics.event('patch', path=str(self.path.relative_to(self.root)),
+                                   sha256=digest(self.source), backend='GL' if ctx is not None else 'CPU',
+                                   backend_note=self.backend_note,
+                                   graphics={k: info.get(k) for k in ('GL_VENDOR', 'GL_RENDERER', 'GL_VERSION')},
+                                   size=self.size, target_fps=self.fps)
         if self.audio.error and 'resume' in self.audio.error:
             self.notice = self.audio.error
         return result
@@ -614,12 +649,22 @@ class Session:
                 # New crossfades can compile for seconds: JACK audio pauses for them, as for a load.
                 fades = scene_fades(self.tracker.document, patch.scenes)
                 warmed = getattr(self.renderer, 'warmed_fades', set())
+                compile_error = ''
                 try:
                     with self.audio.held('crossfade compiles') if not set(fades) <= warmed else nullcontext():
+                        if self.diagnostics is not None:
+                            self.diagnostics.event('compile_begin', reason='score_crossfades',
+                                                   audio_suspended=self.audio.suspended,
+                                                   suspensions=self.audio.suspensions)
                         self.renderer.prewarm_scenes(fades)
                     self.renderer.warmed_fades = warmed | set(fades)
                 except Exception as exc:
                     self.preview_error = f'Scene crossfade compile failed: {exc}'
+                    compile_error = self.preview_error
+                finally:
+                    if self.diagnostics is not None:
+                        self.diagnostics.event('compile_end', reason='score_crossfades',
+                                               audio_suspended=self.audio.suspended, error=compile_error)
                 self._set_load(compiled_variants=len(getattr(self.renderer, '_variants', ())))
             modes = self.tracker.document['modes']
             if patch.display.name != modes['program']:
@@ -859,9 +904,14 @@ class Session:
         """The displayed output as RGB; ``size`` scales it on the GPU first (GL renderer)."""
         from .backend_np import to_uint8
         r = self.renderer
-        if size is not None and hasattr(r, 'read_scaled'):
-            return r.read_scaled(size)
-        return r.read() if hasattr(r, 'read') else to_uint8(r.displayed(), r.patch.composite_alpha)
+        started = time.monotonic() if getattr(self, 'diagnostics', None) is not None else None
+        try:
+            if size is not None and hasattr(r, 'read_scaled'):
+                return r.read_scaled(size)
+            return r.read() if hasattr(r, 'read') else to_uint8(r.displayed(), r.patch.composite_alpha)
+        finally:
+            if started is not None:
+                self._diagnostic_readback_ms += (time.monotonic() - started) * 1000
 
     # While Program shows fullscreen, the editor's monitor is a confidence preview: small and at
     # most this rate, so its readback and JPEG never compete with the frames going to the screen.
@@ -1055,6 +1105,11 @@ class Session:
         # A Rack module's bus window arrives at least once a second: it neither clears Studio's
         # error nor shows its own refusal there, and its reply is bus-io.md's plain text.
         window = action == 'tracker_transport' and 'bus' in data
+        diagnostic_action = action in ('load', 'save', 'restart', 'tracker_score', 'tracker_transport',
+                                       'jack_audio', 'record', '_recording_finished', 'pause', 'native_output') and not window
+        if self.diagnostics is not None and diagnostic_action:
+            self.diagnostics.event('command_begin', action=action, received=received)
+        command_error = ''
         try:
             value = self._handle(action, data)
             if action not in ('source', 'check', 'presets', 'devices', 'mouse', '_recording_finished') and not window:
@@ -1065,9 +1120,13 @@ class Session:
                 result.put(ValueError(str(exc)))
                 return
             self.error = ''.join(traceback.format_exception_only(type(exc), exc)).strip()
+            command_error = self.error
             if action in ('load', 'save', 'restart', 'connections'):
                 self.notice = 'Edit rejected. Previous patch retained.'
             result.put(ValueError(self.error))
+        if self.diagnostics is not None and diagnostic_action:
+            self.diagnostics.event('command_end', action=action, error=command_error,
+                                   audio_suspended=self.audio.suspended, suspensions=self.audio.suspensions)
         if action in VISIBLE:
             self.latency_pending.append(dict(action=action, mark=mark, received=received, applied=time.monotonic()))
 
@@ -1113,6 +1172,8 @@ class Session:
             self._publish_playhead(now, playing=True)
             render_started = time.monotonic()
             self.tracker.apply(self.renderer.patch, self.clock_time)
+            if self.diagnostics is not None:
+                self._diagnostic_scene()
             with query if query is not None else nullcontext():
                 self.renderer.step(self.clock_time)
             self.render_metrics = dict(render_cpu_ms=(time.monotonic() - render_started) * 1000,
@@ -1120,6 +1181,8 @@ class Session:
             return query, True
         except Exception as exc:
             self.error, self.paused = f'Render paused: {type(exc).__name__}: {exc}', True
+            if self.diagnostics is not None:
+                self.diagnostics.event('render_error', error=self.error)
             return query, False
 
     def _readbacks(self, query, shown=None):
@@ -1138,6 +1201,8 @@ class Session:
                 self.recorder.push(self.last_frame, shown, self._frame_wall)
             except Exception as exc:
                 self.error = str(exc)
+                if self.diagnostics is not None:
+                    self.diagnostics.event('recording_error', error=self.error)
                 recording_failed = True
                 recorder, self.recorder = self.recorder, None
                 try:
@@ -1315,8 +1380,64 @@ class Session:
                     self._native_frame()
                 else:
                     self._standard_frame()
+        except BaseException as exc:
+            if self.diagnostics is not None:
+                self.diagnostics.event('session_error', error=f'{type(exc).__name__}: {exc}')
+            raise
         finally:
-            self._shutdown()
+            try:
+                if self.diagnostics is not None:
+                    self.diagnostics.event('shutdown', error=self.error)
+                self._shutdown()
+            finally:
+                if self.diagnostics is not None:
+                    self.diagnostics.close()
+
+    def _diagnostic_scene(self):
+        """Mark crossfade membership changes, not every intermediate weight."""
+        if self.diagnostics.disabled:
+            return
+        patch = self.renderer.patch
+        weights = patch.scene_weights
+        if weights is None:
+            # An undriven output shows its first declared scene.
+            first = {}
+            for name, value in patch.scenes.items():
+                first.setdefault(value[0], name)
+            weights = {name: 1. for name in first.values()}
+        active = tuple(name for name, weight in weights.items() if weight > 0)
+        if active != self._diagnostic_scenes:
+            self._diagnostic_scenes = active
+            self.diagnostics.event('scene', active=list(active), weights={k: weights[k] for k in active},
+                                   simulation_time=self.clock_time, beat=self.tracker.beat(self.clock_time))
+
+    def _diagnostic_frame(self, started, now, rendered, missed=0):
+        """Only called when opted in; JSONL output/statistics happen on the writer."""
+        diag, audio, recorder = self.diagnostics, self.audio, self.recorder
+        if diag.disabled:
+            return
+        state = (self.paused, self.tracker.enabled, recorder is not None, audio.running,
+                 audio.suspended, audio.samplerate, audio.blocksize, audio.config['lead_blocks'],
+                 self.error, audio.error, self.preview_error, self.fps)
+        if state != self._diagnostic_state:
+            self._diagnostic_state = state
+            diag.event('state', paused=self.paused, tracker_enabled=self.tracker.enabled,
+                       recording=recorder is not None, audio_active=audio.running,
+                       audio_suspended=audio.suspended, samplerate=audio.samplerate,
+                       blocksize=audio.blocksize, lead_blocks=audio.config['lead_blocks'],
+                       target_fps=self.fps, error=self.error, audio_error=audio.error, preview_error=self.preview_error)
+        if self.tracker.revision != self._diagnostic_revision:
+            self._diagnostic_revision = self.tracker.revision
+            # Rare score changes, never per frame. Retain identity, not the score body.
+            score = self.tracker.document
+            diag.event('score', revision=self.tracker.revision, seed=score.get('seed'),
+                       sha256=digest(json.dumps(score, sort_keys=True, separators=(',', ':'))))
+        if rendered:
+            diag.frame(now, self.clock_time, self.tracker_state.get('beat', 0),
+                       self.render_metrics.get('render_cpu_ms', 0), self._diagnostic_readback_ms,
+                       (time.monotonic() - started) * 1000, self.fps,
+                       len(recorder.q.queue) if recorder is not None else 0,
+                       recorder.repeated_frames if recorder is not None else 0, audio, missed)
 
     def _standard_frame(self):
         """One command at most, one frame, then sleep to the preview rate."""
@@ -1331,12 +1452,16 @@ class Session:
         if not self.running:
             return
         now = time.monotonic()
+        rendered = False
+        self._diagnostic_readback_ms = 0.
         if self.renderer:
             query, rendered = self._step(now)
             self._frames += rendered
             self._settle_latency(time.monotonic() if rendered else None)
             self._readbacks(query)
         self._housekeeping(now)
+        if self.diagnostics is not None:
+            self._diagnostic_frame(started, now, rendered)
         time.sleep(max(.001, 1 / self.fps - (time.monotonic() - started)))
 
     def _native_frame(self):
@@ -1360,6 +1485,7 @@ class Session:
                 self._publish()
             return
         now, start_at = time.monotonic(), self._start_at
+        self._diagnostic_readback_ms = 0.
         query, rendered = (None, False)
         frame = None
         if self.renderer:
@@ -1382,6 +1508,8 @@ class Session:
         if self.renderer:
             self._readbacks(query, shown=flipped)
         self._housekeeping(now)
+        if self.diagnostics is not None:
+            self._diagnostic_frame(min(start_at, now), now, rendered, missed)
         if self.native.active:
             self._start_at = self.pacer.start_at(flipped, self.native.period)
 
@@ -1581,14 +1709,14 @@ def withdraw(path, token):
 
 
 def serve(root='.', patch=None, backend='auto', size=(640, 360), fps=30, port=8765, open_browser=True, tracker=False, cv=None,
-          native=None, edit_delay_ms=None, trace=None):
+          native=None, edit_delay_ms=None, trace=None, diagnostics=None):
     root = Path(root).resolve()
     # Match CLI patch execution: relative asset paths belong to the project.
     os.chdir(root)
     try:
         # The patch loads after the server is up, so GET /api/status can follow a long load.
         session = Session(root, None, backend, size, fps, cv=cv, native=native, edit_delay_ms=edit_delay_ms, trace=trace,
-                          restore_audio=False)
+                          restore_audio=False, diagnostics=diagnostics)
     except BaseException:
         if cv is not None:
             cv.close()
