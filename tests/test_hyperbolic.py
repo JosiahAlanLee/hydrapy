@@ -175,3 +175,45 @@ def test_gl_matches_numpy(gl_context):
             keep = (cand[..., 3] > 0.5) & (b[..., 3] > 0.5)
             diffs.append(np.abs(cand[..., :3] - b[..., :3])[keep].mean())
         assert min(diffs) < 0.03, diffs
+
+
+@pytest.mark.parametrize("p,q", [(3, 3), (4, 4), (1, 1), (float('nan'), 5)])
+def test_static_invalid_groups_raise_at_construction(p, q):
+    with pytest.raises(ValueError, match=r"hyperkaleid\(.*1/p \+ 1/q < 1/2"):
+        osc().hyperkaleid(p, q)
+
+
+@pytest.mark.parametrize("axis", ["p", "q"])
+@pytest.mark.parametrize("model", [0, 1])
+def test_signal_groups_fall_back_and_preserve_valid_pairs(axis, model, gl_context):
+    pic = osc(4, 0, 0.3)
+    values = [3, 4, 5, 0, -3, float('nan'), float('inf'), 7]
+    pair = {"p": 4, "q": 4}
+    pair[axis] = lambda ctx: values[int(ctx.time)]
+    chain = pic.hyperkaleid(**pair, model=model)
+    renderer = reference = None
+    if gl_context is not None:
+        from hydrapy.backend_gl import GLRenderer
+        patch, ref_patch = Patch(size=(64, 36)), Patch(size=(64, 36))
+        chain.out(patch.o0, patch=patch)
+        pic.out(ref_patch.o0, patch=ref_patch)
+        renderer = GLRenderer(patch, size=(64, 36), ctx=gl_context)
+        reference = GLRenderer(ref_patch, size=(64, 36), ctx=gl_context)
+    try:
+        for t, value in enumerate(values):
+            valid = np.isfinite(value) and value > 4
+            expected = pic.hyperkaleid(**{axis: value, 'q' if axis == 'p' else 'p': 4}, model=model) if valid else pic
+            actual = chain.render(t, size=(64, 36))
+            assert np.isfinite(actual).all()
+            np.testing.assert_array_equal(actual, expected.render(t, size=(64, 36)))
+            if renderer is not None:
+                renderer.step(float(t))
+                gl_pixels = renderer.read_rgba()
+                assert np.isfinite(gl_pixels).all()
+                if not valid:
+                    reference.step(float(t))
+                    np.testing.assert_array_equal(gl_pixels, reference.read_rgba())
+    finally:
+        if renderer is not None:
+            renderer.release()
+            reference.release()

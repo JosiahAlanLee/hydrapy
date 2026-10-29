@@ -90,7 +90,21 @@ def _mobius(x, y, shift, direction, turn):
     return rx * c - ry * s, rx * s + ry * c
 
 
+def _valid_group(p, q):
+    return (math.isfinite(p) and math.isfinite(q) and p > 2 and q > 2
+            and (p - 2) * (q - 2) > 4)
+
+
+def _validate_hyperkaleid(args):
+    p, q = args[:2]
+    if isinstance(p, (int, float)) and isinstance(q, (int, float)) and not _valid_group(p, q):
+        raise ValueError(f"hyperkaleid({p:g}, {q:g}): (2,p,q) needs 1/p + 1/q < 1/2 "
+                         "with finite p,q > 2; try (4, 5) or (3, 7)")
+
+
 def _np_hyperkaleid(st, p, q, shift, direction, turn, model, zoom, env):
+    if not _valid_group(float(p), float(q)):
+        return st
     asp = _asp(env)
     alpha, rho_c, x0, r, rho_b = triangle(float(p), float(q))
     x, y = _to_disk(st, float(model), asp)
@@ -169,15 +183,21 @@ register(Op("hyperkaleid", "coord",
              F("direction", 0, doc="radians"), F("turn", 0, doc="radians, about the centre"),
              F("model", 0, scalar=True, doc="0 Poincaré disk, 1 the band"),
              F("zoom", 1, doc="1 fits the fundamental triangle to the frame's half height")],
-            np=_np_hyperkaleid, glsl_helpers=_HELPERS,
+            np=_np_hyperkaleid, glsl_helpers=_HELPERS, validate=_validate_hyperkaleid,
             doc="Hyperbolic kaleidoscope: fold the frame into the fundamental triangle of the (2, p, q) triangle "
                 "group, so what the chain draws there tiles the Poincaré disk (model 0) or the band (model 1) "
                 "like a Circle Limit print; hyperbolic when (p-2)(q-2) > 4, and q >= 100 puts the corners on "
                 "the boundary (p=3 is the modular group). `shift`/`direction`/`turn` move the tiling by an "
                 "isometry, so it flows without a seam. Outside the disk the tiling is inverted; `.mult(hyperfade())` "
                 "fades the picture to black at the boundary. The triangle read is the wedge from the centre to the top "
-                "edge between angles 0 and 180/p degrees.",
-            glsl=ASP + _TRIANGLE + """
+                "edge between angles 0 and 180/p degrees. Invalid signal-driven p or q falls back to the input picture "
+                "in the same pass. `zoom` scales the source wedge after folding; it is not an output zoom. Frame the "
+                "output after the fold. In the band model, hyperfade is radial in the mapped disk, so it also fades the "
+                "band's ends.",
+            glsl="""
+  if (!(p > 2.0 && q > 2.0 && p <= 3.402823466e38 && q <= 3.402823466e38
+        && (p - 2.0) * (q - 2.0) > 4.0)) return _st;
+""" + ASP + _TRIANGLE + """
   vec2 z = _hyp_mobius(_hyp_to_disk(_st, model, asp), shift, direction, turn);
   float rr = dot(z, z);
   if (rr >= 1.0) z /= max(rr, 1e-12);
