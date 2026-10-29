@@ -76,6 +76,41 @@ backend continues when the controller closes and is independent of browser
 Sound. Pause silences both audio pairs. A musical seek clears queued Breaks
 events and tails; it leaves the renderer/Soundtrack timeline intact.
 
+## Live input for audio analysis
+
+A patch can analyse audio arriving over JACK, such as Rack's mix, with `Audio(jack='mix')`
+(or `Audio.live('mix')`):
+
+```python
+bands = Audio.live('mix')            # Studio's input port HydraPy:mix
+osc(10, .1, bands.fft[0]).out()
+```
+
+While Studio's JACK audio is enabled, each port name a patch declares becomes an input
+port on Studio's own `HydraPy` client, beside the four outputs. Every analyser naming it is
+fed, at the server's sample rate. Connect Rack's mix (or anything) to it in the patchbay.
+The process callback only copies each period into a fixed ring. The analysis (FFT, bands,
+`vol`, `flux`) runs on the render thread from the ring's newest samples. A port that the
+reloaded patch still declares keeps its connections; a port it no longer declares is
+removed. Port names are 1–32 letters, digits, `_` or `-`, and may not be an output's name.
+With JACK audio off, or outside Studio, such an analyser hears silence; the load notice
+says when a patch listens and JACK audio is off. The panel's state (`audio.inputs` in
+`/api/tracker` and `/api/status`) counts each port's frames received. Prefer this to a
+JACK client written in the patch: that client is not paused around a load (below), so a
+long compile can still get it dropped.
+
+## Long loads
+
+Loading a patch runs Python and compiles shaders while holding the GIL, for seconds with a
+big patch (24 scenes and their Banks, say). A Python process callback can't run meanwhile,
+and JACK drops a client that misses its timeout (500 ms by default). So Studio deactivates
+its JACK client for the load and reactivates it after. While the patch loads, its ports are
+out of the graph and silent; when it is back, Studio remakes every connection the ports
+had. The same happens around a score edit that adds crossfades still to compile. Score
+edits with nothing new to compile leave the client alone. `audio.suspended` and
+`audio.suspensions` in the panel's state show it. `jackd -t` no longer needs raising for
+Studio's sake.
+
 ## Timing and levels
 
 Audio is prepared by a worker against JACK sample positions, then copied in
@@ -153,8 +188,11 @@ PCM transport tests do not establish a bit-perfect physical S/PDIF route.
 `tests/test_studio_audio.py` checks scheduling/chunk invariance, pause/seek,
 channel isolation, mono duplication and reconnect behavior with simulated
 callbacks. `tests/test_output_settings.py` checks real encoded words and saved
-settings/rollback. The Chromium suite checks the actual controls. These do not
-require JACK. To run the real four-channel loopback against a running server:
+settings/rollback. `tests/test_studio_live.py` checks the live input ports, the
+deactivation around a slow load and its reconnections, and the recording timestamps with
+a simulated client. The Chromium suite checks the actual controls. These do not
+require JACK. To run the real four-channel loopback, the live input, and a client
+that survives holding the GIL past JACK's timeout, against a running server:
 
 ```sh
 HYDRAPY_JACK_TESTS=1 python -m pytest -q -s tests/test_studio_jack.py

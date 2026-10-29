@@ -201,6 +201,8 @@ details[open] > summary { color: var(--mint); border-color: #6f8d77; background:
 #polarityControls select { width: 100%; }
 #polarityStatus { color: #efc48d; }
 
+.route-notice { margin: 8px 0 0; padding: 6px 8px; border-left: 2px solid #e0a040; color: #efc48d; font-size: 11px; line-height: 1.45; }
+.route-notice[hidden] { display: none; }
 .jack-settings { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 10px; }
 .jack-settings summary { font-size: 11px; }
 .jack-settings > button { width: 100%; margin-top: 10px; }

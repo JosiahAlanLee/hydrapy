@@ -55,7 +55,7 @@ def recording_output(tmp_path, monkeypatch):
             self.finishing, self.finished = threading.Event(), None   # set `finished` to hold close()
             recordings.append(self)
 
-        def push(self, frame, at=None):
+        def push(self, frame, at=None, rendered=None):
             if self.fail.is_set():
                 raise RuntimeError('test encoder failed')
             self.frames.append(frame.copy())
