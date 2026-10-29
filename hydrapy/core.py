@@ -49,6 +49,8 @@ class Op:
     identity: Optional[tuple] = None    # (input name, value): the op does nothing at that value (see glsl.gates)
     mipmaps: bool = False          # texture op that reads its input's mip levels: _texLod(_tex, uv, level)
 
+    validate: Optional[Callable] = None  # construction-time validation of normalized arguments
+
     @property
     def returns(self) -> str:
         return {"src": "vec4", "coord": "vec2", "color": "vec4", "combine": "vec4",
@@ -443,6 +445,8 @@ def normalize_args(op: Op, args: tuple, kwargs: dict) -> list:
     if kwargs:
         bad = ", ".join(kwargs)
         raise TypeError(f"{op.name}() got unexpected keyword argument(s): {bad}")
+    if op.validate is not None:
+        op.validate(out)
     return out
 
 
