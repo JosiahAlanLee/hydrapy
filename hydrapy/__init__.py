@@ -37,6 +37,7 @@ from . import ops_fields as _ops_fields  # noqa: F401  (orbitVoronoi, signed dis
 from . import ops_material as _ops_material  # noqa: F401  (normals, lighting, reflections)
 from . import ops_phase as _ops_phase  # noqa: F401  (independent pixel oscillators)
 from . import ops_automata as _ops_automata  # noqa: F401  (ca: Life-like rules per pixel, asynchronous)
+from . import ops_hyperbolic as _ops_hyperbolic  # noqa: F401  (hyperkaleid/mobius/hyperfade: the Poincaré disk and band)
 from .ops_automata import CA_MODES, CA_RULES
 from .core import (REGISTRY, Bank, Camera, Chain, Ctx, External, FrameSource, Image, Input, Op, Output, Patch, Texture, Transform, Video,
                    default_patch, normalize_args, reset_patch)
