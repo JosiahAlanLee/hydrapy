@@ -43,6 +43,7 @@ from . import ops_namagiri as _ops_namagiri  # noqa: F401  (Rogers-Ramanujan con
 from . import ops_quasicrystal as _ops_quasicrystal  # noqa: F401
 from . import ops_schottky as _ops_schottky  # noqa: F401
 from . import ops_theta as _ops_theta  # noqa: F401
+from . import ops_mocktheta as _ops_mocktheta  # noqa: F401
 from . import ops_coxeter as _ops_coxeter  # noqa: F401  (Euclidean reflection groups)
 from . import ops_hyperbolic as _ops_hyperbolic  # noqa: F401  (hyperkaleid/mobius/hyperfade: the Poincaré disk and band)
 from .ops_automata import CA_MODES, CA_RULES
