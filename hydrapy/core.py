@@ -409,11 +409,17 @@ def _fmt_arg(a) -> str:
 
 
 def _as_chain(x) -> "Chain":
+    """A number or a scalar signal becomes a flat grey ``solid(x, x, x, 1)``, so ``pattern * .5`` and
+    ``pattern * Param(...)`` scale a picture the same way (replacing a literal with a live control used to fail)."""
+    from .signals import Signal
     if isinstance(x, Chain):
         return x
     if isinstance(x, (int, float)):
         return Chain([Transform(REGISTRY["solid"], [float(x), float(x), float(x), 1.0])])
-    raise TypeError(f"cannot combine a chain with {type(x).__name__}")
+    if isinstance(x, Signal):
+        return Chain([Transform(REGISTRY["solid"], [x, x, x, 1.0])])
+    raise TypeError(f"cannot combine a chain with {type(x).__name__}: use a number, a scalar signal "
+                    "(Param, Lfo, ...), or a chain such as solid(v, v, v)")
 
 
 # ---------------------------------------------------------------------------
@@ -542,6 +548,30 @@ class Patch:
 _default_patch: Optional[Patch] = None
 _isolate_patch_outputs = False  # CLI loads must not reuse a running patch's outputs.
 GLOBAL_OUTPUTS = [Output(i) for i in range(4)]   # the o0..o3 exported by hydrapy
+
+
+_control_owners: list = []   # patches that Params with no patch= register on, innermost last (see owning_controls)
+
+
+def control_patch() -> "Patch":
+    """Where a Param with no ``patch=`` registers: the innermost ``owning_controls`` patch, else the default."""
+    return _control_owners[-1] if _control_owners else default_patch()
+
+
+class owning_controls:
+    """``with owning_controls(patch):`` Params created inside, without ``patch=``, belong to ``patch``.
+    ``scene(name, patch=p)`` builds its chain inside one, so a scene's controls land on its own patch."""
+
+    def __init__(self, patch):
+        self.patch = patch
+
+    def __enter__(self):
+        _control_owners.append(self.patch)
+        return self.patch
+
+    def __exit__(self, *exc):
+        _control_owners.pop()
+        return False
 
 
 def default_patch() -> Patch:
