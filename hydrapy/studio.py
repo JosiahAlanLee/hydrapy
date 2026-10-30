@@ -638,6 +638,19 @@ class Session:
         if not self.renderer:
             raise ValueError('Load a patch first')
         patch = self.renderer.patch
+        if action == 'prewarm_take':
+            # Before a take: compile every variant a rehearsal of the score reaches, then (``hold``, the
+            # default) compile none during it. {"release": true} returns to compiling after LIVE_SETTLE.
+            if not hasattr(self.renderer, 'prewarm_take'):
+                return dict(compiled=0, hold=False)          # the CPU renderer has no variants
+            if data.get('release'):
+                self.renderer.hold = False
+                return dict(compiled=0, hold=False)
+            with self.audio.held('take compiles'):
+                compiled = self.renderer.prewarm_take(self.tracker.document, data.get('seconds'),
+                                                      hold=data.get('hold', True))
+            self._set_load(compiled_variants=len(self.renderer._variants))
+            return dict(compiled=compiled, hold=self.renderer.hold)
         if action == 'tracker_score':
             before = self.tracker.document['modes']['program']
             first = not self.score_loaded
@@ -1106,7 +1119,8 @@ class Session:
         # error nor shows its own refusal there, and its reply is bus-io.md's plain text.
         window = action == 'tracker_transport' and 'bus' in data
         diagnostic_action = action in ('load', 'save', 'restart', 'tracker_score', 'tracker_transport',
-                                       'jack_audio', 'record', '_recording_finished', 'pause', 'native_output') and not window
+                                       'jack_audio', 'record', '_recording_finished', 'pause', 'native_output',
+                                       'prewarm_take') and not window
         if self.diagnostics is not None and diagnostic_action:
             self.diagnostics.event('command_begin', action=action, received=received)
         command_error = ''

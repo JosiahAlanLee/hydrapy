@@ -16,7 +16,7 @@ from typing import Optional
 
 import numpy as np
 
-from .core import Camera, Ctx, DelayRef, FrameSource, Image, Output, Patch, RenderClock, Video, default_patch
+from .core import Camera, Chain, Ctx, DelayRef, FrameSource, Image, Output, Patch, RenderClock, Video, default_patch
 from .glsl import VERTEX_DESKTOP, TmpRef, compile_output, compile_patch, gates, to_desktop
 from .signals import as_signal
 
@@ -31,6 +31,26 @@ def _create_context(compute=False):
             except Exception as exc:
                 error = exc
     raise error
+
+
+def _predictable(sig, score=False, depth=0) -> bool:
+    """Can ``sig`` be evaluated at any time, ahead of playback, without side effects? hydrapy's own
+    time-driven signals (and Fn, which exports already sample at arbitrary times) can; audio analysis,
+    live inputs, probes and unknown subclasses can't. ``score``: also the tracker's lanes, scene weights
+    and controls, which a rehearsal of the score sets (prewarm_take)."""
+    from .controls import Param
+    from .signals import Fft, Signal
+    if not isinstance(sig, Signal):
+        return True
+    mod = type(sig).__module__
+    if (depth > 40 or isinstance(sig, Fft) or (isinstance(sig, Param) and not score) or not mod.startswith("hydrapy.")
+            or mod == "hydrapy.live" or (mod == "hydrapy.scenes" and not score)):   # scenes follow the tracker
+        return False
+    for v in vars(sig).values():
+        for item in (v if isinstance(v, (list, tuple)) else (v,)):
+            if isinstance(item, Signal) and not _predictable(item, score, depth + 1):
+                return False
+    return True
 
 
 class _MipTarget(str):
@@ -79,9 +99,12 @@ class GLRenderer:
         # identity this frame (an amount at 0, a layer faded out): see glsl.gates. Variants are cached by
         # that set; the full program is built now so shader errors surface at once.
         self._gates = {prog.output.name: gates(prog.output.chain) for prog in self.programs}
+        self._chains = {prog.output.name: prog.output.chain for prog in self.programs}
+        self._normals: dict = {}             # output -> idle set -> its key (_normal)
         self._variants: dict = {}
         self.specialise = True
         self.settle = 0                      # frames a new idle set must hold before its variant compiles (live uses 12)
+        self.hold = False                    # compile no new variants (a planned take: see prewarm_take)
         self._pending, self._active = {}, {}
         for prog in self.programs:
             self._variants[(prog.output.name, None)] = self._build(prog)
@@ -145,9 +168,34 @@ class GLRenderer:
                 self.tmps[key] = self._fbo(self._osize(prog.output.name))   # a variant compiled after _alloc()
         return passes
 
-    def _idle(self, name, value):
-        return frozenset(id(tr) for tr, v, ident in self._gates[name]
-                         if (float(v) if isinstance(v, (int, float)) else value(v)) == ident) or None
+    def _idle(self, name, value, raw=False):
+        """The variant key for ``name`` this frame: the ids of its transforms at their identity value,
+        less those inside a skipped transform's arguments (a faded-out scene's own gates), which are
+        never compiled either way. ``raw``: all of them, for testing which compiled variants are valid."""
+        idle = frozenset(id(tr) for tr, v, ident in self._gates[name]
+                         if (float(v) if isinstance(v, (int, float)) else value(v)) == ident)
+        return (idle if raw else self._normal(name, idle)) or None
+
+    def _normal(self, name, idle):
+        """``idle`` less the transforms reachable only through one of its own (see ``_idle``)."""
+        if not idle:
+            return idle
+        known = self._normals.setdefault(name, {})
+        if idle in known:
+            return known[idle]
+        if len(known) > 512:
+            known.clear()
+        reached, seen, todo = set(), set(), [self._chains[name]]
+        while todo:
+            ch = todo.pop()
+            if id(ch) not in seen:
+                seen.add(id(ch))
+                for tr in ch.transforms:
+                    reached.add(id(tr))
+                    if id(tr) not in idle:
+                        todo.extend(a for a in tr.args if isinstance(a, Chain))
+        known[idle] = idle & reached
+        return known[idle]
 
     def _compiled(self, prog, key):
         if (prog.output.name, key) not in self._variants:
@@ -164,15 +212,16 @@ class GLRenderer:
         frame never costs a compile, and a live set never stalls on a passing combination."""
         name = prog.output.name
         key = self._idle(name, value) if self.specialise else None
-        if key is not None and (name, key) not in self._variants and self.settle > 0:
+        if key is not None and (name, key) not in self._variants and (self.settle > 0 or self.hold):
             seen, count = self._pending.get(name, (None, 0))
             count = count + 1 if seen == key else 1
             self._pending[name] = (key, count)
-            if count < self.settle:
+            if count < self.settle or self.hold:
                 # Any compiled variant skipping only transforms that are idle now draws the same
                 # image: prefer the one that skips most (a precompiled scene, say) over the full
                 # program, which would draw every scene at once.
-                usable = max((k for n, k in self._variants if n == name and k is not None and k <= key),
+                idle = self._idle(name, value, raw=True)
+                usable = max((k for n, k in self._variants if n == name and k is not None and k <= idle),
                              key=len, default=None)
                 self._active[name] = usable
                 return self._variants[(name, usable)]
@@ -226,30 +275,12 @@ class GLRenderer:
         """Compile, now, the variants the score will need at ``times`` (seconds), so a render or a set
         never compiles mid-way. Only gates driven by signals that can be evaluated at any time without
         side effects are predicted (audio analysis and live inputs are not); returns the number compiled."""
-        from .controls import Param
-        from .signals import Fft, Signal
-
-        def pure(sig, depth=0):
-            # predictable: hydrapy's own time-driven signals (and Fn, which exports already sample at
-            # arbitrary times); not audio analysis, controls, live inputs, probes or unknown subclasses
-            if not isinstance(sig, Signal):
-                return True
-            mod = type(sig).__module__
-            if (depth > 40 or isinstance(sig, (Fft, Param)) or not mod.startswith("hydrapy.")
-                    or mod in ("hydrapy.live", "hydrapy.scenes")):   # scenes follow the tracker, not time
-                return False
-            for v in vars(sig).values():
-                for item in (v if isinstance(v, (list, tuple)) else (v,)):
-                    if isinstance(item, Signal) and not pure(item, depth + 1):
-                        return False
-            return True
-
         before = len(self._variants)
         for prog in self.programs:
             name = prog.output.name
             if not self.specialise or not self._gates[name]:
                 continue
-            if not all(isinstance(v, (int, float)) or pure(v) for _, v, _ in self._gates[name]):
+            if not all(isinstance(v, (int, float)) or _predictable(v) for _, v, _ in self._gates[name]):
                 continue
             seen = set()
             for t in times:
@@ -262,6 +293,64 @@ class GLRenderer:
                 if key not in seen:
                     seen.add(key)
                     self._compiled(prog, key)
+        return len(self._variants) - before
+
+    def prewarm_take(self, document, seconds=None, hold=True) -> int:
+        """Rehearse the score ``document`` for ``seconds`` (default: one cycle) before a take, and compile
+        every variant it reaches: its scenes, crossfades and the gates its lanes, controls and clock drive.
+
+        The rehearsal plays its own tracker; the patch's scene weights, lane values and controls are put
+        back afterwards. Gates it can't predict (audio analysis, live inputs) count as active, so their
+        rehearsed variant stays valid whatever they do. ``hold`` then stops compiling for the take: a new
+        set of idle transforms draws with the most specialised compiled variant that is valid (the same
+        image to float rounding, at some GPU cost) instead of compiling mid-take; set ``hold = False`` to return to
+        ``settle``. Returns the number compiled."""
+        import copy
+        from .studio_tracker import Tracker, cycle_beats
+        patch = self.patch
+        tracker = Tracker(copy.deepcopy(document))
+        tracker.seek(0., 0.)
+        tracker.enabled = True
+        if seconds is None:
+            seconds = cycle_beats(tracker.document) * 60 / tracker.document['bpm']
+        saved = (patch.scene_weights, patch.tracker_frame, dict(patch.tracker_ahead),
+                 {name: c.base for name, c in patch.controls.items()})
+        held, known, before = {}, {}, len(self._variants)
+        need = max(1, int(self.settle))       # a set live playback would never compile isn't worth compiling
+        progs = [p for p in self.programs if self.specialise and self._gates[p.output.name]]
+        try:
+            for frame in range(int(round(seconds * self.fps))):
+                t = frame / self.fps
+                tracker.apply(patch, t)
+                ctx = Ctx(time=t, frame=frame, width=self.size[0], height=self.size[1], bpm=patch.bpm,
+                          dt=1.0 / self.fps, fps=self.fps)
+
+                values = {}
+
+                def value(sig, ctx=ctx, values=values):
+                    k = id(sig)
+                    if k not in known:
+                        known[k] = _predictable(sig, score=True)
+                    if not known[k]:
+                        return float('nan')             # unknown: never idle
+                    if k not in values:
+                        v = float(as_signal(sig)(ctx))
+                        values[k] = v if np.isfinite(v) else 0.0
+                    return values[k]
+                for prog in progs:
+                    name = prog.output.name
+                    key = self._idle(name, value)
+                    last, count = held.get(name, (None, 0))
+                    held[name] = (key, count + 1 if key == last else 1)
+                    if held[name][1] == need:
+                        self._compiled(prog, key)
+        finally:
+            patch.scene_weights, patch.tracker_frame = saved[:2]
+            patch.tracker_ahead.clear()
+            patch.tracker_ahead.update(saved[2])
+            for name, base in saved[3].items():
+                patch.controls[name].base = base
+        self.hold = bool(hold)
         return len(self._variants) - before
 
     # -- buffers -----------------------------------------------------------
